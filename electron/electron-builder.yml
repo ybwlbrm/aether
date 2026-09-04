@@ -1,15 +1,15 @@
-appId: com.pacc.app
+﻿appId: com.pacc.app
 productName: Aether
 copyright: Copyright © 2026
 # 版本号从根 package.json 的 version 字段自动读取（electron-builder 25 不支持 yml 根级 version）
 
 directories:
   # 注意：相对路径以运行时 cwd（项目根）为基准；此处用绝对路径保证可复现
-  output: D:/PersonalAICommandCenter/dist_electron
-  buildResources: D:/PersonalAICommandCenter/build
+  output: ./dist_electron
+  buildResources: ./build
 
 # 使用本地已安装的 Electron 二进制（避免打包时从 github 重新下载）
-electronDist: D:/PersonalAICommandCenter/node_modules/electron/dist
+# electronDist: 自动从 node_modules 解析（删除了硬编码路径）
 electronVersion: 43.3.0
 
 files:
@@ -53,7 +53,7 @@ win:
     - target: nsis
       arch:
         - x64
-  icon: ../build/icon.ico
+  icon: ./build/icon.ico
 
 nsis:
   oneClick: false
@@ -61,6 +61,6 @@ nsis:
   createDesktopShortcut: true
   createStartMenuShortcut: true
   shortcutName: Aether
-  installerIcon: ../build/icon.ico
-  uninstallerIcon: ../build/icon.ico
-  installerHeaderIcon: ../build/icon.ico
+  installerIcon: ./build/icon.ico
+  uninstallerIcon: ./build/icon.ico
+  installerHeaderIcon: ./build/icon.ico

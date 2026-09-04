@@ -258,7 +258,11 @@ async function main() {
   // Step 9: 生成 NSIS 安装包
   log('9/9', '生成 NSIS 安装包...');
   try {
-    run('npx electron-builder --config electron/electron-builder.yml --win --x64');
+    // 用命令行参数动态注入当前机器的绝对路径（不依赖 yml 硬编码），
+    // 保证项目被 clone 到任意目录后都能正确打包。
+    const outDir = path.join(ROOT, 'dist_electron').replace(/\\/g, '/');
+    const buildRes = path.join(ROOT, 'build').replace(/\\/g, '/');
+    run(`npx electron-builder --config electron/electron-builder.yml --win --x64 -c.directories.output="${outDir}" -c.directories.buildResources="${buildRes}"`);
     console.log(`\n✅ NSIS 安装包生成完成!`);
     console.log(`   输出目录: ${path.join(ROOT, 'dist_electron')}`);
   } catch (e) {

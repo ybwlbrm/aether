@@ -108,18 +108,93 @@ npm run build:mobile
 # 2. 同步 Capacitor
 npx cap sync android
 
-# 3. 构建签名 APK（需 JDK 21 + Android SDK）
+# 3. 构建 APK（需 JDK 21 + Android SDK）
 cd android
-gradlew.bat assembleRelease
+gradlew.bat assembleRelease   # Windows
+./gradlew assembleRelease     # macOS / Linux
 ```
 
-> APK 签名：首次构建前生成 keystore 并配置 `android/keystore.properties`（参考 `android/app/build.gradle`），或使用 Android Studio 自动签名。
+产物：`android/app/build/outputs/apk/release/app-release.apk`
+
+> **APK 签名（可选但推荐）**：
+> 不配置签名也能构建（产出 unsigned APK，仅用于自测）。若要正式安装分发：
+>
+> ```bash
+> # 1. 生成 keystore（一次性）
+> keytool -genkeypair -v -keystore android/aether-release.jks \
+>   -alias aether -keyalg RSA -keysize 2048 -validity 10000 \
+>   -storepass "YourPassword" -keypass "YourPassword" \
+>   -dname "CN=Aether, OU=Personal, O=Aether, L=Beijing, ST=Beijing, C=CN"
+>
+> # 2. 创建 android/keystore.properties（内容如下）
+> ```
+> `android/keystore.properties`：
+> ```properties
+> storeFile=D:/path/to/your/aether-release.jks
+> storePassword=YourPassword
+> keyAlias=aether
+> keyPassword=YourPassword
+> ```
+> ⚠️ `keystore.properties` 和 `*.jks` 已被 `.gitignore` 排除，**切勿提交到仓库**。
 
 ### 开发模式（热更新）
 
 ```bash
 npm run dev
 ```
+
+---
+
+## 🧑‍💻 从零开始（新手向导）
+
+> 如果你是第一次接触本项目，按这个顺序操作即可。
+
+### 第 1 步：准备环境
+
+| 工具 | 用途 | 下载 |
+|------|------|------|
+| Node.js 20+ | 运行/构建 | https://nodejs.org |
+| Git | 拉取代码 | https://git-scm.com |
+| （可选）JDK 21 | 打包 Android APK | https://adoptium.net |
+
+### 第 2 步：拉取并安装
+
+```bash
+git clone https://github.com/yangjyalexander-ctrl/aether.git
+cd aether
+npm install
+```
+
+> 网络慢的国内用户可设镜像：`npm config set registry https://registry.npmmirror.com`
+
+### 第 3 步：启动
+
+```bash
+npm run build
+npm start
+```
+
+浏览器打开 **http://127.0.0.1:3000**
+
+> Windows 用户也可直接双击 `start.bat`。
+
+### 第 4 步：配置 AI
+
+1. 打开 **设置 → AI Provider**
+2. 点击「添加 AI Provider」
+3. 填入：名称（如 `DeepSeek`）、类型、Base URL（如 `https://api.deepseek.com`）、**你的 API Key**、模型列表
+4. 保存后回到「AI 对话」即可使用
+
+### 常见问题
+
+| 问题 | 解决 |
+|------|------|
+| `npm install` 慢/失败 | 切换国内镜像（见上文） |
+| 启动后页面打不开 | 检查端口 3000 是否被占用，杀进程后重试 |
+| 忘记 API Key 在哪配 | 设置 → AI Provider（不是 .env！Key 走 UI 加密存储） |
+| 打包 Setup 时输出目录不对 | 已修复为动态路径，任何目录 clone 均可打包 |
+| 想换主题 | 设置 → 外观，6 套主题可选 |
+| 数据存在哪 | `data/` 目录（数据库 + 配置），备份整个目录即可迁移 |
 
 ---
 
