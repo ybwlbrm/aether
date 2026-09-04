@@ -1,0 +1,42 @@
+/* ============================================
+   Aether  Global Styles
+   ============================================
+   Entry point: imports all CSS modules
+   ============================================ */
+
+@import './tokens.css';
+@import './themes.css';
+@import './themes/shadcn.css';
+@import './themes/geist.css';
+@import './themes/magic.css';
+@import './themes/origin.css';
+@import './themes/dark-minimal.css';
+@import './themes/light.css';
+@import './base.css';
+@import './components.css';
+
+/* Streamdown 官方要求：让 Tailwind 4 扫描 streamdown 及其插件的 utility 类。
+   @source 必须位于所有 @import 之后，否则会破坏 globals 的 import 展开
+   （实测放开头会让全部样式丢失，CSS 仅剩 654B）。 */
+@source "../../../node_modules/streamdown/dist/*.js";
+@source "../../../node_modules/@streamdown/code/dist/*.js";
+@source "../../../node_modules/@streamdown/cjk/dist/*.js";
+
+/* 
+   CSS Architecture:
+   
+   tokens.css   — Design tokens (colors, spacing, shadows, fonts)
+   themes.css   — Theme variables (dark mode default, light mode)
+   base.css     — Base reset, typography, utilities, animations
+   components.css — Component classes (buttons, cards, inputs, badges)
+*/
+
+/* 无边框 Electron 窗口拖拽区域 — 覆盖顶部 36px，应用可拖动 */
+.app-drag-region {
+  position: fixed;
+  top: 0; left: 0; right: 0;
+  height: 36px;
+  z-index: 99999;
+  -webkit-app-region: drag;
+  pointer-events: auto;
+}

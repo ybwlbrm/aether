@@ -1,0 +1,126 @@
+/* ============================================
+   Apple Design System — Unified Tokens
+   ============================================ */
+
+:root {
+  /* ---- Colors ---- */
+  --color-accent: #5e9eff;
+  --color-accent-hover: #7aafff;
+  --color-accent-subtle: rgba(94, 158, 255, 0.12);
+  --color-accent-glow: rgba(80, 140, 255, 0.3);
+  /* accent 背景上的前景色（UI-03：随主题覆盖，保证 WCAG 对比度） */
+  --on-accent: #ffffff;
+  --color-success: #34d399;
+  --color-warning: #fbbf24;
+  --color-danger: #f87171;
+
+  /* ---- Typography ---- */
+  --font-sans: 'Geist Variable', -apple-system, BlinkMacSystemFont, 'Inter', sans-serif;
+  --font-mono: 'SF Mono', 'Fira Code', monospace;
+  --font-page-title: 36px;
+  --font-module-title: 24px;
+  --font-card-title: 18px;
+  --font-base: 15px;
+  --font-sm: 13px;
+  --font-xs: 11px;
+  --font-weight-normal: 400;
+  --font-weight-medium: 500;
+  --font-weight-semibold: 600;
+  --font-weight-bold: 700;
+  --letter-spacing-tight: -0.02em;
+
+  /* ---- 8pt Spacing System ---- */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-10: 40px;
+  --space-12: 48px;
+  --space-14: 56px;
+  --space-16: 64px;
+  --space-20: 80px;
+  --space-24: 96px;
+
+  /* ---- Page Spacing (8pt Grid) ---- */
+  --module-gap: 48px;
+  --submodule-gap: 32px;
+  --card-gap: 24px;
+  --card-padding: 24px;
+  --title-body-gap: 16px;
+  --body-button-gap: 20px;
+  --button-gap: 12px;
+  --icon-text-gap: 12px;
+  --input-toolbar-gap: 20px;
+  --toolbar-card-gap: 32px;
+
+  /* ---- Radius ---- */
+  --radius-xs: 6px;
+  --radius-sm: 10px;
+  --radius-md: 14px;
+  --radius-lg: 18px;
+  --radius-xl: 24px;
+  --radius-2xl: 32px;
+  --radius-full: 9999px;
+
+  /* ---- Glass Card (Unified) — 已迁移到 themes.css 的 --glass-* 变量 ---- */
+  --glass-bg: rgba(255, 255, 255, 0.06);
+
+  /* ---- Button (44px height) ---- */
+  --btn-height: 44px;
+  --btn-padding-x: 24px;
+  --btn-radius: 14px;
+
+  /* ---- Input (48px height) ---- */
+  --input-height: 48px;
+  --input-radius: 16px;
+  --input-padding-x: 16px;
+
+  /* ---- List (56px row height) ---- */
+  --list-row-height: 56px;
+  --list-padding-x: 20px;
+
+  /* ---- Card (120px height) ---- */
+  --card-height: 120px;
+  --card-radius: 24px;
+
+  /* ---- Animation ---- */
+  --anim-duration: 220ms;
+  --anim-curve: cubic-bezier(0.34, 1.56, 0.64, 1);
+  --anim-ease: cubic-bezier(0.25, 0.1, 0.25, 1);
+
+  /* ---- Icon Sizes ---- */
+  --icon-nav: 20px;
+  --icon-btn: 18px;
+  --icon-card: 24px;
+  --icon-settings: 20px;
+  --icon-list: 18px;
+
+  /* ---- Layout ---- */
+  --sidebar-width: 260px;
+  --max-content-width: 1100px;
+
+  /* ---- Z-Index (P1-2: 完整 token scale 替代硬编码) ---- */
+  /* P1-4: Toast 必须高于 Modal，防遮罩层挡住最高优先级提示 */
+  --z-base: 0;
+  --z-dropdown: 1000;
+  --z-sticky: 1100;
+  --z-fixed: 1200;
+  --z-sidebar: 50;
+  --z-command-palette: 1400;
+  --z-modal-backdrop: 1600;
+  --z-modal: 1610;
+  --z-popover: 1500;
+  --z-toast: 1700;          /* ⬆ 高于 modal，确保 Toast 始终可见 */
+  --z-tooltip: 1800;
+
+  /* P1-9 修复：统一 Elevation (Shadow) Scale 替代硬编码 box-shadow */
+  --shadow-xs: 0 1px 2px rgba(0, 0, 0, 0.04);
+  --shadow-sm: 0 2px 8px rgba(0, 0, 0, 0.08);
+  --shadow-md: 0 4px 16px rgba(0, 0, 0, 0.12);
+  --shadow-lg: 0 8px 32px rgba(0, 0, 0, 0.16);
+  --shadow-xl: 0 16px 48px rgba(0, 0, 0, 0.20);
+  --shadow-glow: 0 0 20px rgba(94, 158, 255, 0.25);
+}

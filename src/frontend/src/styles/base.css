@@ -1,0 +1,178 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+@import "shadcn/tailwind.css";
+@import "@fontsource-variable/geist";
+
+@custom-variant dark (&:is(.dark *));
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html { font-size: 15px; -webkit-text-size-adjust: 100%; }
+
+body {
+  font-family: var(--font-sans);
+  font-size: 15px;
+  line-height: 1.5;
+  color: var(--text-primary);
+  background: var(--bg-base);
+  background-image: var(--bg-gradient);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  min-height: 100vh;
+  overflow-x: hidden;
+}
+
+#root { overflow-x: hidden; min-height: 100vh; }
+
+::selection { background: var(--color-accent-subtle); color: var(--text-primary); }
+/* P1-9: 增强 focus-visible — 覆盖所有 button/a/div[role=button] 的键盘导航高亮 */
+:focus-visible { outline: 2px solid var(--color-accent); outline-offset: 2px; border-radius: var(--radius-xs); }
+button:focus-visible, a:focus-visible, [role="button"]:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+}
+/* P1-9: 纯 div 按钮（background:none border:none）也要有焦点反馈 */
+button:not(:disabled):focus-visible, [role="button"]:focus-visible {
+  box-shadow: 0 0 0 3px var(--color-accent-subtle);
+}
+a { color: var(--text-link); text-decoration: none; transition: color 220ms var(--anim-ease); }
+img { max-width: 100%; height: auto; display: block; }
+ul, ol { list-style: none; }
+button { cursor: pointer; border: none; background: none; font-family: inherit; font-size: inherit; color: inherit; }
+
+/* ===== Apple Liquid Glass Sidebar — 定义在 components.css 中 ===== */
+
+/* 自定义背景时页面容器透明 — 露出 Layout 的背景层 */
+[data-custom-bg="true"] {
+  background: transparent !important;
+  background-image: none !important;
+}
+[data-custom-bg="true"] .min-h-screen {
+  background: transparent !important;
+  background-image: none !important;
+}
+
+/* ===== Nav Item ===== */
+.nav-item {
+  height: 44px; /* P1-14: 44px 触控目标 (WCAG 2.5.5) */
+  width: 100%;
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 0 14px;
+  font-size: 14px;
+  font-weight: 400;
+  color: var(--text-secondary);
+  transition: all 0.2s var(--anim-ease);
+  cursor: pointer;
+  background: transparent;
+  border: none;
+  position: relative;
+}
+
+.nav-item:hover {
+  background: var(--sidebar-item-hover);
+  color: var(--text-primary);
+}
+
+.nav-item.active {
+  background: rgba(59, 130, 246, 0.15);
+  color: var(--text-primary);
+  font-weight: 500;
+  box-shadow: inset 3px 0 0 var(--color-accent);
+}
+
+/* ===== Scrollbar ===== */
+::-webkit-scrollbar { width: 4px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--scrollbar-thumb); border-radius: var(--radius-full); }
+::-webkit-scrollbar-thumb:hover { background: var(--scrollbar-thumb-hover); }
+
+/* ===== Apple Gradient Text ===== */
+.gradient-text {
+  background: linear-gradient(90deg, #ffffff, #9ca3af);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+/* ===== Status Dot ===== */
+.status-dot { width: 7px; height: 7px; border-radius: var(--radius-full); display: inline-block; flex-shrink: 0; }
+.status-dot.online { background: var(--status-online); box-shadow: 0 0 6px rgba(52, 211, 153, 0.5); }
+.status-dot.busy { background: var(--status-busy); box-shadow: 0 0 6px rgba(251, 191, 36, 0.5); }
+.status-dot.offline { background: var(--status-offline); }
+
+/* ===== Animations ===== */
+@keyframes fade-in-up { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: translateY(0); } }
+@keyframes scale-in { from { opacity: 0; transform: scale(0.95); } to { opacity: 1; transform: scale(1); } }
+.animate-fade-in-up { animation: fade-in-up 0.5s var(--anim-ease) both; }
+.animate-scale-in { animation: scale-in 0.3s var(--anim-ease) both; }
+
+/* ===== Spinner ===== */
+.spinner { width: 20px; height: 20px; border: 2px solid var(--border-primary); border-top-color: var(--color-accent); border-radius: var(--radius-full); animation: spin 0.6s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+.spinner-sm { width: 14px; height: 14px; border-width: 1.5px; }
+.spin { animation: spin 0.6s linear infinite; display: inline-block; }
+
+/* ===== Hidden ===== */
+.hidden { display: none !important; }
+
+/* ===== Divider ===== */
+.divider { border: none; height: 1px; background: linear-gradient(to right, transparent, var(--border-primary), transparent); }
+
+@theme inline {
+  --font-heading: var(--font-sans);
+  --font-sans: 'Geist Variable', sans-serif;
+  /* shadcn 语义色 → 主题变量（随 6 套 data-theme 切换；修复 OKLCH 硬编码覆盖问题 UI-01） */
+  --color-background: var(--bg-base);
+  --color-foreground: var(--text-primary);
+  --color-card: var(--card-bg);
+  --color-card-foreground: var(--text-primary);
+  --color-popover: var(--bg-elevated);
+  --color-popover-foreground: var(--text-primary);
+  --color-primary: var(--color-accent);
+  --color-primary-foreground: #ffffff;
+  --color-secondary: var(--bg-surface);
+  --color-secondary-foreground: var(--text-primary);
+  --color-muted: var(--bg-surface);
+  --color-muted-foreground: var(--text-secondary);
+  --color-accent: var(--color-accent);
+  --color-accent-foreground: #ffffff;
+  --color-destructive: var(--color-danger);
+  --color-border: var(--border-primary);
+  --color-input: var(--input-bg);
+  --color-ring: var(--color-accent);
+  --color-chart-1: var(--chart-1, var(--color-accent));
+  --color-chart-2: var(--chart-2, var(--color-success));
+  --color-chart-3: var(--chart-3, var(--color-warning));
+  --color-chart-4: var(--chart-4, var(--color-danger));
+  --color-chart-5: var(--chart-5, var(--text-secondary));
+  --color-sidebar: var(--sidebar-bg, var(--bg-surface));
+  --color-sidebar-foreground: var(--text-primary);
+  --color-sidebar-primary: var(--color-accent);
+  --color-sidebar-primary-foreground: #ffffff;
+  --color-sidebar-accent: var(--sidebar-item-active, var(--bg-surface-hover));
+  --color-sidebar-accent-foreground: var(--text-primary);
+  --color-sidebar-border: var(--sidebar-border, var(--border-primary));
+  --color-sidebar-ring: var(--color-accent);
+  --radius-sm: calc(var(--radius) * 0.6);
+  --radius-md: calc(var(--radius) * 0.8);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) * 1.4);
+  --radius-2xl: calc(var(--radius) * 1.8);
+  --radius-3xl: calc(var(--radius) * 2.2);
+  --radius-4xl: calc(var(--radius) * 2.6);
+}
+
+:root { --background: oklch(1 0 0); --foreground: oklch(0.145 0 0); --card: oklch(1 0 0); --card-foreground: oklch(0.145 0 0); --popover: oklch(1 0 0); --popover-foreground: oklch(0.145 0 0); --primary: oklch(0.205 0 0); --primary-foreground: oklch(0.985 0 0); --secondary: oklch(0.97 0 0); --secondary-foreground: oklch(0.205 0 0); --muted: oklch(0.97 0 0); --muted-foreground: oklch(0.556 0 0); --accent: oklch(0.97 0 0); --accent-foreground: oklch(0.205 0 0); --destructive: oklch(0.577 0.245 27.325); --border: oklch(0.922 0 0); --input: oklch(0.922 0 0); --ring: oklch(0.708 0 0); --chart-1: oklch(0.87 0 0); --chart-2: oklch(0.556 0 0); --chart-3: oklch(0.439 0 0); --chart-4: oklch(0.371 0 0); --chart-5: oklch(0.269 0 0); --radius: 0.625rem; --sidebar: oklch(0.985 0 0); --sidebar-foreground: oklch(0.145 0 0); --sidebar-primary: oklch(0.205 0 0); --sidebar-primary-foreground: oklch(0.985 0 0); --sidebar-accent: oklch(0.97 0 0); --sidebar-accent-foreground: oklch(0.205 0 0); --sidebar-border: transparent; --sidebar-ring: oklch(0.708 0 0); }
+
+/* shadcn .dark 块 — 但不覆盖 themes.css 中已定义的主题变量 */
+.dark { --background: oklch(0.145 0 0); --foreground: oklch(0.985 0 0); --card: oklch(0.205 0 0); --card-foreground: oklch(0.985 0 0); --popover: oklch(0.205 0 0); --popover-foreground: oklch(0.985 0 0); --primary: oklch(0.922 0 0); --primary-foreground: oklch(0.205 0 0); --secondary: oklch(0.269 0 0); --secondary-foreground: oklch(0.985 0 0); --muted: oklch(0.269 0 0); --muted-foreground: oklch(0.708 0 0); --accent: oklch(0.269 0 0); --accent-foreground: oklch(0.985 0 0); --destructive: oklch(0.704 0.191 22.216); --ring: oklch(0.556 0 0); --chart-1: oklch(0.87 0 0); --chart-2: oklch(0.556 0 0); --chart-3: oklch(0.439 0 0); --chart-4: oklch(0.371 0 0); --chart-5: oklch(0.269 0 0); }
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50; }
+  body {
+    @apply bg-background text-foreground; }
+  html {
+    @apply font-sans; } }

@@ -1,0 +1,75 @@
+# ============ 依赖 ============
+node_modules/
+
+# ============ 构建产物 ============
+dist/
+dist_electron/
+dist_exe/
+dist_exe_old_*/
+**/dist/
+build/backend-bundle.js
+build/sql-wasm.js
+build/sql-wasm.wasm
+build/sqljs_dist/
+build/lib/
+build/worker.js
+build/static/
+*.tsbuildinfo
+tsconfig.tsbuildinfo
+
+# ============ 本地数据（绝不提交） ============
+data/
+**/data/
+*.db
+*.sqlite
+*.sqlite3
+*.db-journal
+chat_history.json
+memory.json
+projects.json
+settings.json
+workspace/
+
+# ============ 敏感凭证 ============
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.keystore
+*.jks
+keystore.properties
+.encryption_key*
+supabase-fix-rls.sql
+supabase-schema.sql
+
+# ============ 日志 ============
+*.log
+server_stdout.txt
+server_stderr.txt
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# ============ Android 构建 ============
+android/**/build/
+android/app/build/
+android/.gradle/
+android/capacitor-cordova-android-plugins/build/
+android/local.properties
+android/app/src/main/assets/public/
+
+# ============ 系统文件 ============
+.DS_Store
+Thumbs.db
+*.swp
+.idea/
+.vscode/
+*.suo
+*.user
+
+# ============ 其他 ============
+__pycache__/
+*.pyc
+.omo/
+qa/

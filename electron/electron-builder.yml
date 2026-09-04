@@ -1,0 +1,66 @@
+appId: com.pacc.app
+productName: Aether
+copyright: Copyright © 2026
+# 版本号从根 package.json 的 version 字段自动读取（electron-builder 25 不支持 yml 根级 version）
+
+directories:
+  # 注意：相对路径以运行时 cwd（项目根）为基准；此处用绝对路径保证可复现
+  output: D:/PersonalAICommandCenter/dist_electron
+  buildResources: D:/PersonalAICommandCenter/build
+
+# 使用本地已安装的 Electron 二进制（避免打包时从 github 重新下载）
+electronDist: D:/PersonalAICommandCenter/node_modules/electron/dist
+electronVersion: 43.3.0
+
+files:
+  - electron/main.js
+  - electron/preload.js
+  - build/backend-bundle.js
+  - build/sql-wasm.wasm
+  - build/sql-wasm.js
+  - build/sql.js-package.json
+  - build/lib/**/*
+  - build/worker.js
+  - build/static/**/*
+  - src/frontend/dist/**/*
+  - node_modules/sql.js/**/*
+  - node_modules/@napi-rs/canvas/**/*
+  - node_modules/@napi-rs/canvas-win32-x64-msvc/**/*
+  - node_modules/sharp/**/*
+  - node_modules/@img/**/*
+  - node_modules/color/**/*
+  - node_modules/color-string/**/*
+  - node_modules/color-convert/**/*
+  - node_modules/color-name/**/*
+  - node_modules/semver/**/*
+  - node_modules/detect-libc/**/*
+  - node_modules/simple-swizzle/**/*
+  - node_modules/is-arrayish/**/*
+  - node_modules/playwright/**/*
+  - node_modules/playwright-core/**/*
+  - node_modules/chromium-bidi/**/*
+  - node_modules/graceful-fs/**/*
+  - package.json
+
+asar: true
+compression: maximum # P2-10: 压缩安装包 (原 store 不压缩 ~350MB)
+removePackageScripts: true
+npmRebuild: false
+buildDependenciesFromSource: false
+
+win:
+  target:
+    - target: nsis
+      arch:
+        - x64
+  icon: ../build/icon.ico
+
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: Aether
+  installerIcon: ../build/icon.ico
+  uninstallerIcon: ../build/icon.ico
+  installerHeaderIcon: ../build/icon.ico

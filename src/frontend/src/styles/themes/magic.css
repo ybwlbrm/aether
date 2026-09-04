@@ -1,0 +1,55 @@
+/* Magic UI 风格主题 — 渐变丰富，光效明显 */
+[data-theme="magic"] {
+  --bg-base: #0a0a0f;
+  --bg-gradient: radial-gradient(ellipse at 50% 0%, #1a1a2e, #0a0a0f 70%);
+  --bg-surface: rgba(255, 255, 255, 0.04);
+  --bg-surface-hover: rgba(167, 139, 250, 0.08);
+  --bg-elevated: rgba(15, 15, 25, 0.9);
+  --bg-overlay: rgba(0, 0, 0, 0.7);
+  --sidebar-bg: rgba(15, 15, 25, 0.95);
+  --sidebar-border: transparent;
+  --sidebar-item-hover: rgba(167, 139, 250, 0.08);
+  --sidebar-item-active: rgba(167, 139, 250, 0.15);
+  --input-bg: rgba(255, 255, 255, 0.05);
+  --input-border: rgba(255, 255, 255, 0.08);
+  --input-border-focus: rgba(167, 139, 250, 0.5);
+  --input-placeholder: rgba(255, 255, 255, 0.2);
+  --glass-blur-radius: 30px;
+  --glass-saturate: 220%;
+  --glass-brightness: 1.3;
+  --glass-fill-rgb: 15, 15, 25;
+  --glass-vibrancy-opacity: 0.85;
+  --glass-fill: rgba(15, 15, 25, 0.85);
+  --glass-fill-hover: rgba(15, 15, 25, 0.9);
+  --glass-border: 1px solid rgba(167, 139, 250, 0.15);
+  --glass-shadow: 0 8px 32px rgba(167, 139, 250, 0.08), 0 0 0 1px rgba(167, 139, 250, 0.06);
+  --glass-shadow-hover: 0 12px 40px rgba(167, 139, 250, 0.12), 0 0 0 1px rgba(167, 139, 250, 0.1);
+  --glass-rim-border: rgba(167, 139, 250, 0.15);
+  --glass-sheen-1: rgba(167, 139, 250, 0.12);
+  --glass-sheen-2: rgba(167, 139, 250, 0.04);
+  --glass-drop-alpha: 0.25;
+  --card-bg: var(--glass-fill);
+  --card-border: rgba(167, 139, 250, 0.1);
+  --card-hover-bg: var(--glass-fill-hover);
+  --card-shadow: 0 8px 32px rgba(167, 139, 250, 0.06);
+  --card-hover-shadow: var(--glass-shadow-hover);
+  --card-radius: 16px;
+  --text-primary: rgba(255, 255, 255, 0.92);
+  --text-secondary: rgba(255, 255, 255, 0.55);
+  --text-tertiary: rgba(255, 255, 255, 0.3);
+  --text-inverse: #0a0a0f;
+  --text-link: var(--color-accent);
+  --border-primary: rgba(167, 139, 250, 0.08);
+  --border-secondary: rgba(167, 139, 250, 0.04);
+  --scrollbar-thumb: rgba(167, 139, 250, 0.1);
+  --scrollbar-thumb-hover: rgba(167, 139, 250, 0.2);
+  --status-online: #34d399;
+  --status-busy: #fbbf24;
+  --status-offline: rgba(255, 255, 255, 0.2);
+  --color-accent: #a78bfa;
+  --color-success: #34d399;
+  --color-warning: #fbbf24;
+  --color-danger: #f87171;
+  /* UI-03：紫色 accent 较亮，白字对比不足（2.64:1），改用深色前景 */
+  --on-accent: #1e1b4b;
+}

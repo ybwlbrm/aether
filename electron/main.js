@@ -1,0 +1,226 @@
+const { app, BrowserWindow, Tray, Menu, dialog, nativeImage, ipcMain, Notification } = require('electron');
+const path = require('path');
+const fs = require('fs');
+const { fork } = require('child_process');
+
+// P1-8 修复：单实例锁 — 防止多开 Aether.exe 导致 3000 端口冲突与数据竞态。
+// 第二个实例启动时聚焦已有窗口并退出。
+if (!app.requestSingleInstanceLock()) {
+  app.quit();
+}
+
+let mainWindow = null;
+let serverProcess = null;
+let tray = null;
+let restartCount = 0;
+const MAX_SERVER_RESTARTS = 5;
+app.isQuitting = false;
+
+const isDev = !app.isPackaged;
+const DATA_DIR = isDev
+  ? path.join(__dirname, '..', 'data')
+  : path.join(app.getPath('documents'), 'AICommandCenter');
+
+// 第二个实例触发时（单实例锁生效），聚焦已有窗口
+app.on('second-instance', () => {
+  if (mainWindow) {
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    mainWindow.focus();
+    mainWindow.show();
+  }
+});
+
+// 日志文件
+const LOG_FILE = path.join(DATA_DIR, 'electron.log');
+function log(msg) {
+  const line = `[${new Date().toISOString()}] ${msg}`;
+  console.log(line);
+  try {
+    if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+    fs.appendFileSync(LOG_FILE, line + '\n');
+  } catch (_e) { /* ignore */ }
+}
+
+function getServerPath() {
+  if (isDev) return path.join(__dirname, '..', 'src', 'backend', 'dist', 'index.js');
+  // 生产模式：app 目录（展开的 asar），兼容 app.asar 目录名
+  const asarDir = path.join(process.resourcesPath, 'app.asar', 'build', 'backend-bundle.js');
+  const appDir = path.join(process.resourcesPath, 'app', 'build', 'backend-bundle.js');
+  if (require('fs').existsSync(asarDir)) return asarDir;
+  return appDir;
+}
+
+function startServer() {
+  return new Promise((resolve, reject) => {
+    if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+    const serverPath = getServerPath();
+    if (!fs.existsSync(serverPath)) return reject(new Error(`后端文件未找到: ${serverPath}`));
+    const env = {
+      ...process.env, PORT: '3000', HOST: '127.0.0.1', DATA_DIR, NODE_ENV: 'production',
+      ELECTRON_RUN_AS_NODE: '1',
+    };
+    serverProcess = fork(serverPath, [], { env, stdio: 'pipe' });
+    let resolved = false;
+    const tryResolve = () => {
+      if (!resolved) { resolved = true; resolve(); }
+    };
+    serverProcess.stdout.on('data', (d) => { const m = d.toString().trim(); log(`[后端] ${m}`); if (m.includes('已启动') || m.includes('3000')) setTimeout(tryResolve, 500); });
+    serverProcess.stderr.on('data', (d) => {
+      const msg = d.toString().trim();
+      log(`[后端:err] ${msg}`);
+      if (msg.includes('EADDRINUSE') || msg.includes('address already in use')) {
+        log('[后端] 端口被占用，尝试连接已有服务...');
+        setTimeout(tryResolve, 1000);
+      }
+    });
+    serverProcess.on('error', (err) => { log(`[后端] fork 错误: ${err.message}`); reject(err); });
+    // P0-2: 后端进程意外退出后自动重启（最多 5 次，间隔 3s），避免应用白屏
+    // 正常退出（app quit 时主动 kill）不重启
+    serverProcess.on('exit', (code) => {
+      log(`[后端] 进程退出 (code: ${code})`);
+      if (app.isQuitting) return;
+      restartCount++;
+      if (restartCount > MAX_SERVER_RESTARTS) {
+        log(`[后端] 已连续崩溃 ${MAX_SERVER_RESTARTS} 次，停止自动重启`);
+        return;
+      }
+      log(`[后端] ${restartCount}/${MAX_SERVER_RESTARTS} 次自动重启（3 秒后）...`);
+      setTimeout(() => {
+        try {
+          startServer().then(tryResolve).catch((e) => log(`[后端] 重启失败: ${e.message}`));
+        } catch (e) {
+          log(`[后端] 重启异常: ${e instanceof Error ? e.message : String(e)}`);
+        }
+      }, 3000);
+    });
+    setTimeout(tryResolve, 15000);
+  });
+}
+
+function createWindow() {
+  mainWindow = new BrowserWindow({
+    width: 1400, height: 900,
+    minWidth: 1000, minHeight: 600,
+    title: 'Aether',
+    backgroundColor: '#0b0b0f',
+    show: false,
+    // 无边框窗口 — 去掉白色窗口边框，直接用内容填充
+    // Windows 上保留原生窗口控制按钮（关闭/最小化/最大化），
+    // 用完全透明 titleBarOverlay 替代纯黑背景（不挡住内容）
+    frame: false,
+    titleBarStyle: 'hidden',
+    titleBarOverlay: {
+      color: '#00000000',
+      symbolColor: '#ffffff',
+      height: 36,
+    },
+    webPreferences: {
+      nodeIntegration: false,
+      contextIsolation: true,
+      sandbox: true,
+      webSecurity: true,
+      preload: path.join(__dirname, 'preload.js'),
+    },
+  });
+
+  // P0-2: CSP 注入 — 通过 onHeadersReceived 为所有本地加载的页面附加严格 CSP，
+  // 即使渲染进程被 XSS 注入也无法加载远程脚本（前端自身已内置 XSS 过滤，双保险）
+  // 允许项：自身脚本/样式，内联样式（React 动态样式），data/blob 图片，同源+HTTPS connect（AI API 调用）
+  mainWindow.webContents.session.webRequest.onHeadersReceived((details, callback) => {
+    const csp = [
+      "default-src 'self'",
+      "script-src 'self'",
+      "style-src 'self' 'unsafe-inline'",
+      "img-src 'self' data: blob:",
+      "font-src 'self' data:",
+      "connect-src 'self' https: http://127.0.0.1:* http://localhost:* ws://127.0.0.1:* ws://localhost:*",
+      "media-src 'self' blob: data:",
+      "frame-src 'self' https: http://localhost:* http://127.0.0.1:*",
+      "object-src 'none'",
+      "base-uri 'self'",
+      "form-action 'self'",
+    ].join('; ');
+    callback({
+      responseHeaders: {
+        ...details.responseHeaders,
+        'Content-Security-Policy': [csp],
+      },
+    });
+  });
+
+  // 直接加载新对话页面 — 使用 ?new=true 让前端无论什么模式都进入新对话空白页
+  // 之前加载 /chat?new=true 只能在 Chat 组件创建新对话，但用户期望的是 CodingHome
+  // 的 "What can I build for you?" 新对话页面。/command-center?new=true 可让
+  // CommandCenter 强制进入 coding 模式并清空会话，每次启动都是全新的对话体验。
+  mainWindow.loadURL('http://127.0.0.1:3000/command-center?new=true');
+  mainWindow.once('ready-to-show', () => {
+    mainWindow.show();
+  });
+
+  mainWindow.on('closed', () => { mainWindow = null; });
+}
+
+// 创建托盘菜单
+function createTray() {
+  try {
+    tray = new Tray(nativeImage.createEmpty());
+    const ctx = Menu.buildFromTemplate([
+      { label: '显示窗口', click: () => { if (mainWindow) mainWindow.show(); } },
+      { type: 'separator' },
+      { label: '退出', click: () => { app.quit(); } },
+    ]);
+    tray.setToolTip('Aether');
+    tray.setContextMenu(ctx);
+  } catch {}
+}
+
+app.whenReady().then(async () => {
+  log(`模式: ${isDev ? '开发' : '生产'}`);
+  log(`数据目录: ${DATA_DIR}`);
+  log(`日志文件: ${LOG_FILE}`);
+
+  // 系统通知 — 渲染进程通过 preload 桥接调用
+  // P1-19 修复：校验 sender 来自主 frame，防止子 frame 伪造通知
+  ipcMain.on('show-notification', (event, { title, body }) => {
+    if (!event.senderFrame || !event.senderFrame.top) return; // 只允许主 frame
+    if (!Notification.isSupported()) return;
+    try {
+      new Notification({ title: title || 'Aether', body: body || '' }).show();
+    } catch (err) {
+      log(`通知发送失败: ${err.message}`);
+    }
+  });
+
+  try {
+    log('正在启动后端服务...');
+    await startServer();
+    log('后端已启动，正在创建窗口...');
+    createWindow();
+    createTray();
+    log('应用启动完成');
+  } catch (err) {
+    log(`启动失败: ${err.message}`);
+    dialog.showErrorBox('启动失败', err.message);
+    app.quit();
+  }
+});
+
+app.on('will-quit', () => {
+  // P0-2: 标记退出中，防止 kill 子进程时触发自动重启循环
+  app.isQuitting = true;
+  if (serverProcess && !serverProcess.killed) {
+    // 优雅关闭：先发 IPC 让后端 flush 落盘再退出（sql.js 是内存库，直接强杀会丢失/损坏数据）
+    try {
+      serverProcess.send({ type: 'shutdown' });
+    } catch (_e) { /* ignore - intentional */ }
+    // 兜底：2.5s 内后端未自行退出则强制终止（防止应用卡死）
+    setTimeout(() => {
+      try {
+        if (serverProcess && !serverProcess.killed) serverProcess.kill();
+      } catch (_e) { /* ignore - intentional */ }
+    }, 2500);
+  }
+});
+
+app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });
+app.on('activate', () => { if (mainWindow === null) { createWindow(); } });

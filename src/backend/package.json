@@ -1,0 +1,40 @@
+{
+  "name": "@pacc/backend",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsx watch src/index.ts",
+    "start": "node dist/index.js",
+    "test": "node --test --experimental-test-module-mocks dist/**/*.test.js"
+  },
+  "dependencies": {
+    "@fastify/cors": "^10.1.0",
+    "@fastify/static": "^9.3.0",
+    "@fastify/swagger": "^9.4.2",
+    "@fastify/swagger-ui": "^5.2.2",
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "@napi-rs/canvas": "^0.1.65",
+    "@pacc/shared": "*",
+    "@supabase/supabase-js": "^2.112.3",
+    "drizzle-orm": "^0.45.2",
+    "eventsource-parser": "^3.1.1",
+    "fastify": "^5.2.1",
+    "iconv-lite": "^0.6.3",
+    "pdf-lib": "^1.17.1",
+    "pdfjs-dist": "^4.10.38",
+    "pino": "^9.6.0",
+    "pino-pretty": "^13.0.0",
+    "playwright": "^1.62.1",
+    "sharp": "^0.33.5",
+    "sql.js": "^1.14.1",
+    "xlsx": "^0.18.5",
+    "zod": "^3.24.2"
+  },
+  "devDependencies": {
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.3"
+  }
+}

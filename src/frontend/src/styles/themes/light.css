@@ -1,0 +1,55 @@
+/* 简约亮色主题 — 纯白底，高对比度 */
+[data-theme="light"] {
+  --bg-base: #fafafa;
+  --bg-gradient: none;
+  --bg-surface: rgba(0, 0, 0, 0.03);
+  --bg-surface-hover: rgba(0, 0, 0, 0.06);
+  --bg-elevated: #fff;
+  --bg-overlay: rgba(0, 0, 0, 0.2);
+  --sidebar-bg: rgba(255, 255, 255, 0.95);
+  --sidebar-border: transparent;
+  --sidebar-item-hover: rgba(0, 0, 0, 0.04);
+  --sidebar-item-active: rgba(59, 130, 246, 0.1);
+  --input-bg: #fff;
+  --input-border: rgba(0, 0, 0, 0.1);
+  --input-border-focus: rgba(59, 130, 246, 0.5);
+  --input-placeholder: rgba(0, 0, 0, 0.2);
+  --glass-blur-radius: 18px;
+  --glass-saturate: 180%;
+  --glass-brightness: 1.15;
+  --glass-fill-rgb: 255, 255, 255;
+  --glass-vibrancy-opacity: 1;
+  --glass-fill: #fff;
+  --glass-fill-hover: #ffffff;
+  --glass-border: 1px solid rgba(0, 0, 0, 0.06);
+  --glass-shadow: 0 1px 3px rgba(0,0,0,0.08);
+  --glass-shadow-hover: 0 8px 24px rgba(0,0,0,0.12), 0 2px 6px rgba(0,0,0,0.06);
+  --glass-rim-border: rgba(255, 255, 255, 0.35);
+  --glass-sheen-1: rgba(255, 255, 255, 0.28);
+  --glass-sheen-2: rgba(255, 255, 255, 0.08);
+  --glass-drop-alpha: 0.12;
+  --card-bg: var(--glass-fill);
+  --card-border: rgba(0, 0, 0, 0.06);
+  --card-hover-bg: #ffffff;
+  --card-shadow: 0 1px 3px rgba(0,0,0,0.06);
+  --card-hover-shadow: 0 8px 24px rgba(0,0,0,0.1);
+  --card-radius: 12px;
+  --text-primary: rgba(0, 0, 0, 0.88);
+  --text-secondary: rgba(0, 0, 0, 0.62);
+  --text-tertiary: rgba(0, 0, 0, 0.45);
+  --text-inverse: #ffffff;
+  --text-link: var(--color-accent);
+  --border-primary: rgba(0, 0, 0, 0.06);
+  --border-secondary: rgba(0, 0, 0, 0.03);
+  --scrollbar-thumb: rgba(0, 0, 0, 0.08);
+  --scrollbar-thumb-hover: rgba(0, 0, 0, 0.15);
+  --status-online: #22c55e;
+  --status-busy: #f59e0b;
+  --status-offline: rgba(0, 0, 0, 0.15);
+  --color-accent: #3b82f6;
+  --color-success: #22c55e;
+  --color-warning: #f59e0b;
+  --color-danger: #ef4444;
+  /* UI-03：亮主题 accent 上白字对比不足（3.48:1），改用深色前景保证 WCAG AA */
+  --on-accent: #0b1120;
+}

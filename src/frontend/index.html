@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- P1-20 修复：CSP 头 — 限制脚本/样式/连接来源，防 XSS 注入 -->
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; media-src 'self' data: blob: https:; connect-src 'self' https: ws:; font-src 'self' data:; object-src 'none'; base-uri 'self';" />
+    <title>Aether</title>
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <script>
+      // UI-04 修复：首屏前应用主题，避免闪烁（React 挂载前同步执行）
+      (function () {
+        try {
+          var t = localStorage.getItem('uiTheme');
+          if (!t) t = 'liquid-glass';
+          document.documentElement.setAttribute('data-theme', t);
+        } catch (e) { /* localStorage 不可用时静默 */ }
+      })();
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
