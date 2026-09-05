@@ -122,6 +122,30 @@ async function main() {
     path.join(appResourcesDir, 'build', 'sql-wasm.js')
   );
 
+  // 复制 build/yt-dlp.exe（工具箱「YouTube 下载」依赖，随包分发避免用户额外安装）
+  const ytDlpExe = path.join(ROOT, 'build', 'yt-dlp.exe');
+  if (fs.existsSync(ytDlpExe)) {
+    fs.copyFileSync(ytDlpExe, path.join(appResourcesDir, 'build', 'yt-dlp.exe'));
+    console.log('  ✓ 复制 yt-dlp.exe');
+  } else {
+    console.log('  ⚠ 未找到 yt-dlp.exe（YouTube 下载将使用系统 yt-dlp）');
+  }
+
+  // 自包含修复：复制内置 ffmpeg.exe + ffprobe.exe（音频/视频转换依赖，
+  // 随包分发后用户机器无需单独安装 ffmpeg）
+  const ffmpegExe = path.join(ROOT, 'build', 'ffmpeg.exe');
+  if (fs.existsSync(ffmpegExe)) {
+    fs.copyFileSync(ffmpegExe, path.join(appResourcesDir, 'build', 'ffmpeg.exe'));
+    console.log('  ✓ 复制 ffmpeg.exe');
+  } else {
+    console.log('  ⚠ 未找到 ffmpeg.exe（音频转换将使用系统 ffmpeg）');
+  }
+  const ffprobeExe = path.join(ROOT, 'build', 'ffprobe.exe');
+  if (fs.existsSync(ffprobeExe)) {
+    fs.copyFileSync(ffprobeExe, path.join(appResourcesDir, 'build', 'ffprobe.exe'));
+    console.log('  ✓ 复制 ffprobe.exe');
+  }
+
   // 复制前端 dist
   const frontendDist = path.join(ROOT, 'src', 'frontend', 'dist');
   const copyDir = (src, dest) => {
@@ -145,9 +169,11 @@ async function main() {
   const sqlJsDest = path.join(appResourcesDir, 'node_modules', 'sql.js');
   copyDir(sqlJsSrc, sqlJsDest);
 
-  // 复制 native 模块（@napi-rs/canvas, sharp 等 esbuild external 的依赖）
+  // 复制 native 模块（@napi-rs/canvas, sharp, koffi 等 esbuild external 的依赖）
   log('6.7/8', '复制 native 模块...');
-  const nativeModules = ['@napi-rs/canvas', '@napi-rs/canvas-win32-x64-msvc', 'sharp'];
+  // 黑屏修复：koffi 是 DPAPI 主密钥解密的原生模块，必须复制进 EXE，
+  // 否则后端启动时 keystore 解密失败 → 后端崩溃 → 窗口黑屏。
+  const nativeModules = ['@napi-rs/canvas', '@napi-rs/canvas-win32-x64-msvc', 'sharp', 'koffi'];
   for (const mod of nativeModules) {
     const src = path.join(ROOT, 'node_modules', mod);
     const dest = path.join(appResourcesDir, 'node_modules', mod);
@@ -168,6 +194,21 @@ async function main() {
     }
   } catch (e) {
     console.log(`  ⚠ 复制 @img 失败: ${e.message}`);
+  }
+
+  // 黑屏修复：koffi 的 .node 二进制由 @koromix/koffi-win32-x64 平台包提供（optionalDependencies）。
+  // koffi 通过 `../../../@koromix/koffi-<platform>` 相对路径加载，若不复制该目录，
+  // EXE 中 keystore DPAPI 解密失败 → 后端崩溃 → 窗口黑屏。
+  try {
+    const koromixDir = path.join(ROOT, 'node_modules', '@koromix');
+    if (fs.existsSync(koromixDir)) {
+      copyDir(koromixDir, path.join(appResourcesDir, 'node_modules', '@koromix'));
+      console.log('  ✓ 复制 @koromix/koffi 二进制');
+    } else {
+      console.log('  ⚠ 未找到 @koromix，跳过');
+    }
+  } catch (e) {
+    console.log(`  ⚠ 复制 @koromix 失败: ${e.message}`);
   }
 
   // P1 修复：playwright 是 /api/testing 运行时 external 依赖，必须复制进 EXE 包，

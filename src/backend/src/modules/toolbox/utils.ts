@@ -5,8 +5,39 @@ import { execFile } from 'node:child_process';
 import type { BackendConfig } from '../../config/index.js';
 
 // P1-18 修复：ffmpeg/LibreOffice 路径 — 优先环境变量，回退系统 PATH 搜索
-const FFMPEG_PATH = process.env.FFMPEG_PATH || 'ffmpeg';
-const SOFFICE_PATH = process.env.SOFFICE_PATH || 'soffice';
+// 自包含修复：优先查找随包分发的 build/ffmpeg.exe（EXE 版无需用户另装 ffmpeg）
+import { fileURLToPath } from 'node:url';
+import { dirname as pathDirname } from 'node:path';
+const __dirname = pathDirname(fileURLToPath(import.meta.url));
+function resolveFfmpegPath(): string {
+  // 1. 环境变量显式指定
+  if (process.env.FFMPEG_PATH && existsSync(process.env.FFMPEG_PATH)) return process.env.FFMPEG_PATH;
+  // 2. 随包分发的 build/ffmpeg.exe（打包版/开发版都覆盖）
+  const candidates = [
+    resolve(__dirname, '../../../build/ffmpeg.exe'),   // dist/modules/toolbox → 项目根/build
+    resolve(process.cwd(), 'build/ffmpeg.exe'),
+  ];
+  for (const c of candidates) {
+    if (existsSync(c)) return c;
+  }
+  // 3. 系统 PATH
+  return 'ffmpeg';
+}
+const FFMPEG_PATH = resolveFfmpegPath();
+// LibreOffice：内置目录(便携版) → 环境变量 → 系统 PATH（转换失败时明确报错而非静默）
+function resolveSofficePath(): string {
+  if (process.env.SOFFICE_PATH && existsSync(process.env.SOFFICE_PATH)) return process.env.SOFFICE_PATH;
+  const candidates = [
+    resolve(__dirname, '../../../build/soffice/program/soffice.exe'),
+    'C:\\Program Files\\LibreOffice\\program\\soffice.exe',
+    resolve(process.cwd(), 'build/soffice/program/soffice.exe'),
+  ];
+  for (const c of candidates) {
+    if (existsSync(c)) return c;
+  }
+  return 'soffice';
+}
+const SOFFICE_PATH = resolveSofficePath();
 
 // docx 懒加载（与 documents/index.ts 一致，减少启动内存占用）
 let _docx: typeof import('docx') | null = null;
@@ -127,7 +158,12 @@ export function convertWithLibreOffice(input: Buffer, ext: string): Promise<Buff
     writeFileSync(inPath, input);
     execFile(SOFFICE_PATH, ['--headless', '--convert-to', 'pdf', '--outdir', outDir, inPath], { timeout: 120000 }, (err) => {
       try {
-        if (err) { rejectP(new Error(`LibreOffice 转换失败: ${err.message}`)); return; }
+        if (err) {
+          const hint = SOFFICE_PATH === 'soffice'
+            ? '（未检测到 LibreOffice。请安装 LibreOffice 或设置 SOFFICE_PATH 环境变量指向 soffice.exe）'
+            : '';
+          rejectP(new Error(`LibreOffice 转换失败: ${err.message}${hint}`)); return;
+        }
         const outName = `${tmpIn.replace('.' + ext, '')}.pdf`;
         const outPath = resolve(outDir, outName);
         if (!existsSync(outPath)) { rejectP(new Error('LibreOffice 无输出文件')); return; }

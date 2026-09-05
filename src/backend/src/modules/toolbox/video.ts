@@ -1,0 +1,226 @@
+import type { FastifyInstance } from 'fastify';
+import type { BackendConfig } from '../../config/index.js';
+import { writeFileSync, existsSync, mkdirSync, readFileSync, unlinkSync, readdirSync, rmSync } from 'node:fs';
+import { resolve, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { randomUUID } from 'node:crypto';
+import { execFile } from 'node:child_process';
+import { exportDir } from './utils.js';
+
+// ESM 兼容：项目为 "type": "module"，无 __dirname 全局变量
+const __dirname = dirname(fileURLToPath(import.meta.url));
+
+// ============================================================
+// 视频工具：视频提取音频 + YouTube/通用视频下载
+// ============================================================
+
+// ffmpeg 路径：优先内置 build/ffmpeg.exe（随包分发），其次环境变量，最后系统 PATH
+function resolveFfmpegPath(): string | null {
+  if (process.env.FFMPEG_PATH && existsSync(process.env.FFMPEG_PATH)) return process.env.FFMPEG_PATH;
+  const candidates = [
+    resolve(__dirname, '../../../build/ffmpeg.exe'),
+    resolve(process.cwd(), 'build/ffmpeg.exe'),
+  ];
+  for (const c of candidates) {
+    if (existsSync(c)) return c;
+  }
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const staticPath = require('ffmpeg-static');
+    if (typeof staticPath === 'string' && existsSync(staticPath)) return staticPath;
+  } catch { /* ffmpeg-static 未安装，回退系统 PATH */ }
+  return 'ffmpeg'; // 让 execFile 搜索 PATH
+}
+
+// yt-dlp 路径：优先 build/yt-dlp.exe（随包分发），其次环境变量，最后系统 PATH
+function resolveYtDlpPath(): string {
+  if (process.env.YT_DLP_PATH && existsSync(process.env.YT_DLP_PATH)) return process.env.YT_DLP_PATH;
+  // 打包版：resources/app/build/yt-dlp.exe；开发版：项目根 build/yt-dlp.exe
+  const candidates = [
+    resolve(__dirname, '../../../build/yt-dlp.exe'),
+    resolve(process.cwd(), 'build/yt-dlp.exe'),
+  ];
+  for (const c of candidates) {
+    if (existsSync(c)) return c;
+  }
+  return 'yt-dlp'; // 回退系统 PATH
+}
+
+const VIDEO_EXTS = new Set(['mp4', 'mkv', 'webm', 'mov', 'avi', 'flv', 'wmv', 'm4v', 'ts', 'mts']);
+const AUDIO_EXTS = new Set(['mp3', 'wav', 'flac', 'm4a', 'aac', 'ogg', 'opus', 'wma']);
+
+/** 从视频中提取音频（ffmpeg -vn） */
+export function extractAudioFromVideo(input: Buffer, videoExt: string, target: string): Promise<Buffer> {
+  return new Promise((resolveP, rejectP) => {
+    const ffmpeg = resolveFfmpegPath();
+    if (!ffmpeg) { rejectP(new Error('未找到 ffmpeg，请安装或设置 FFMPEG_PATH')); return; }
+    const tmpIn = `${randomUUID()}.${videoExt}`;
+    const tmpOut = `${randomUUID()}.${target}`;
+    const inPath = resolve(process.env.TEMP || '.', tmpIn);
+    const outPath = resolve(process.env.TEMP || '.', tmpOut);
+    writeFileSync(inPath, input);
+
+    const cleanup = () => {
+      try { if (existsSync(inPath)) unlinkSync(inPath); } catch (_e: unknown) { /* ignore - intentional */ }
+      try { if (existsSync(outPath)) unlinkSync(outPath); } catch (_e: unknown) { /* ignore - intentional */ }
+    };
+
+    // 先尝试流拷贝；失败则回退重编码（兼容 mkv/mov 容器）
+    execFile(ffmpeg, ['-y', '-i', inPath, '-vn', '-c:a', 'copy', outPath], { timeout: 180000 }, (err) => {
+      const tryFallback = () => {
+        execFile(ffmpeg, ['-y', '-i', inPath, '-vn', '-c:a', 'aac', '-b:a', '192k', outPath], { timeout: 300000 }, (err2) => {
+          try {
+            if (err2) { rejectP(new Error(`音频提取失败: ${err2.message}`)); return; }
+            if (!existsSync(outPath)) { rejectP(new Error('ffmpeg 无输出文件')); return; }
+            resolveP(readFileSync(outPath));
+          } catch (e) { rejectP(e); }
+          finally { cleanup(); }
+        });
+      };
+      try {
+        if (err) { tryFallback(); return; }
+        if (!existsSync(outPath) || readFileSync(outPath).length === 0) { tryFallback(); return; }
+        resolveP(readFileSync(outPath));
+      } catch (e) { rejectP(e); }
+      finally {
+        if (!err) cleanup();
+      }
+    });
+  });
+}
+
+/** YouTube / 通用视频下载（yt-dlp），返回文件 Buffer 与标题 */
+export function downloadWithYtDlp(url: string, format: string, quality: string): Promise<{ buffer: Buffer; title: string; ext: string }> {
+  return new Promise((resolveP, rejectP) => {
+    const ytDlp = resolveYtDlpPath();
+    const tmpDir = resolve(process.env.TEMP || '.', `ytdl-${randomUUID()}`);
+    mkdirSync(tmpDir, { recursive: true });
+
+    const audioOnly = ['mp3', 'm4a', 'wav', 'flac', 'aac', 'ogg', 'opus'].includes(format);
+    const args: string[] = [];
+    if (audioOnly) {
+      args.push('-x', '--audio-format', format, '--audio-quality', '0');
+      if (format === 'mp3') args.push('--postprocessor-args', 'ffmpeg:-b:a 192k');
+    } else {
+      const fmtMap: Record<string, string> = {
+        '1080': 'bestvideo[height<=1080]+bestaudio/best[height<=1080]/best',
+        '720': 'bestvideo[height<=720]+bestaudio/best[height<=720]/best',
+        '480': 'bestvideo[height<=480]+bestaudio/best[height<=480]/best',
+      };
+      args.push('-f', fmtMap[quality] || 'bestvideo+bestaudio/best');
+      args.push('--merge-output-format', format === 'webm' ? 'webm' : 'mp4');
+    }
+    args.push('--no-playlist', '--no-warnings', '-o', resolve(tmpDir, '%(title)s.%(ext)s'), url);
+
+    execFile(ytDlp, args, { timeout: 600000, maxBuffer: 100 * 1024 * 1024 }, (err) => {
+      try {
+        if (err) {
+          rejectP(new Error(`下载失败: ${err.message}（如为网络/反爬问题，请稍后重试或更新 yt-dlp）`));
+          return;
+        }
+        const files = readdirSync(tmpDir).filter(f => !f.endsWith('.part') && !f.endsWith('.ytdl'));
+        if (files.length === 0) { rejectP(new Error('下载完成但未找到输出文件')); return; }
+        // 优先取非 .webm/.m4a 中间文件的最终产物：取最后一个文件
+        const outFile = files[files.length - 1];
+        const fullPath = resolve(tmpDir, outFile);
+        const title = outFile.replace(/\.[^.]+$/, '');
+        const ext = (outFile.includes('.') ? outFile.split('.').pop()!.toLowerCase() : 'mp4');
+        resolveP({ buffer: readFileSync(fullPath), title, ext });
+      } catch (e) { rejectP(e instanceof Error ? e : new Error(String(e))); }
+      finally {
+        try { rmSync(tmpDir, { recursive: true, force: true }); } catch (_e: unknown) { /* ignore - intentional */ }
+      }
+    });
+  });
+}
+
+/** 注册视频工具路由 */
+export function registerVideoRoutes(app: FastifyInstance, config: BackendConfig): void {
+  // 从视频中提取音频
+  app.post('/api/toolbox/video-extract', {
+    schema: {
+      description: '从视频中提取音频（ffmpeg）',
+      tags: ['工具箱'],
+    },
+  }, async (request, reply) => {
+    const body = request.body as { files: { name: string; data: string }[]; targetFormat: string };
+    const files = body.files || [];
+    if (!Array.isArray(files) || files.length === 0) {
+      return reply.code(400).send({ error: '没有上传文件' });
+    }
+    const target = (body.targetFormat || '').toLowerCase();
+    if (!/^[a-z0-9]{2,8}$/.test(target) || !AUDIO_EXTS.has(target)) {
+      return reply.code(400).send({ error: `不支持的目标音频格式: ${target}` });
+    }
+
+    const dir = exportDir(config);
+    const results: { file: string; output: string; success: boolean; message?: string }[] = [];
+    for (const f of files) {
+      const name = f.name || 'video.mp4';
+      const base64 = (f.data || '').split(',')[1] || f.data || '';
+      const buf = Buffer.from(base64, 'base64');
+      const ext = (name.includes('.') ? name.split('.').pop()!.toLowerCase() : 'mp4');
+      if (!VIDEO_EXTS.has(ext)) {
+        results.push({ file: name, output: '', success: false, message: `不支持的视频格式: ${ext}` });
+        continue;
+      }
+      try {
+        const outBuf = await extractAudioFromVideo(buf, ext, target);
+        const outName = `${randomUUID()}.${target}`;
+        writeFileSync(resolve(dir, outName), outBuf);
+        results.push({ file: name, output: `/api/toolbox/download/${outName}`, success: true });
+      } catch (e: unknown) {
+        results.push({ file: name, output: '', success: false, message: e instanceof Error ? e.message : String(e) });
+      }
+    }
+    return { results };
+  });
+
+  // YouTube / 通用视频下载
+  app.post('/api/toolbox/youtube-download', {
+    schema: {
+      description: '从 YouTube 等视频站下载视频/音频（yt-dlp）',
+      tags: ['工具箱'],
+    },
+  }, async (request, reply) => {
+    const body = request.body as { url: string; format?: string; quality?: string };
+    const url = (body.url || '').trim();
+    if (!url) return reply.code(400).send({ error: '请输入视频 URL' });
+    if (!/^https?:\/\//i.test(url)) return reply.code(400).send({ error: '仅支持 http/https 链接' });
+
+    const format = (body.format || 'mp4').toLowerCase();
+    const allowedFormats = ['mp4', 'webm', 'mp3', 'm4a', 'wav', 'flac', 'aac', 'ogg', 'opus'];
+    if (!allowedFormats.includes(format)) return reply.code(400).send({ error: `不支持的格式: ${format}` });
+
+    const quality = (body.quality || 'best').toLowerCase();
+    const allowedQuality = ['best', '1080', '720', '480'];
+    if (!allowedQuality.includes(quality)) return reply.code(400).send({ error: `不支持的质量: ${quality}` });
+
+    try {
+      const { buffer, title, ext } = await downloadWithYtDlp(url, format, quality);
+      const outName = `${randomUUID()}.${ext}`;
+      writeFileSync(resolve(exportDir(config), outName), buffer);
+      return {
+        success: true,
+        output: `/api/toolbox/download/${outName}`,
+        title,
+        format: ext,
+        size: buffer.length,
+      };
+    } catch (e: unknown) {
+      return reply.code(500).send({ error: e instanceof Error ? e.message : String(e) });
+    }
+  });
+
+  // 检测工具可用性（前端用于禁用按钮/提示）
+  app.get('/api/toolbox/video-tools-status', {
+    schema: { description: '检测视频工具依赖（ffmpeg / yt-dlp）', tags: ['工具箱'] },
+  }, async () => {
+    const ffmpeg = resolveFfmpegPath();
+    const ytDlp = resolveYtDlpPath();
+    return {
+      ffmpeg: ffmpeg !== 'ffmpeg' ? 'available' : 'system',
+      ytDlp: ytDlp !== 'yt-dlp' ? 'available' : 'system',
+    };
+  });
+}

@@ -129,7 +129,9 @@ function createWindow() {
   mainWindow.webContents.session.webRequest.onHeadersReceived((details, callback) => {
     const csp = [
       "default-src 'self'",
-      "script-src 'self'",
+      // 前端 index.html 含内联 data-theme 初始化脚本（首屏防闪烁），
+      // 必须放行 'unsafe-inline'，否则被此处 HTTP 头 CSP 覆盖后主题/渲染异常
+      "script-src 'self' 'unsafe-inline'",
       "style-src 'self' 'unsafe-inline'",
       "img-src 'self' data: blob:",
       "font-src 'self' data:",

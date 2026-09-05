@@ -9,6 +9,7 @@ interface FileToolsProps {
   onConvert: () => void;
   converting: boolean;
   progress: number;
+  elapsedSec: number;
   files: File[];
   setFiles: (files: File[]) => void;
   targetFormat: string;
@@ -26,32 +27,57 @@ interface FileToolsProps {
   error: string | null;
   fileInputRef: React.RefObject<HTMLInputElement | null>;
   handleDrop: (e: React.DragEvent) => void;
+  utilityInput: string;
+  setUtilityInput: (v: string) => void;
 }
 
 export function FileTools({
-  selected, onBack, onConvert, converting, progress,
+  selected, onBack, onConvert, converting, progress, elapsedSec,
   files, setFiles, targetFormat, setTargetFormat,
   watermarkText, setWatermarkText,
   quality, setQuality, width, setWidth, height, setHeight,
   result, downloads, error,
-  fileInputRef, handleDrop
+  fileInputRef, handleDrop,
+  utilityInput, setUtilityInput
 }: FileToolsProps) {
   const isImageToImage = selected.from.every(f => ['png', 'jpg', 'jpeg', 'webp'].includes(f))
     && selected.to.every(f => ['png', 'jpg', 'jpeg', 'webp'].includes(f));
 
+  // YouTube 下载：URL 输入模式（不显示文件上传区）
+  const isYoutubeDownload = selected.kind === 'youtube-download';
+
   return (
     <>
-      {/* 上传区 */}
-      <div onDragOver={e => e.preventDefault()} onDrop={handleDrop} onClick={() => fileInputRef.current?.click()}
-        style={{ border: '2px dashed var(--border-primary)', borderRadius: 'var(--radius-md)', padding: '36px', textAlign: 'center', cursor: 'pointer', background: 'var(--bg-surface)' }}>
-        <input ref={fileInputRef} type="file" multiple className="hidden" onChange={e => {
-          if (e.target.files) {
-            setFiles(Array.from(e.target.files));
-          }
-        }} style={{ display: 'none' }} />
-        <Upload size={28} style={{ color: 'var(--text-tertiary)', margin: '0 auto 8px', display: 'block' }} />
-        <p style={{ fontSize: 'var(--font-sm)', color: 'var(--text-secondary)' }}>拖拽文件到此处，或点击选择（支持：{selected.from.join(', ')}）</p>
-      </div>
+      {/* YouTube 下载：URL 输入 */}
+      {isYoutubeDownload && (
+        <div style={{ marginTop: 4 }}>
+          <label style={{ fontSize: 'var(--font-sm)', color: 'var(--text-secondary)', marginBottom: 8, display: 'block' }}>视频链接（YouTube 等，支持 1000+ 站点）</label>
+          <input
+            className="input"
+            value={utilityInput}
+            onChange={e => setUtilityInput(e.target.value)}
+            placeholder="https://www.youtube.com/watch?v=..."
+            style={{ width: '100%' }}
+          />
+          <p style={{ fontSize: 'var(--font-xs)', color: 'var(--text-tertiary)', marginTop: 6 }}>
+            首次使用可能需要下载 yt-dlp 工具，耗时约 10-30 秒。
+          </p>
+        </div>
+      )}
+
+      {/* 上传区（YouTube 下载除外） */}
+      {!isYoutubeDownload && (
+        <div onDragOver={e => e.preventDefault()} onDrop={handleDrop} onClick={() => fileInputRef.current?.click()}
+          style={{ border: '2px dashed var(--border-primary)', borderRadius: 'var(--radius-md)', padding: '36px', textAlign: 'center', cursor: 'pointer', background: 'var(--bg-surface)' }}>
+          <input ref={fileInputRef} type="file" multiple className="hidden" onChange={e => {
+            if (e.target.files) {
+              setFiles(Array.from(e.target.files));
+            }
+          }} style={{ display: 'none' }} />
+          <Upload size={28} style={{ color: 'var(--text-tertiary)', margin: '0 auto 8px', display: 'block' }} />
+          <p style={{ fontSize: 'var(--font-sm)', color: 'var(--text-secondary)' }}>拖拽文件到此处，或点击选择（支持：{selected.from.join(', ')}）</p>
+        </div>
+      )}
 
       {/* 已选文件 */}
       {files.length > 0 && (
@@ -74,10 +100,10 @@ export function FileTools({
         </div>
       )}
 
-      {/* 目标格式（仅 convert 类型） */}
-      {selected.kind === 'convert' && files.length > 0 && (
+      {/* 目标格式（convert / video-extract / youtube-download） */}
+      {((selected.kind === 'convert' && files.length > 0) || selected.kind === 'video-extract' || isYoutubeDownload) && (
         <div style={{ marginTop: 16 }}>
-          <label style={{ fontSize: 'var(--font-sm)', color: 'var(--text-secondary)', marginBottom: 8, display: 'block' }}>目标格式</label>
+          <label style={{ fontSize: 'var(--font-sm)', color: 'var(--text-secondary)', marginBottom: 8, display: 'block' }}>目标格式{isYoutubeDownload ? '（音频格式自动转 MP3）' : ''}</label>
           <div className="flex gap-2 flex-wrap">
             {selected.to.map(f => (
               <button key={f} onClick={() => setTargetFormat(f)}
@@ -129,19 +155,28 @@ export function FileTools({
       )}
 
       {/* 开始处理 */}
-      {files.length > 0 && (selected.kind !== 'convert' || targetFormat) && (
+      {(isYoutubeDownload
+        ? (utilityInput.trim().length > 0 && targetFormat)
+        : (files.length > 0 && (selected.kind !== 'convert' || targetFormat))
+      ) && (
         <div style={{ marginTop: 16 }}>
           <button className="btn btn-primary" onClick={onConvert} disabled={converting}>
-            {converting ? <><Loader2 size={18} className="animate-spin" /> 处理中 {progress}%</> : <><Download size={18} /> 开始{selected.op === 'merge' ? '合并' : selected.op === 'watermark' ? '加水印' : selected.op === 'to-image' ? '转换' : selected.op === 'to-text' ? '提取' : '转换'}</>}
+            {converting ? <><Loader2 size={18} className="animate-spin" /> 处理中 {elapsedSec} 秒</> : <><Download size={18} /> 开始{selected.op === 'merge' ? '合并' : selected.op === 'watermark' ? '加水印' : selected.op === 'to-image' ? '转换' : selected.op === 'to-text' ? '提取' : selected.kind === 'youtube-download' ? '下载' : '转换'}</>}
           </button>
         </div>
       )}
 
       {converting && (
         <div style={{ marginTop: 16 }}>
-          <div style={{ height: 4, background: 'rgba(255,255,255,0.08)', borderRadius: 2, overflow: 'hidden' }}>
-            <div style={{ height: '100%', width: `${progress}%`, background: 'linear-gradient(90deg, var(--color-accent), #a78bfa)', borderRadius: 2, transition: 'width 0.3s' }} />
+          {/* 徒有其表修复：进度条改为不确定动画（滑动条），不再显示假百分比 */}
+          <div style={{ height: 4, background: 'rgba(255,255,255,0.08)', borderRadius: 2, overflow: 'hidden', position: 'relative' }}>
+            <div style={{
+              position: 'absolute', top: 0, bottom: 0, width: '30%',
+              background: 'linear-gradient(90deg, var(--color-accent), #a78bfa)', borderRadius: 2,
+              animation: 'toolbox-indeterminate 1.2s ease-in-out infinite',
+            }} />
           </div>
+          <style>{'@keyframes toolbox-indeterminate { 0% { left: -30%; } 100% { left: 100%; } }'}</style>
         </div>
       )}
 

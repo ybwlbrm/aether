@@ -15,7 +15,7 @@ async function main() {
     format: 'cjs',
     minify: false,
     sourcemap: false,
-    external: ['sql.js', '@napi-rs/canvas', '@napi-rs/canvas-win32-x64-msvc', 'sharp', 'playwright', 'playwright-core', 'chromium-bidi'],
+    external: ['sql.js', '@napi-rs/canvas', '@napi-rs/canvas-win32-x64-msvc', 'sharp', 'playwright', 'playwright-core', 'chromium-bidi', 'koffi'],
     alias: {
       '@pacc/shared': path.join(__dirname, '..', 'src', 'shared', 'dist', 'index.js'),
     },

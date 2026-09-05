@@ -18,6 +18,9 @@ files:
   - build/backend-bundle.js
   - build/sql-wasm.wasm
   - build/sql-wasm.js
+  - build/yt-dlp.exe
+  - build/ffmpeg.exe
+  - build/ffprobe.exe
   - build/sql.js-package.json
   - build/lib/**/*
   - build/worker.js
@@ -28,6 +31,8 @@ files:
   - node_modules/@napi-rs/canvas-win32-x64-msvc/**/*
   - node_modules/sharp/**/*
   - node_modules/@img/**/*
+  - node_modules/koffi/**/*
+  - node_modules/@koromix/**/*
   - node_modules/color/**/*
   - node_modules/color-string/**/*
   - node_modules/color-convert/**/*
@@ -43,6 +48,16 @@ files:
   - package.json
 
 asar: true
+# native 模块（.node 二进制）必须在 asar 外解包才能被 Node 加载
+asarUnpack:
+  - src/frontend/dist/**/*
+  - node_modules/koffi/**/*
+  - node_modules/@koromix/**/*
+  - node_modules/@napi-rs/canvas/**/*
+  - node_modules/@napi-rs/canvas-win32-x64-msvc/**/*
+  - node_modules/sharp/**/*
+  - node_modules/@img/**/*
+  - node_modules/sql.js/**/*
 compression: maximum # P2-10: 压缩安装包 (原 store 不压缩 ~350MB)
 removePackageScripts: true
 npmRebuild: false

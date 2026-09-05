@@ -701,9 +701,12 @@ export function Settings() {
           setBgFolder(`已上传 ${res.images.length} 张图片`);
           // 保存间隔到后端
           await api.setBackgroundInterval(bgInterval);
-          // 刷新列表 + 触发轮播
+          // 刷新列表（更新 bgImages state 为完整列表）+ 触发轮播
           await loadBgImages();
-          window.dispatchEvent(new CustomEvent('bg-slideshow-start', { detail: { images: res.images, interval: bgInterval } }));
+          // 背景切换修复：必须派发「完整图片列表」而非仅本次上传的新图 res.images，
+          // 否则 Layout 的轮播数组被覆盖成单张/部分图，定时器因 length<=1 不启动 → 背景永远不切换
+          const fullImages = (await api.getBackgrounds()).images || bgImages;
+          window.dispatchEvent(new CustomEvent('bg-slideshow-start', { detail: { images: fullImages, interval: bgInterval } }));
         }
       } catch (err: any) {
         alert('上传失败: ' + err.message);

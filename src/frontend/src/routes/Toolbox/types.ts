@@ -6,7 +6,7 @@ export interface ConvertOption {
   icon: React.ReactNode;
   color: string;
   hint: string;
-  kind?: 'convert' | 'pdf-operate' | 'pdf-read' | 'pdf-compress' | 'pdf-to-docx' | 'unlock' | 'utility' | 'encode';
+  kind?: 'convert' | 'pdf-operate' | 'pdf-read' | 'pdf-compress' | 'pdf-to-docx' | 'unlock' | 'utility' | 'encode' | 'video-extract' | 'youtube-download';
   op?: string; // pdf-operate: merge/watermark; pdf-read: to-image/to-text
 }
 

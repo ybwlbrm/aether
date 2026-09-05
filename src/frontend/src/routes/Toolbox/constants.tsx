@@ -1,4 +1,4 @@
-import { FileImage, FileText, Sheet, File, AudioLines, Disc3, Palette as PaletteIcon, Shrink, FileDown, Sliders, Music, Binary, Type, Upload, Download, X } from 'lucide-react';
+import { FileImage, FileText, Sheet, File, AudioLines, Disc3, Palette as PaletteIcon, Shrink, FileDown, Sliders, Music, Binary, Type, Upload, Download, X, Video, Youtube } from 'lucide-react';
 import type { ConvertOption, ToolCategory } from './types';
 
 export const convertOptions: ConvertOption[] = [
@@ -22,6 +22,8 @@ export const convertOptions: ConvertOption[] = [
   { kind: 'utility', op: 'color', from: [], to: [], label: '颜色转换', desc: 'HEX ↔ RGB', icon: <PaletteIcon size={20} />, color: '#a78bfa', hint: '输入 hex 颜色或 rgb 颜色' },
   { kind: 'encode', op: 'to-utf8', from: [], to: [], label: '编码互转', desc: '文字 ↔ 编码双向转换（UTF-8/GBK/Unicode/Base64）', icon: <Type size={20} />, color: 'var(--color-warning)', hint: '文字转编码 或 编码转文字（支持 UTF-8/GBK/Big5 等）' },
   { kind: 'encode', op: 'image-to-base64', from: [], to: [], label: '图片转 Base64', desc: '图片转 Data URL', icon: <FileImage size={20} />, color: '#a78bfa', hint: '选择图片自动转换' },
+  { kind: 'video-extract', from: ['mp4', 'mkv', 'webm', 'mov', 'avi', 'flv', 'wmv'], to: ['mp3', 'wav', 'flac', 'm4a', 'aac', 'ogg'], label: '视频提取音频', desc: '从视频中提取音频（ffmpeg）', icon: <Video size={20} />, color: '#f472b6', hint: '选择视频文件，提取为音频' },
+  { kind: 'youtube-download', from: ['url'], to: ['mp4', 'webm', 'mp3', 'm4a', 'wav', 'flac'], label: 'YouTube 下载', desc: '下载 YouTube 视频/音频（yt-dlp）', icon: <Youtube size={20} />, color: '#ef4444', hint: '粘贴视频链接，选择格式下载' },
 ];
 
 export const categories: ToolCategory[] = [
@@ -29,11 +31,13 @@ export const categories: ToolCategory[] = [
   { id: 'document', label: '文档', color: 'var(--color-success)' },
   { id: 'image', label: '图片', color: 'var(--color-warning)' },
   { id: 'audio', label: '音频', color: '#a78bfa' },
+  { id: 'video', label: '视频', color: '#f472b6' },
   { id: 'encode', label: '编码', color: 'var(--color-accent)' },
 ];
 
 export const catOf = (o: ConvertOption): string => {
   if (o.kind === 'encode') return 'encode';
+  if (o.kind === 'video-extract' || o.kind === 'youtube-download') return 'video';
   if (o.from[0] === 'png' || o.from[0] === 'jpg') return 'image';
   if (o.from[0] === 'mp3' || o.from[0] === 'ncm') return 'audio';
   return 'document';

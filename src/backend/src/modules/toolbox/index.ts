@@ -6,6 +6,7 @@ import { registerAudioRoutes, convertWithFfmpeg, unlockMusic, exportDir as audio
 import { registerPdfRoutes, mergePdfs, watermarkPdf, compressPdf, pdfToText, pdfToImage, pdfToDocx, exportDir as pdfExportDir } from './pdf.js';
 import { registerEncodingRoutes, utilityOp, encodeOp } from './encoding.js';
 import { registerDownloadRoutes } from './download.js';
+import { registerVideoRoutes, extractAudioFromVideo, downloadWithYtDlp } from './video.js';
 import { exportDir, convertWithFfmpeg as utilsConvertWithFfmpeg, convertWithLibreOffice, imagesToPdf as utilsImagesToPdf, parseCsv, detectEncryptedAudio as utilsDetectEncryptedAudio, decryptQmcStaticCipher as utilsDecryptQmcStaticCipher, QMC_STATIC_CIPHER as utilsQMC_STATIC_CIPHER, getDocx } from './utils.js';
 
 // 统一导出目录函数（所有子模块使用同一个）
@@ -37,6 +38,9 @@ export {
   // encoding
   utilityOp,
   encodeOp,
+  // video
+  extractAudioFromVideo,
+  downloadWithYtDlp,
   // utils
   convertWithLibreOffice,
   getDocx,
@@ -51,6 +55,7 @@ export function registerToolboxRoutes(app: FastifyInstance, config: BackendConfi
   registerPdfRoutes(app, config);
   registerEncodingRoutes(app, config);
   registerDownloadRoutes(app, config);
+  registerVideoRoutes(app, config);
 
   // 获取支持的转换格式（仅真实支持的组合）
   app.get('/api/toolbox/formats', {
@@ -76,6 +81,18 @@ export function registerToolboxRoutes(app: FastifyInstance, config: BackendConfi
       from: ['ncm', 'qmc', 'kgm'],
       to: ['mp3', 'flac'],
       description: '解锁加密音乐（网易云 ncm / QQ音乐 qmc / 酷狗 kgm）',
+    },
+    videoExtract: {
+      from: ['mp4', 'mkv', 'webm', 'mov', 'avi', 'flv', 'wmv'],
+      to: ['mp3', 'wav', 'flac', 'm4a', 'aac', 'ogg'],
+      description: '从视频中提取音频（ffmpeg）',
+      engine: 'ffmpeg',
+    },
+    youtubeDownload: {
+      from: ['url'],
+      to: ['mp4', 'webm', 'mp3', 'm4a', 'wav', 'flac'],
+      description: 'YouTube/通用视频下载（yt-dlp）',
+      engine: 'yt-dlp',
     },
   }));
 

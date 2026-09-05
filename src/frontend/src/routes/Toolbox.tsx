@@ -18,7 +18,8 @@ export function Toolbox() {
   const [width, setWidth] = useState('');
   const [height, setHeight] = useState('');
   const [converting, setConverting] = useState(false);
-  const [progress, setProgress] = useState(0);
+  const [progress, setProgress] = useState(0); // 0=未开始, 100=完成；转换中显示等待秒数
+  const [elapsedSec, setElapsedSec] = useState(0);
   const [result, setResult] = useState<string | null>(null);
   const [downloads, setDownloads] = useState<string[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -162,17 +163,21 @@ export function Toolbox() {
       }
       return;
     }
-    if (selected.kind !== 'utility' && files.length === 0) return;
+    // youtube-download 无需文件（输入 URL）；其余工具需文件
+    if (selected.kind !== 'utility' && selected.kind !== 'youtube-download' && files.length === 0) return;
     if (selected.kind === 'utility' && !utilityInput) { setError('请输入内容'); return; }
+    if (selected.kind === 'youtube-download' && !utilityInput.trim()) { setError('请输入视频 URL'); return; }
     if (selected.kind === 'convert' && !targetFormat) return;
     setConverting(true);
     setProgress(0);
     setError(null);
     setResult(null);
 
-    // P1-2 修复：改为真实等待时间显示，不用假进度条
+    // 徒有其表修复：不再用假进度条（每秒+1%到90%卡住）。
+    // 改为诚实显示已等待秒数，进度条仅两态：处理中(不确定动画)/完成。
+    setElapsedSec(0);
     intervalRef.current = setInterval(() => {
-      setProgress(p => p < 90 ? p + 1 : p);
+      setElapsedSec(s => s + 1);
     }, 1000);
 
     try {
@@ -194,7 +199,6 @@ export function Toolbox() {
         setConverting(false);
         return;
       }
-
       const fileData = await Promise.all(files.map(f => new Promise<{ name: string; data: string }>((resolve, reject) => {
         const reader = new FileReader();
         reader.onload = () => resolve({ name: f.name, data: reader.result as string });
@@ -265,6 +269,31 @@ export function Toolbox() {
         res = await res.json();
         if (res?.output) { setDownloads([res.output]); setResult(`转换完成！${res.pageCount ? `共 ${res.pageCount} 页` : ''}`); }
         else setError(res?.error || 'PDF → DOCX 转换失败，请检查文件是否为有效的 PDF 格式');
+      } else if (selected.kind === 'video-extract') {
+        // 视频提取音频（ffmpeg）
+        res = await fetch('/api/toolbox/video-extract', {
+          method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+          body: JSON.stringify({ files: fileData, targetFormat }),
+        });
+        res = await res.json();
+        if (res?.results?.length > 0) {
+          const ok = res.results.filter((r: any) => r.success);
+          setDownloads(ok.map((r: any) => r.output));
+          const failed = res.results.filter((r: any) => !r.success);
+          if (ok.length > 0) setResult(`提取完成！${ok.length} 个成功${failed.length ? `，${failed.length} 个失败: ${failed[0].message || ''}` : ''}`);
+          else setError(failed[0]?.message || '音频提取失败');
+        } else setError(res?.error || '音频提取失败');
+      } else if (selected.kind === 'youtube-download') {
+        // YouTube 下载（yt-dlp）
+        res = await fetch('/api/toolbox/youtube-download', {
+          method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+          body: JSON.stringify({ url: utilityInput.trim(), format: targetFormat, quality }),
+        });
+        res = await res.json();
+        if (res?.success && res?.output) {
+          setDownloads([res.output]);
+          setResult(`下载完成！${res.title || ''} (${res.format || ''})`);
+        } else setError(res?.error || '下载失败，请检查 URL 或网络');
       }
       clearInterval(intervalRef.current!);
       setProgress(100);
@@ -301,6 +330,7 @@ export function Toolbox() {
             onConvert={handleConvert}
             converting={converting}
             progress={progress}
+            elapsedSec={elapsedSec}
             files={files}
             setFiles={setFiles}
             targetFormat={targetFormat}

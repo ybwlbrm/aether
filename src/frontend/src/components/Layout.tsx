@@ -121,7 +121,9 @@ export function Layout() {
 
   // 轮播定时器
   useEffect(() => {
-    if (!slideEnabled || slideImages.length <= 1) return;
+    // 背景切换修复：原 length<=1 导致单张图时定时器永不启动（看起来"背景不切换"）。
+    // 单张图也应启动定时器（无实际切换但状态一致）；仅空列表不启动。
+    if (!slideEnabled || slideImages.length === 0) return;
     if (slideTimerRef.current) clearInterval(slideTimerRef.current);
     slideTimerRef.current = setInterval(() => {
       setSlideIndex(prev => (prev + 1) % slideImages.length);
@@ -309,6 +311,9 @@ export function Layout() {
   }, []);
 
   useEffect(() => {
+    // 背景切换修复：轮播模式下不读取 customBg，避免导航时把 localStorage 旧单图
+    // 覆盖掉轮播事件设置的 setCustomBg(null)，造成单图/轮播状态互相污染。
+    if (slideEnabled) return;
     // 每次挂载/导航都从 localStorage 读取背景，确保背景显示
     const savedBg = localStorage.getItem('customBg');
     // 即使 localStorage 为空也要清空 state，否则删掉后图片残留
@@ -350,7 +355,7 @@ export function Layout() {
           }, 50);
 
           return () => window.removeEventListener('custombg-change', handler);
-  }, [location.pathname]); // 每次导航重新读取 localStorage
+  }, [location.pathname, slideEnabled]); // 每次导航重新读取 localStorage（轮播模式跳过）
 
   // 全局动态透明度：采样背景亮度，实时调整 --glass-vibrancy-opacity
   // 苹果 iOS26 标准：亮背景 6%~15%，暗背景 20%~35%

@@ -11,6 +11,7 @@ interface ToolboxProcessProps {
   onConvert: () => void;
   converting: boolean;
   progress: number;
+  elapsedSec: number;
   files: File[];
   setFiles: (files: File[]) => void;
   targetFormat: string;
@@ -47,7 +48,7 @@ interface ToolboxProcessProps {
 }
 
 export function ToolboxProcess({
-  selected, onBack, onConvert, converting, progress,
+  selected, onBack, onConvert, converting, progress, elapsedSec,
   files, setFiles, targetFormat, setTargetFormat,
   watermarkText, setWatermarkText,
   quality, setQuality, width, setWidth, height, setHeight,
@@ -112,6 +113,7 @@ export function ToolboxProcess({
           onConvert={onConvert}
           converting={converting}
           progress={progress}
+          elapsedSec={elapsedSec}
           files={files}
           setFiles={setFiles}
           targetFormat={targetFormat}
@@ -129,6 +131,8 @@ export function ToolboxProcess({
           error={error}
           fileInputRef={fileInputRef}
           handleDrop={handleDrop}
+          utilityInput={utilityInput}
+          setUtilityInput={setUtilityInput}
         />
       )}
     </motion.div>
