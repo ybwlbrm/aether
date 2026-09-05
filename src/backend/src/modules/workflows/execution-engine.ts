@@ -37,6 +37,14 @@ export interface ExecuteWorkflowOptions {
   db: any; // Database instance
   saveDb: (config: any) => void;
   request: any; // Fastify request for socket check
+  /**
+   * Optional event sink for workflow lifecycle events (Aether 2.0 §57):
+   *   workflow.started / workflow.node.started / workflow.node.completed /
+   *   workflow.completed / workflow.failed
+   * Emitted with { workflowId, runId, nodeId?, nodeType?, ... } payloads.
+   * Backward-compatible: callers that omit it get no events.
+   */
+  onEvent?: (type: string, payload: Record<string, unknown>) => void;
 }
 
 export interface ExecuteWorkflowResult {
@@ -49,13 +57,19 @@ export interface ExecuteWorkflowResult {
 }
 
 export async function executeWorkflow(opts: ExecuteWorkflowOptions): Promise<ExecuteWorkflowResult> {
-  const { workflowId, nodes, edges, input, config, executeNode, db, saveDb, request } = opts;
+  const { workflowId, nodes, edges, input, config, executeNode, db, saveDb, request, onEvent } = opts;
 
   if (nodes.length === 0) {
     throw new Error('工作流没有节点，无法执行');
   }
 
   const { runId, now } = await createWorkflowRunInternal(workflowId, nodes[0]?.id, db, saveDb, config);
+
+  // 事件：工作流开始（Aether 2.0 §57）
+  const emit = (type: string, payload: Record<string, unknown>): void => {
+    onEvent?.(type, { workflowId, runId, ...payload });
+  };
+  emit('workflow.started', { startedAt: now, nodeCount: nodes.length });
 
   const results: Record<string, unknown> = {};
   const context: Record<string, unknown> = { ...(input || {}) };
@@ -97,9 +111,13 @@ export async function executeWorkflow(opts: ExecuteWorkflowOptions): Promise<Exe
       if (!node) continue;
 
       db.update(workflowRuns).set({ currentNodeId: node.id }).where(eq(workflowRuns.id, runId)).run();
+      // 事件：节点开始（§57 workflow.node.started）
+      emit('workflow.node.started', { nodeId: node.id, nodeType: node.type, nodeLabel: node.label });
       const { output, data } = await executeNode(node, config, context);
       results[node.id] = { label: node.label, type: node.type, output, data };
       context[node.id] = output;
+      // 事件：节点完成（§57 workflow.node.completed）
+      emit('workflow.node.completed', { nodeId: node.id, nodeType: node.type, nodeLabel: node.label });
 
       // P1-14 修复：客户端断开连接时中止执行（避免浪费 AI 调用与副作用）
       // 使用 socket.destroyed（TCP 连接断开 = 客户端已断开）而非 request.raw.destroyed
@@ -148,6 +166,13 @@ export async function executeWorkflow(opts: ExecuteWorkflowOptions): Promise<Exe
     completedAt,
   }).where(eq(workflowRuns.id, runId)).run();
   saveDb(config);
+
+  // 事件：工作流结束（§57 workflow.completed / workflow.failed）
+  if (failed) {
+    emit('workflow.failed', { error: errorMsg, completedAt });
+  } else {
+    emit('workflow.completed', { completedAt, resultCount: Object.keys(results).length });
+  }
 
   return {
     runId,

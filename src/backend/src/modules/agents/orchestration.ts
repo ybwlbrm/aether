@@ -26,12 +26,25 @@ import { truncateHistoryByTokenBudget } from '../../lib/context-window.js';
 import { AGENTS, routeMessage } from './agent-definitions.js';
 import { setupSse, cleanupSse, sendErrorAndEnd, type SseContext } from './sse-handler.js';
 import { runAgentToolLoop, type ToolLoopContext } from './tool-loop.js';
+// Aether 2.0 v2 Event Runtime wiring (Phase 4-9 integration fix):
+// writes v2 AgentEvents to the `events` table alongside the legacy eventBus,
+// and owns the runs-row lifecycle (ensureRunRow / finalizeRunTokens).
+import { emitV2Event, ensureRunRow, finalizeRunTokens } from '../../lib/event-store-runtime.js';
+// Aether 2.0 Model Runtime bridge (FIX-6): wire the legacy providers table
+// into the core ModelRuntime/ModelRegistry so the bridge runs in production
+// instead of being dead code. Legacy fetch path is untouched (Adapter §2.1).
+import { buildAllRuntimes } from '../../lib/model-runtime-bridge.js';
+import { ModelRegistry } from '../../core/models/index.js';
 
 // 活跃的 AI 请求 AbortController 映射表（按 conversationId）
 const activeRequests = new Map<string, AbortController>();
 
 // P1-7 修复：运行时自定义提示词存放在局部 Map，不再突变模块级共享的 AGENTS 数组
 const customPrompts = new Map<string, string>();
+
+// Aether 2.0 Model Runtime registry (FIX-6): shared registry warmed from the
+// providers table by handleOrchestrate; call sites can resolve runtimes here.
+const modelRuntimeRegistry = new ModelRegistry();
 
 export async function handleOrchestrate(
   app: FastifyInstance,
@@ -90,6 +103,16 @@ export async function handleOrchestrate(
   const allConfigs = db.select().from(agentConfigs).all();
   const configMap = new Map(allConfigs.map(c => [c.agentId, c]));
 
+  // Aether 2.0 Model Runtime bridge (FIX-6): warm the providers table into the
+  // core ModelRegistry + ModelRuntime instances each orchestration. Zero
+  // behavior change to the legacy fetch path — this makes the bridge a real
+  // production call site (it existed only in tests before).
+  try {
+    buildAllRuntimes(db, modelRuntimeRegistry);
+  } catch (err) {
+    console.warn('[Orchestration] ModelRuntime bridge warm failed:', err instanceof Error ? err.message : String(err));
+  }
+
   // 解析 agent 的 provider + model 配置
   function resolveAgentEndpoint(agentId: string): { baseUrl: string; apiKey: string; model: string } | null {
     const cfg = configMap.get(agentId);
@@ -110,6 +133,22 @@ export async function handleOrchestrate(
 
   const convId = body.conversationId || 'anonymous';
   const runTaskId = randomUUID();
+
+  // Aether 2.0 v2 Event Runtime wiring (FIX-1/FIX-2): every orchestration run
+  // owns a `runs` row and mirrors key lifecycle events into the `events` table,
+  // so GET /api/runs/:runId/events and replay return real data. The legacy
+  // eventBus path below is untouched (Adapter pattern §2.1).
+  try {
+    ensureRunRow(db, runTaskId, body.conversationId, 'super');
+    void emitV2Event({
+      runId: runTaskId,
+      sessionId: convId,
+      taskId: runTaskId,
+      agentId: 'sisyphus',
+      type: 'run.created',
+      payload: { status: 'created' },
+    });
+  } catch { /* v2 runtime must never break legacy orchestration */ }
 
   // 使用 sse-handler 的 setupSse 创建上下文（内部完成 writeHead 与 sseSend，避免重复写头）
   const sseCtx = setupSse(reply, body.conversationId, db, config, () => saveDb(config));
@@ -259,6 +298,9 @@ export async function handleOrchestrate(
         status: 'running',
         content: `正在分析任务并分派 Agent`,
       });
+      // v2 mirror: run.started + agent.started (sisyphus orchestrator)
+      void emitV2Event({ runId: runTaskId, sessionId: convId, taskId: runTaskId, agentId: 'sisyphus', type: 'run.started', payload: { status: 'running' } });
+      void emitV2Event({ runId: runTaskId, sessionId: convId, taskId: runTaskId, agentId: 'sisyphus', type: 'agent.started', payload: { status: 'running' } });
     }
 
     // 2. 每个 Agent 使用自己的配置模型并行调用，逐个发送结果
@@ -545,6 +587,17 @@ ${errorResults.length > 0 ? `\n注意：以下 Agent 执行失败，结果不可
         // 结束原因：客户端中止 → aborted；其余正常 → completed
         endReason: clientAbort.signal.aborted ? 'aborted' : 'completed',
       });
+      // Aether 2.0 v2 mirror (FIX-1/FIX-2): finalize the runs row with terminal
+      // status + token snapshot, and emit run.completed / run.cancelled.
+      const terminalStatus = clientAbort.signal.aborted ? 'cancelled' as const : 'completed' as const;
+      try {
+        finalizeRunTokens(db, runTaskId, terminalStatus, { totalTokens: totalAgentTokens }, undefined);
+        void emitV2Event({
+          runId: runTaskId, sessionId: convId, taskId: runTaskId, agentId: 'sisyphus',
+          type: terminalStatus === 'cancelled' ? 'run.cancelled' : 'run.completed',
+          payload: { endReason: terminalStatus === 'cancelled' ? 'aborted' : 'completed', tokenUsage: { inputTokens: 0, outputTokens: 0, totalTokens: totalAgentTokens } },
+        });
+      } catch { /* v2 runtime must never break legacy orchestration */ }
     }
 
     // 发送结束标记
@@ -562,6 +615,15 @@ ${errorResults.length > 0 ? `\n注意：以下 Agent 执行失败，结果不可
           taskId: runTaskId, agentId: 'sisyphus', agentType: 'orchestrator',
           status: 'error', content: (e instanceof Error ? e.message : String(e)) || '内部错误',
         });
+        // Aether 2.0 v2 mirror (FIX-2): mark the run failed and record the error
+        try {
+          finalizeRunTokens(db, runTaskId, 'failed', { totalTokens: 0 }, (e instanceof Error ? e.message : String(e)) || '内部错误');
+          void emitV2Event({
+            runId: runTaskId, sessionId: convId, taskId: runTaskId, agentId: 'sisyphus',
+            type: 'run.failed',
+            payload: { endReason: 'error', error: { message: (e instanceof Error ? e.message : String(e)) || '内部错误' } },
+          });
+        } catch { /* v2 runtime must never break legacy orchestration */ }
       } catch (emitErr: unknown) { console.error('[Agents] task.failed 事件发射失败:', emitErr instanceof Error ? emitErr.message : String(emitErr)); }
     }
     try { sseSend('message', '[DONE]'); } catch { /* SSE 写入失败=客户端已断开，忽略 */ }

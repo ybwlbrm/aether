@@ -251,6 +251,68 @@ export async function runMigrations(config: BackendConfig): Promise<void> {
     db.run(`INSERT INTO schema_version (version, applied_at) VALUES (9, ?)`, [new Date().toISOString()]);
   }
 
+  // 版本 10: runs 表 — Aether 2.0 运行根实体
+  if (currentVersion < 10) {
+    db.run(`CREATE TABLE IF NOT EXISTS runs (
+      id TEXT PRIMARY KEY,
+      conversation_id TEXT REFERENCES conversations(id),
+      status TEXT NOT NULL DEFAULT 'created',
+      mode TEXT NOT NULL DEFAULT 'normal',
+      root_agent_id TEXT,
+      started_at TEXT,
+      completed_at TEXT,
+      end_reason TEXT,
+      input_tokens INTEGER NOT NULL DEFAULT 0,
+      output_tokens INTEGER NOT NULL DEFAULT 0,
+      total_tokens INTEGER NOT NULL DEFAULT 0,
+      error TEXT,
+      metadata TEXT,
+      created_at TEXT NOT NULL
+    )`);
+    db.run(`INSERT INTO schema_version (version, applied_at) VALUES (10, ?)`, [new Date().toISOString()]);
+  }
+
+  // 版本 11: tasks 表 — Run 下的执行单元（支持父子层级）
+  if (currentVersion < 11) {
+    db.run(`CREATE TABLE IF NOT EXISTS tasks (
+      id TEXT PRIMARY KEY,
+      run_id TEXT NOT NULL REFERENCES runs(id),
+      parent_task_id TEXT,
+      agent_id TEXT NOT NULL DEFAULT 'main',
+      agent_type TEXT NOT NULL DEFAULT 'conversation',
+      status TEXT NOT NULL DEFAULT 'pending',
+      input TEXT,
+      output TEXT,
+      error TEXT,
+      started_at TEXT,
+      completed_at TEXT,
+      metadata TEXT,
+      created_at TEXT NOT NULL
+    )`);
+    db.run(`INSERT INTO schema_version (version, applied_at) VALUES (11, ?)`, [new Date().toISOString()]);
+  }
+
+  // 版本 12: events 表 — Aether 2.0 Event Store + 关键索引
+  if (currentVersion < 12) {
+    db.run(`CREATE TABLE IF NOT EXISTS events (
+      id TEXT PRIMARY KEY,
+      run_id TEXT NOT NULL REFERENCES runs(id),
+      seq INTEGER NOT NULL,
+      event_type TEXT NOT NULL,
+      event_version INTEGER NOT NULL DEFAULT 1,
+      payload TEXT NOT NULL,
+      packed TEXT,
+      metadata TEXT,
+      created_at TEXT NOT NULL
+    )`);
+    // 关键约束：UNIQUE(run_id, seq) — run 级序号分配器的并发安全保证
+    db.run(`CREATE UNIQUE INDEX IF NOT EXISTS idx_events_run_seq ON events(run_id, seq)`);
+    // tasks 表常用查询索引
+    db.run(`CREATE INDEX IF NOT EXISTS idx_tasks_run_id ON tasks(run_id)`);
+    db.run(`CREATE INDEX IF NOT EXISTS idx_tasks_parent ON tasks(parent_task_id)`);
+    db.run(`INSERT INTO schema_version (version, applied_at) VALUES (12, ?)`, [new Date().toISOString()]);
+  }
+
   // 保存到文件（原子写，防止强杀损坏主库）
   const data = db.export();
   const buffer = Buffer.from(data);

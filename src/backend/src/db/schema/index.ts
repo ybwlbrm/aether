@@ -197,3 +197,72 @@ export const activityEvents = sqliteTable('activity_events', {
   metadata: text('metadata'), // JSON
   createdAt: text('created_at').notNull(), // ISO8601
 });
+
+// ──────────────────────────────────────────────────────────────
+// Aether 2.0 — Run / Task / Event Runtime（Phase 2/3）
+// ──────────────────────────────────────────────────────────────
+
+/**
+ * Run 表 — 一次完整 AI 运行的根实体（对话消息 / 编排 / 工作流 / 后台任务统一入口）
+ * 状态机：created → running ⇄ waiting → completed | failed | cancelled | interrupted
+ */
+export const runs = sqliteTable('runs', {
+  id: text('id').primaryKey(),
+  conversationId: text('conversation_id').references(() => conversations.id),
+  status: text('status', {
+    enum: ['created', 'running', 'waiting', 'completed', 'failed', 'cancelled', 'interrupted'],
+  }).notNull().default('created'),
+  /** 运行模式：normal（单 Agent 直答）| super（多 Agent 编排）| workflow | background */
+  mode: text('mode', { enum: ['normal', 'super', 'workflow', 'background'] }).notNull().default('normal'),
+  rootAgentId: text('root_agent_id'),
+  startedAt: text('started_at'),
+  completedAt: text('completed_at'),
+  endReason: text('end_reason'),
+  inputTokens: integer('input_tokens').notNull().default(0),
+  outputTokens: integer('output_tokens').notNull().default(0),
+  totalTokens: integer('total_tokens').notNull().default(0),
+  error: text('error'),
+  metadata: text('metadata'), // JSON
+  createdAt: text('created_at').notNull(),
+});
+
+/**
+ * Task 表 — Run 下的执行单元（支持父子层级：Sisyphus spawn 子 Agent）
+ */
+export const tasks = sqliteTable('tasks', {
+  id: text('id').primaryKey(),
+  runId: text('run_id').notNull().references(() => runs.id),
+  parentTaskId: text('parent_task_id'),
+  agentId: text('agent_id').notNull().default('main'),
+  agentType: text('agent_type').notNull().default('conversation'),
+  status: text('status', {
+    enum: ['pending', 'running', 'waiting', 'completed', 'failed', 'cancelled'],
+  }).notNull().default('pending'),
+  input: text('input'), // JSON
+  output: text('output'), // JSON
+  error: text('error'),
+  startedAt: text('started_at'),
+  completedAt: text('completed_at'),
+  metadata: text('metadata'), // JSON
+  createdAt: text('created_at').notNull(),
+});
+
+/**
+ * Events 表 — Aether 2.0 Event Store（事件唯一事实源）
+ * 与旧 activity_events 并存：新 Runtime 写此表，旧路径经 Adapter 桥接。
+ * 关键约束：UNIQUE(run_id, seq) — run 级序号分配器的并发安全保证。
+ * payload 为完整判别联合事件（AgentEvent v2）的 JSON 序列化。
+ */
+export const events = sqliteTable('events', {
+  id: text('id').primaryKey(), // eventId (uuid)
+  runId: text('run_id').notNull().references(() => runs.id),
+  seq: integer('seq').notNull(),
+  eventType: text('event_type').notNull(),
+  /** 协议版本（当前 = 1），未来升级时用于解码分发 */
+  eventVersion: integer('event_version').notNull().default(1),
+  payload: text('payload').notNull(), // JSON: 完整 AgentEvent v2
+  /** 打包事件（chunk packing）时携带原始子事件数组 */
+  packed: text('packed'), // JSON: 子事件数组（packed row）或 null
+  metadata: text('metadata'), // JSON
+  createdAt: text('created_at').notNull(), // ISO8601
+});

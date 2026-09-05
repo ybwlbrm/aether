@@ -31,6 +31,7 @@ import { registerKnowledgeRoutes } from './modules/knowledge/index.js';
 import { registerTerminalRoutes } from './modules/terminal/index.js';
 import { registerApprovalRoutes } from './modules/approvals/index.js';
 import { registerAuthRoutes } from './modules/auth/index.js';
+import { registerRunRoutes, registerRunEventsRoutes, registerRunStreamRoutes } from './modules/runs/index.js';
 import { closeAllMcpClients } from './lib/mcp-client.js';
 import { generateLocalAuthToken, verifyAuthToken } from './lib/auth-token.js';
 import fastifyStatic from '@fastify/static';
@@ -195,6 +196,9 @@ export async function buildApp(config?: BackendConfig) {
   registerTerminalRoutes(app, cfg);
   registerApprovalRoutes(app, cfg);
   registerAuthRoutes(app);
+  registerRunRoutes(app, cfg);
+  registerRunEventsRoutes(app, cfg);
+  registerRunStreamRoutes(app, cfg);
 
   // 背景图片静态服务
   const bgDir = resolve(cfg.dataDir, 'backgrounds');

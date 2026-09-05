@@ -5,6 +5,9 @@ import { executeWorkflow } from './execution-engine.js';
 import { executeNode } from './node-executors.js';
 import { aiCreateWorkflow } from './ai-creator.js';
 import type { WorkflowNode, WorkflowEdge } from './types.js';
+// Aether 2.0 v2 Event Runtime (FIX-5): workflow lifecycle events (§57) into
+// the events table so run replay / SSE stream see them.
+import { emitV2Event, ensureRunRow, mapWorkflowEventType } from '../../lib/event-store-runtime.js';
 
 // 重新导出类型和核心函数，保持向后兼容
 export type { WorkflowNode, WorkflowEdge };
@@ -125,6 +128,7 @@ export function registerWorkflowRoutes(app: FastifyInstance, config: BackendConf
     if (!workflow) return reply.code(404).send({ error: '工作流不存在' });
 
     try {
+      const db = (await import('../../db/client.js')).getDb();
       const result = await executeWorkflow({
         workflowId: id,
         nodes: workflow.nodes,
@@ -132,9 +136,36 @@ export function registerWorkflowRoutes(app: FastifyInstance, config: BackendConf
         input: body?.input,
         config,
         executeNode,
-        db: (await import('../../db/client.js')).getDb(),
+        db,
         saveDb: (await import('../../db/client.js')).saveDb,
         request,
+        // Aether 2.0 §57: mirror workflow lifecycle events into the v2 events
+        // table (FIX-5) — workflow.started → run.created, node.started →
+        // task.started, node.completed → task.completed, completed/failed →
+        // run.completed / run.failed. Non-blocking: legacy path unaffected.
+        onEvent: (type, payload) => {
+          try {
+            const runId = typeof payload.runId === 'string' ? payload.runId : '';
+            if (!runId) return;
+            // ensure a runs row exists for the workflow run
+            try { ensureRunRow(db, runId, undefined, 'workflow'); } catch { /* non-fatal */ }
+            const v2Type = mapWorkflowEventType(type);
+            const nodeId = typeof payload.nodeId === 'string' ? payload.nodeId : undefined;
+            const nodeType = typeof payload.nodeType === 'string' ? payload.nodeType : undefined;
+            void emitV2Event({
+              runId,
+              sessionId: runId,
+              taskId: nodeId,
+              agentId: 'workflow',
+              type: v2Type,
+              payload: {
+                status: type.endsWith('.started') ? 'started' : type.endsWith('.failed') ? 'error' : 'completed',
+                content: nodeId ? `node: ${nodeId}${nodeType ? ` (${nodeType})` : ''}` : `workflow ${type}`,
+                ...(typeof payload.error === 'string' ? { error: { message: payload.error } } : {}),
+              },
+            });
+          } catch { /* v2 event mirror must never break workflow execution */ }
+        },
       });
       return result;
     } catch (e: unknown) {
