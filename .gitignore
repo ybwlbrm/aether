@@ -73,3 +73,8 @@ __pycache__/
 *.pyc
 .omo/
 qa/
+
+# 外部工具二进制（按需下载，不入库）
+build/ffmpeg.exe
+build/ffprobe.exe
+build/yt-dlp.exe
