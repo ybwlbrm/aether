@@ -1,14 +1,29 @@
 ﻿# Aether · 个人 AI 指挥中心
 
-> **本地优先的 AI 工作操作系统**：对话、智能体编排、工具箱、知识、文档、记忆一站式，AI 功能全都在你自己的电脑上跑。
+> **本地优先的 AI 工作操作系统**：对话、智能体编排、工具箱、知识、文档、记忆一站式，AI 能力全都在你自己的电脑上运行。
 >
-> 所有数据保存在本地，不上云。真正的隐私全权由你掌控——AI 能力、数据、记忆全部属于你。
+> 所有数据保存在本地——AI 能力、数据、记忆全部属于你，隐私全权由你掌控，不上云。
+
+![Version](https://img.shields.io/badge/版本-2.0-brightgreen) ![Tests](https://img.shields.io/badge/测试-864%2B-blue) ![License](https://img.shields.io/badge/License-MIT-orange) ![Platform](https://img.shields.io/badge/Windows/WEB/Android-✓-lightgrey)
+
+---
+
+## 💡 为什么选 Aether？核心亮点
+
+| 亮点 | 说明 |
+|------|------|
+| 🧠 **真正的 AI 操作系统** | 不是又一个聊天机器人——用自然语言指挥一组 AI「员工」分工协作、互相交接、共同完成复杂任务 |
+| 🔒 **本地优先，隐私第一** | API Key 用 AES-256-GCM 加密、钥匙交 Windows DPAPI 保护；所有数据存本地，绝不上传 |
+| 🏗️ **Aether 2.0 Runtime 架构** | 全新事件驱动分层架构：Event → Run → Agent → Model/Tool/Memory，可恢复、可扩展、可回放 |
+| 🤖 **11 个内置 Agent** | Sisyphus / Oracle / Librarian / Explore / Hephaestus 等，各司其职、自动编排 |
+| 🛠️ **MCP + 工具箱即插即用** | 格式转换、YouTube 下载、音视频提取、聚合搜索、文档生成，插件化扩展 |
+| 📊 **工程级质量** | 26 个后端模块、120+ API、**864+ 自动化测试**全绿、TypeScript 严格模式 |
 
 ---
 
 ## ✨ 这是什么
 
-Aether 是一个把 **AI 对话、多 Agent 协作、自动化工具箱、知识管理、文档生成** 整合在一起的桌面操作系统级应用。它不是又一个聊天机器人，而是一个让你用自然语言指挥一组 AI「员工」分工协作的工作平台。
+Aether 是一个把 **AI 对话、多 Agent 协作、自动化工具箱、知识管理、文档生成** 整合在一起的桌面操作系统级应用。不是又一个聊天机器人，而是让自然语言成为指挥一群 AI「员工」的方式。
 
 | 模块 | 说明 |
 |------|------|
@@ -27,7 +42,7 @@ Aether 是一个把 **AI 对话、多 Agent 协作、自动化工具箱、知识
 
 ## 🏗️ 核心架构（Aether 2.0 Runtime）
 
-Aether 2.0 引入了一套 **事件驱动、可恢复、可扩展的 Runtime 分层架构**。它把「功能丰富的 AI 工作台」升级成真正的「Personal AI Operating System」。
+Aether 2.0 引入了一套 **事件驱动、可恢复、可扩展的 Runtime 分层架构**。它把「功能丰富的 AI 工作台」升级成真正的「Personal AI Operating System」——每一次对话、工具调用、Agent 协作都是一次可追踪、可回放、可断线续传的「运行」。
 
 ```
 ┌─────────────────────────┐
@@ -72,26 +87,26 @@ Aether 2.0 引入了一套 **事件驱动、可恢复、可扩展的 Runtime 分
 
 ### Aether 2.0 新增核心（`src/backend/src/core/`）
 
-| 子模块 | 内容 | 文件数 |
-|--------|------|--------|
-| `runtime/` | Run/Task 状态机、生命周期、取消令牌、Checkpoint | 15 |
-| `events/` | EventBus / EventStore(SQLite+内存) / Replay / Sequence / Projector / SSE Transport / Chunk Packing / LegacyAdapter | 23 |
-| `models/` | ModelRuntime / StreamingClient / ModelRegistry / ProviderAdapter / 用量统计 | 15 |
-| `agents/` | AgentRuntime / AgentRegistry / 消息 / Handoff / Supervisor / 旧 AGENTS 迁移 | 17 |
-| `tools/` | AetherTool / ToolRegistry / ToolExecutor / ToolPolicy / 超时 / 结果联合类型 | 13 |
-| `permissions/` | Capability / PolicyEngine / ApprovalManager | 7 |
-| `memory/` | MemoryStore / MemoryRuntime / MemoryRetriever（keyword+hybrid 打分） | 6 |
-| `artifacts/` | ArtifactStore / ArtifactRuntime（文件产物注册） | 5 |
-| `errors/` | RuntimeError 层次（Model/Tool/Retry 派生） | 6 |
+| 子模块 | 文件数 | 说明 |
+|--------|--------|------|
+| `runtime/` | 15 | Run/Task 状态机、生命周期、取消令牌（CancellationToken）、Checkpoint |
+| `events/` | 23 | EventBus / EventStore(SQLite+内存) / Replay / Sequence / Projector / SSE Transport / Chunk Packing / LegacyAdapter |
+| `models/` | 15 | ModelRuntime / StreamingClient / ModelRegistry / ProviderAdapter / 用量统计 |
+| `agents/` | 17 | AgentRuntime / AgentRegistry / 消息 / Handoff / Supervisor / 旧 AGENTS 迁移 |
+| `tools/` | 13 | AetherTool / ToolRegistry / ToolExecutor / ToolPolicy / 超时管理 / 结果联合类型 |
+| `permissions/` | 7 | Capability / PolicyEngine / ApprovalManager |
+| `memory/` | 6 | MemoryStore / MemoryRuntime / MemoryRetriever（keyword+hybrid 打分） |
+| `artifacts/` | 5 | ArtifactStore / ArtifactRuntime（文件产物注册） |
+| `errors/` | 6 | RuntimeError 层次（Model/Tool/Retry 派生） |
 
-> 事件协议 v2：37 种判别联合（run/task/agent/message/tool/token 全生命周期），统一携带 `version` + `runId` + `seq`，支持 replay 与断线续传。
+> 事件协议 v2：**37 种判别联合**（run/task/agent/message/tool/token 全生命周期），统一携带 `version` + `runId` + `seq`，支持 replay 与断线续传。
 
-### 关键能力速览
+### 关键能力
 
-- ✅ **Run API**：`/api/runs` 7 端点 + `/api/runs/:runId/events?afterSeq=` 增量回放 + `/api/runs/:runId/stream` SSE 实时流（支持 Last-Event-ID 断线恢复）
-- ✅ **迁移 v10-v12**：`runs` / `tasks` / `events` 三表，`UNIQUE(run_id, seq)` 保证并发安全
-- ✅ **旧系统兼容**：legacy adapter 双向映射（activity_events ↔ events），不推倒重来
-- ✅ **26 个后端模块、120+ API 端点、864+ 自动化测试**
+- ✅ **Run API**：`/api/runs` 7 端点 + `/api/runs/:runId/events?afterSeq=` 增量回放 + `/api/runs/:runId/stream` SSE 实时流（Last-Event-ID 断线恢复）
+- ✅ **迁移 v10-v12**：新增 `runs` / `tasks` / `events` 表，`UNIQUE(run_id, seq)` 保证并发安全
+- ✅ **旧系统无缝兼容**：legacy adapter 双向映射（activity_events ↔ events），不推倒重来，平滑过渡
+- ✅ **5 大 Runtime 桥接层**：model / agent / tool / memory / artifact 生产接线，新架构真实运行
 
 ---
 
@@ -100,60 +115,38 @@ Aether 2.0 引入了一套 **事件驱动、可恢复、可扩展的 Runtime 分
 ### 环境要求
 
 - **Node.js 18+**（推荐 20/22 LTS）
-- **Windows 10/11**（桌面版）/ 现代浏览器（Localhost 版）
-- 可选：**JDK 21 + Android SDK**（用于构建移动端 APK）
+- **Windows 10/11**（桌面版）· 现代浏览器（Localhost 版）
+- 可选：**JDK 21 + Android SDK**（构建移动端 APK）
 
-### 版本 A：Localhost 版（零安装）
+### 版本 A：Localhost 版（零安装，5 分钟跑起来）
 
 ```bash
-# 1. 安装依赖
-npm install
-
-# 2. 构建
-npm run build
-
-# 3. 启动
-npm start
+npm install      # 安装依赖
+npm run build    # 构建
+npm start        # 启动
 ```
 
-访问 **http://127.0.0.1:3000**
-
-> 也可以直接双击 `start.bat` 一键启动。
+访问 **http://127.0.0.1:3000** · 也可以直接双击 `start.bat` 一键启动
 
 ### 版本 B：EXE 桌面版
 
 ```bash
-# 一键生成便携版 + NSIS 安装包
-npm run build:exe
+npm run build:exe   # 一键生成便携版 + NSIS 安装包
 ```
 
-产物位于：
-- `dist_exe/` → 便携版（`启动应用.bat`）
-- `dist_electron/` → NSIS 安装包（`Aether Setup 1.0.0.exe`）
+产物：`dist_exe/`（便携版）+ `dist_electron/`（**Aether Setup 1.0.0.exe** 安装包）
 
 ### 版本 C：Android APK
 
 ```bash
-# 1. 构建移动端前端
 npm run build:mobile
-
-# 2. 同步 Capacitor
 npx cap sync android
-
-# 3. 构建 APK（需 JDK 21 + Android SDK）
-cd android
-gradlew.bat assembleRelease   # Windows
-./gradlew assembleRelease     # macOS / Linux
+cd android && gradlew.bat assembleRelease   # 需 JDK 21
 ```
 
 产物：`android/app/build/outputs/apk/release/app-release.apk`
 
-> **APK 签名（可选，推荐）**：未签名 APK 可直接安装自测；正式分发建议签名。
-> ```bash
-> keytool -genkeypair -v -keystore android/aether-release.jks \
->   -alias aether -keyalg RSA -keysize 2048 -validity 10000
-> ```
-> `keystore.properties` 与 `*.jks` 已被 `.gitignore` 排除，**不会进入源码仓库**。
+> APK 签名（推荐）：`keystore.properties` 与 `*.jks` 已被 `.gitignore` 排除，**不会进入源码仓库**。
 
 ### 开发模式（热更新）
 
@@ -165,7 +158,7 @@ npm run dev
 
 ## 📖 从零开始的运行指南
 
-> 如果你是第一次接触本项目，按下面的顺序一步步来。
+> 第一次接触本项目？按顺序一步步来。
 
 ### 第 1 步：准备环境
 
@@ -173,7 +166,7 @@ npm run dev
 |------|------|------|
 | Node.js 20+ | 运行与构建 | https://nodejs.org |
 | Git | 拉取源码 | https://git-scm.com |
-| （可选）JDK 21 | Android APK | https://adoptium.net |
+| （可选）JDK 21 | 构建 Android APK | https://adoptium.net |
 
 ### 第 2 步：拉取并安装
 
@@ -183,7 +176,7 @@ cd aether
 npm install
 ```
 
-> 国内网络较慢可切换镜像源：`npm config set registry https://registry.npmmirror.com`
+> 国内网络较慢可切换镜像：`npm config set registry https://registry.npmmirror.com`
 
 ### 第 3 步：构建并启动
 
@@ -194,23 +187,21 @@ npm start
 
 访问 **http://127.0.0.1:3000**
 
-> Windows 用户也可以直接双击 `start.bat`。
-
-### 第 4 步：配置 AI
+### 第 4 步：配置你的 AI
 
 1. 进入 **设置 → AI Provider**
 2. 添加你的 AI Provider
-3. 填入：名称（例如 `DeepSeek`）、类型、Base URL（如 `https://api.deepseek.com`）、**你的 API Key**、模型列表
-4. 保存后到「AI 对话」即可使用
+3. 填入：名称（如 `DeepSeek`）、类型、Base URL（如 `https://api.deepseek.com`）、**你的 API Key**、模型列表
+4. 保存后到「AI 对话」即可开聊
 
 ### 常见问题
 
 | 问题 | 解决 |
 |------|------|
-| `npm install` 慢/失败 | 切换到国内镜像（如上） |
-| 启动后页面打不开 | 检查端口 3000 是否被占用，杀掉进程后重试 |
-| 输入 API Key 报错 | 前往 设置 → AI Provider，确认 Key 与模型填写正确 |
-| Setup 安装到自定义目录后出错 | 已改为动态路径解析，任意目录克隆均可用 |
+| `npm install` 慢/失败 | 切换国内镜像（如上） |
+| 页面打不开 | 检查端口 3000 是否被占用，杀进程后重试 |
+| API Key 报错 | 设置 → AI Provider，确认 Key 与模型填写正确 |
+| Setup 装到自定义目录出错 | 已改为动态路径解析，任意目录克隆均可用 |
 | 想换语言 | 设置 → 界面 → 6 种语言切换 |
 | 数据在哪里 | `data/` 目录（数据库 + 配置），备份迁移整个目录即可 |
 
@@ -218,36 +209,29 @@ npm start
 
 ## 🔐 安全设计
 
-**安全第一** 是本项目的核心原则。
+**安全第一** 是核心原则。
 
-- 🗝️ **密钥安全**：API Key 使用 AES-256-GCM 加密存储，签名在 Windows DPAPI 中由系统保护
-- 🛡️ **SSRF 防护**：所有出站请求经过 URL 校验（拒绝内网 / 元数据 / 重定向至敏感地址）
-- 📂 **路径守卫**：文件访问基于白名单目录 + UUID 文件名，杜绝路径穿越
-- ⛔ **命令白名单**：终端 / 数据处理执行时 spawn + 参数校验，防注入
-- 🔑 **端点认证**：敏感端点（终端执行 / 数据导入导出 / MCP 测试）受 Bearer Token 保护
-- 🌐 **CSP/CORS**：严格内容安全策略 + CORS 白名单 + Host 校验（防 DNS Rebinding）
-- 🏠 **数据本地化**：所有数据存储在本地 `data/` 目录，随时可备份迁移
+- 🗝️ **密钥安全**：API Key AES-256-GCM 加密，签名由 Windows DPAPI 系统级保护
+- 🛡️ **SSRF 防护**：出站请求 URL 校验（拒绝内网 / 元数据 / 敏感重定向）
+- 📂 **路径守卫**：白名单目录 + UUID 文件名，杜绝路径穿越
+- ⛔ **命令白名单**：终端/数据处理 spawn + 参数校验，防注入
+- 🔑 **端点认证**：敏感端点（终端执行 / 导入导出 / MCP 测试）需 Bearer Token
+- 🌐 **CSP/CORS**：严格 CSP + CORS 白名单 + Host 校验（防 DNS Rebinding）
+- 🏠 **数据本地化**：所有数据都在本地 `data/` 目录，随时备份迁移
 
 ---
 
 ## 🧪 测试与质量
 
 ```bash
-# 全量测试（shared + backend + frontend）
-npm test
-
-# 分端测试
-npm run test:backend
-npm run test:frontend
-
-# 类型检查
-npm run typecheck
-
-# Lint
-npm run lint
+npm test               # 全量（shared + backend + frontend）
+npm run test:backend   # 后端
+npm run test:frontend  # 前端
+npm run typecheck      # 类型检查
+npm run lint           # Lint
 ```
 
-当前质量基线：**864+ 自动化测试**（backend **795** + shared **32** + frontend **37**）+ TypeScript 严格模式 + ESLint。
+**质量基线：864+ 自动化测试全绿**（backend **795** + shared **32** + frontend **37**）+ TypeScript 严格模式 + ESLint。
 
 ---
 
@@ -265,7 +249,7 @@ npm run lint
 - 业务数据访问统一走 `lib/dal`
 - 出站请求必须经 `lib/safe-fetch`
 - 文件访问必须经 `lib/path-guard`
-- **新增 Runtime 逻辑放在 `src/backend/src/core/`**（transport-agnostic，禁 Fastify/SSE/React 依赖）；旧系统经 adapter/bridge 渐进迁移，不推倒重来
+- **新增 Runtime 逻辑放 `src/backend/src/core/`**（transport-agnostic，禁 Fastify/SSE/React 依赖）；旧系统经 adapter/bridge 渐进迁移，不推倒重来
 
 ---
 
