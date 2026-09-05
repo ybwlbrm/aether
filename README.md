@@ -1,4 +1,4 @@
-# Aether — 个人 AI 指挥中心
+﻿# Aether — 个人 AI 指挥中心
 
 > **本地优先的 AI 工作操作系统**：对话、搜索、知识管理、Agent 编排、工具箱，一站式个人 AI 工作台。
 >
@@ -248,7 +248,6 @@ PersonalAICommandCenter/
 ├── electron/            # 桌面壳（main.js / preload.js / builder 配置）
 ├── build/               # 打包脚本（build-exe.js / bundle-backend.js）
 ├── android/             # Android 工程
-├── docs/                # 架构文档与审计报告
 └── data/                # ⚠️ 本地数据（不入库，gitignore）
 ```
 
