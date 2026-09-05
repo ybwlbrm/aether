@@ -52,6 +52,7 @@ files:
 
 asar: true
 # native 模块（.node 二进制）必须在 asar 外解包才能被 Node 加载
+# 外部工具 exe 同理：asar 归档内不可执行，必须解包为真实文件（spawn/execFile 才能跑）
 asarUnpack:
   - src/frontend/dist/**/*
   - node_modules/koffi/**/*
@@ -61,6 +62,9 @@ asarUnpack:
   - node_modules/sharp/**/*
   - node_modules/@img/**/*
   - node_modules/sql.js/**/*
+  - build/ffmpeg.exe
+  - build/ffprobe.exe
+  - build/yt-dlp.exe
 compression: maximum # P2-10: 压缩安装包 (原 store 不压缩 ~350MB)
 removePackageScripts: true
 npmRebuild: false
