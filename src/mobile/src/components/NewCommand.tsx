@@ -23,9 +23,8 @@ function generateConvId(): string {
 // 简单 markdown 渲染函数（轻量，不依赖第三方库）
 function renderMarkdown(text: string): React.ReactNode {
   if (!text) return null;
-  const imgRegex = /!\[([^\]]*)\]\(([^)]+)\)/g;
   const parts: React.ReactNode[] = [];
-  let lastIdx = 0, match: RegExpExecArray | null, key = 0;
+  let key = 0;
   const codeBlocks: { start: number; end: number; lang: string; code: string }[] = [];
   const codeRegex = /```(\w*)\n([\s\S]*?)```/g;
   let cm: RegExpExecArray | null;

@@ -5,7 +5,6 @@ import { createCipheriv, createDecipheriv, randomBytes, createHash } from 'node:
 
 const ALGORITHM = 'aes-256-gcm';
 const IV_LENGTH = 12;
-const TAG_LENGTH = 16;
 
 /** 从任意字符串派生 32 字节密钥（SHA-256） */
 function deriveKey(encryptionKey: string): Buffer {

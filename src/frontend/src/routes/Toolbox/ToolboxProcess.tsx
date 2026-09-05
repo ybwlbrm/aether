@@ -12,6 +12,8 @@ interface ToolboxProcessProps {
   converting: boolean;
   progress: number;
   elapsedSec: number;
+  toolMissing: boolean;
+  missingToolInfo: any;
   files: File[];
   setFiles: (files: File[]) => void;
   targetFormat: string;
@@ -48,7 +50,7 @@ interface ToolboxProcessProps {
 }
 
 export function ToolboxProcess({
-  selected, onBack, onConvert, converting, progress, elapsedSec,
+  selected, onBack, onConvert, converting, progress, elapsedSec, toolMissing, missingToolInfo,
   files, setFiles, targetFormat, setTargetFormat,
   watermarkText, setWatermarkText,
   quality, setQuality, width, setWidth, height, setHeight,
@@ -114,6 +116,8 @@ export function ToolboxProcess({
           converting={converting}
           progress={progress}
           elapsedSec={elapsedSec}
+          toolMissing={toolMissing}
+          missingToolInfo={missingToolInfo}
           files={files}
           setFiles={setFiles}
           targetFormat={targetFormat}

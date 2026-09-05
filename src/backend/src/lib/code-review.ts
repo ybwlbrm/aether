@@ -3,7 +3,7 @@
  * 分析代码中的常见问题：未使用变量、缺失类型、潜在 bug、代码风格等
  */
 import { existsSync, readFileSync, statSync } from 'node:fs';
-import { resolve, parse, sep } from 'node:path';
+import { resolve, parse } from 'node:path';
 import { isPathSafe } from './path-guard.js';
 
 export const codeReviewTools = [

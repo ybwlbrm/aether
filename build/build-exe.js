@@ -1,4 +1,4 @@
-/**
+﻿/**
  * EXE 桌面版打包脚本
  * 
  * 流程:
@@ -122,30 +122,6 @@ async function main() {
     path.join(appResourcesDir, 'build', 'sql-wasm.js')
   );
 
-  // 复制 build/yt-dlp.exe（工具箱「YouTube 下载」依赖，随包分发避免用户额外安装）
-  const ytDlpExe = path.join(ROOT, 'build', 'yt-dlp.exe');
-  if (fs.existsSync(ytDlpExe)) {
-    fs.copyFileSync(ytDlpExe, path.join(appResourcesDir, 'build', 'yt-dlp.exe'));
-    console.log('  ✓ 复制 yt-dlp.exe');
-  } else {
-    console.log('  ⚠ 未找到 yt-dlp.exe（YouTube 下载将使用系统 yt-dlp）');
-  }
-
-  // 自包含修复：复制内置 ffmpeg.exe + ffprobe.exe（音频/视频转换依赖，
-  // 随包分发后用户机器无需单独安装 ffmpeg）
-  const ffmpegExe = path.join(ROOT, 'build', 'ffmpeg.exe');
-  if (fs.existsSync(ffmpegExe)) {
-    fs.copyFileSync(ffmpegExe, path.join(appResourcesDir, 'build', 'ffmpeg.exe'));
-    console.log('  ✓ 复制 ffmpeg.exe');
-  } else {
-    console.log('  ⚠ 未找到 ffmpeg.exe（音频转换将使用系统 ffmpeg）');
-  }
-  const ffprobeExe = path.join(ROOT, 'build', 'ffprobe.exe');
-  if (fs.existsSync(ffprobeExe)) {
-    fs.copyFileSync(ffprobeExe, path.join(appResourcesDir, 'build', 'ffprobe.exe'));
-    console.log('  ✓ 复制 ffprobe.exe');
-  }
-
   // 复制前端 dist
   const frontendDist = path.join(ROOT, 'src', 'frontend', 'dist');
   const copyDir = (src, dest) => {
@@ -209,6 +185,20 @@ async function main() {
     }
   } catch (e) {
     console.log(`  ⚠ 复制 @koromix 失败: ${e.message}`);
+  }
+
+  // 随包分发外部工具：ffmpeg / ffprobe / yt-dlp（EXE 工具箱自包含，无需用户另装）
+  // 后端 resolve*Path() 已支持 bundle 同目录候选（resources/app/build/*.exe）
+  log('6.65/8', '复制外部工具（ffmpeg / ffprobe / yt-dlp）...');
+  const externalTools = ['ffmpeg.exe', 'ffprobe.exe', 'yt-dlp.exe'];
+  for (const tool of externalTools) {
+    const src = path.join(ROOT, 'build', tool);
+    if (fs.existsSync(src)) {
+      fs.copyFileSync(src, path.join(appResourcesDir, 'build', tool));
+      console.log(`  ✓ 复制 ${tool} (${(fs.statSync(src).size / 1024 / 1024).toFixed(1)} MB)`);
+    } else {
+      console.log(`  ⚠ 未找到 build/${tool}，跳过`);
+    }
   }
 
   // P1 修复：playwright 是 /api/testing 运行时 external 依赖，必须复制进 EXE 包，
@@ -299,11 +289,10 @@ async function main() {
   // Step 9: 生成 NSIS 安装包
   log('9/9', '生成 NSIS 安装包...');
   try {
-    // 用命令行参数动态注入当前机器的绝对路径（不依赖 yml 硬编码），
-    // 保证项目被 clone 到任意目录后都能正确打包。
-    const outDir = path.join(ROOT, 'dist_electron').replace(/\\/g, '/');
-    const buildRes = path.join(ROOT, 'build').replace(/\\/g, '/');
-    run(`npx electron-builder --config electron/electron-builder.yml --win --x64 -c.directories.output="${outDir}" -c.directories.buildResources="${buildRes}"`);
+    // 直接使用 electron/electron-builder.yml 的 directories 配置（相对项目根解析）。
+    // 注意：electron-builder 25.1.8 在 Windows 下会把 `-c.directories.output="..."` 误解析为
+    // 配置文件路径（ENOENT: .directories.output=...），因此不能注入 -c 点路径参数。
+    run(`npx electron-builder --config electron/electron-builder.yml --win --x64`);
     console.log(`\n✅ NSIS 安装包生成完成!`);
     console.log(`   输出目录: ${path.join(ROOT, 'dist_electron')}`);
   } catch (e) {

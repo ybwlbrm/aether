@@ -162,9 +162,12 @@ async function protectData(data: Buffer): Promise<Buffer> {
     const outPbData = outBlob.pbData;
 
     // Copy the protected data
+    // 黑屏修复（P0-1）：Electron 内置 Node（ELECTRON_RUN_AS_NODE fork）下
+    // koffi.view() 会触发 FATAL ERROR: Error::New napi_get_last_error_info 崩溃，
+    // 改用 koffi.decode(pbData, 'uint8', n) 数组读取 —— 系统 Node 与 Electron
+    // 内置 Node 双运行时 roundtrip 实证通过。
     const protectedData = Buffer.alloc(outCbData);
-    const view = koffi.view(outPbData, outCbData);
-    protectedData.set(new Uint8Array(view));
+    protectedData.set(Buffer.from(koffi.decode(outPbData, 'uint8', outCbData)));
 
     // Free output blob memory (allocated by CryptProtectData via LocalAlloc)
     LocalFree(outPbData);
@@ -232,10 +235,11 @@ async function unprotectData(protectedData: Buffer): Promise<{ key: string; rawF
     const outCbData = outBlob.cbData;
     const outPbData = outBlob.pbData;
 
-    const unprotectedData = Buffer.alloc(outCbData);
-    const view = koffi.view(outPbData, outCbData);
-    unprotectedData.set(new Uint8Array(view));
+    // 黑屏修复（P0-1）：同 protectData —— Electron 内置 Node 下 koffi.view() 崩溃，
+    // 改用 koffi.decode('uint8', n) 数组读取输出 blob
+    const unprotectedData = Buffer.from(koffi.decode(outPbData, 'uint8', outCbData));
 
+    // Free output blob memory (allocated by CryptUnprotectData via LocalAlloc)
     LocalFree(outPbData);
 
     koffi.free(inBlobPtr);

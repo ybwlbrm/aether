@@ -1,5 +1,4 @@
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
-import { homedir } from 'node:os';
 import { resolve, sep } from 'node:path';
 import { isWorkdirSafe } from './validator.js';
 

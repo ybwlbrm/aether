@@ -37,6 +37,26 @@ export function Toolbox() {
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   useEffect(() => () => { if (intervalRef.current) clearInterval(intervalRef.current); }, []);
 
+  // 外部工具检测：ffmpeg / yt-dlp / LibreOffice（缺失时提示下载）
+  const [toolsStatus, setToolsStatus] = useState<Record<string, any> | null>(null);
+  useEffect(() => {
+    (async () => {
+      try {
+        const r = await fetch('/api/toolbox/tools-status', { headers: { 'X-Requested-With': 'XMLHttpRequest' } });
+        if (r.ok) setToolsStatus(await r.json());
+      } catch { /* 后端未启动，静默 */ }
+    })();
+  }, []);
+
+  // 当前工具所需的外部工具（缺失时显示提示卡）
+  const requiredTool = selected?.kind === 'video-extract' ? 'ffmpeg'
+    : selected?.kind === 'youtube-download' ? 'ytDlp'
+    : (selected?.kind === 'convert' && (selected.from[0] === 'mp3' || selected.from[0] === 'wav' || selected.from[0] === 'flac' || selected.from[0] === 'ogg' || selected.from[0] === 'm4a' || selected.from[0] === 'aac')) ? 'ffmpeg'
+    : (selected?.kind === 'convert' && (selected.from[0] === 'docx' || selected.from[0] === 'xlsx') && selected.to[0] === 'pdf') ? 'libreOffice'
+    : null;
+  const missingTool = requiredTool && toolsStatus ? toolsStatus[requiredTool === 'ytDlp' ? 'ytDlp' : requiredTool === 'libreOffice' ? 'libreOffice' : 'ffmpeg'] : null;
+  const toolMissing = !!missingTool && missingTool.available === false;
+
   const filteredOptions = activeCategory === 'all'
     ? convertOptions
     : convertOptions.filter(o => catOf(o) === activeCategory);
@@ -331,6 +351,8 @@ export function Toolbox() {
             converting={converting}
             progress={progress}
             elapsedSec={elapsedSec}
+            toolMissing={toolMissing}
+            missingToolInfo={missingTool}
             files={files}
             setFiles={setFiles}
             targetFormat={targetFormat}

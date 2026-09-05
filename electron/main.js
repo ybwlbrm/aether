@@ -1,4 +1,4 @@
-const { app, BrowserWindow, Tray, Menu, dialog, nativeImage, ipcMain, Notification } = require('electron');
+const { app, BrowserWindow, Tray, Menu, dialog, nativeImage, ipcMain, Notification, shell } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const { fork } = require('child_process');
@@ -62,7 +62,7 @@ function startServer() {
     serverProcess = fork(serverPath, [], { env, stdio: 'pipe' });
     let resolved = false;
     const tryResolve = () => {
-      if (!resolved) { resolved = true; resolve(); }
+      if (!resolved) { resolved = true; restartCount = 0; resolve(); }
     };
     serverProcess.stdout.on('data', (d) => { const m = d.toString().trim(); log(`[后端] ${m}`); if (m.includes('已启动') || m.includes('3000')) setTimeout(tryResolve, 500); });
     serverProcess.stderr.on('data', (d) => {
@@ -155,11 +155,61 @@ function createWindow() {
   // 的 "What can I build for you?" 新对话页面。/command-center?new=true 可让
   // CommandCenter 强制进入 coding 模式并清空会话，每次启动都是全新的对话体验。
   mainWindow.loadURL('http://127.0.0.1:3000/command-center?new=true');
+
+  // P1-2: 黑屏兜底 — ready-to-show 超时强制显示；加载失败展示可读错误页；
+  // 渲染进程崩溃自动 reload，避免用户面对无响应的深色窗口。
+  const showTimeout = setTimeout(() => {
+    if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.isVisible()) {
+      log('ready-to-show 超时（20s），强制显示窗口 — 后端可能仍在启动中');
+      mainWindow.show();
+    }
+  }, 20000);
+
   mainWindow.once('ready-to-show', () => {
+    clearTimeout(showTimeout);
     mainWindow.show();
   });
 
   mainWindow.on('closed', () => { mainWindow = null; });
+
+  mainWindow.webContents.on('did-fail-load', (_event, errorCode, errorDescription, validatedURL, isMainFrame) => {
+    if (!isMainFrame) return;
+    if (errorCode === -3) return; // ERR_ABORTED（主动导航/刷新），忽略
+    log(`页面加载失败 (${errorCode}): ${errorDescription} — ${validatedURL}`);
+    const desc = String(errorDescription || '').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    const html = `<!DOCTYPE html><html><head><meta charset="utf-8"/><style>
+      body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;background:#0b0b0f;color:#e8e8ea;font-family:system-ui,'Microsoft YaHei',sans-serif}
+      .card{text-align:center;padding:40px} h1{font-size:22px;margin:0 0 12px}
+      p{font-size:13px;color:#9a9aa2;margin:6px 0} code{background:#1c1c22;padding:2px 8px;border-radius:6px;font-size:12px;color:#ff8f6b}
+      button{margin-top:20px;padding:9px 26px;border:0;border-radius:8px;background:#4f6df5;color:#fff;font-size:14px;cursor:pointer}
+      button:hover{background:#5d79f7}</style></head><body>
+      <div class="card"><h1>⚠️ 服务加载失败</h1>
+      <p>本地后端未能正常响应（错误码 ${errorCode}：${desc}）。</p>
+      <p>常见原因：后端启动组件损坏或数据目录异常。</p>
+      <p>日志：<code>%USERPROFILE%\\Documents\\AICommandCenter\\electron.log</code></p>
+      <button onclick="location.reload()">重试</button></div></body></html>`;
+    mainWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`).catch(() => {});
+    mainWindow.show();
+  });
+
+  mainWindow.webContents.on('render-process-gone', (_event, details) => {
+    if (app.isQuitting) return;
+    log(`渲染进程异常退出: ${details.reason}`);
+    setTimeout(() => {
+      try { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.reload(); } catch (_e) { /* ignore - intentional */ }
+    }, 1000);
+  });
+
+  // P1-20: 工具箱「前往下载」等 target=_blank 外部链接 —
+  // 默认会新建一个空白的 Electron 子窗口（白屏弹窗），改由系统默认浏览器打开
+  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+    try {
+      if (/^https?:\/\//i.test(url)) {
+        shell.openExternal(url);
+      }
+    } catch (e) { log(`openExternal 失败: ${e.message}`); }
+    return { action: 'deny' };
+  });
 }
 
 // 创建托盘菜单

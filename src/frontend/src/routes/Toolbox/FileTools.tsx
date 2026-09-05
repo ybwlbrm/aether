@@ -10,6 +10,8 @@ interface FileToolsProps {
   converting: boolean;
   progress: number;
   elapsedSec: number;
+  toolMissing: boolean;
+  missingToolInfo: any;
   files: File[];
   setFiles: (files: File[]) => void;
   targetFormat: string;
@@ -32,7 +34,7 @@ interface FileToolsProps {
 }
 
 export function FileTools({
-  selected, onBack, onConvert, converting, progress, elapsedSec,
+  selected, onBack, onConvert, converting, progress, elapsedSec, toolMissing, missingToolInfo,
   files, setFiles, targetFormat, setTargetFormat,
   watermarkText, setWatermarkText,
   quality, setQuality, width, setWidth, height, setHeight,
@@ -48,6 +50,27 @@ export function FileTools({
 
   return (
     <>
+      {/* 工具缺失提示：需要 ffmpeg/yt-dlp/LibreOffice 但系统未安装时显示下载指引 */}
+      {toolMissing && missingToolInfo && (
+        <div style={{ marginTop: 4, marginBottom: 16, padding: '14px 16px', borderRadius: 'var(--radius-md)',
+          background: 'rgba(245,158,11,0.08)', border: '1px solid rgba(245,158,11,0.25)',
+          display: 'flex', alignItems: 'flex-start', gap: 10 }}>
+          <AlertCircle size={18} style={{ color: '#f59e0b', flexShrink: 0, marginTop: 2 }} />
+          <div style={{ flex: 1 }}>
+            <p style={{ fontSize: 'var(--font-sm)', color: '#f59e0b', fontWeight: 600, marginBottom: 4 }}>
+              此功能需要额外组件，当前未检测到
+            </p>
+            <p style={{ fontSize: 'var(--font-xs)', color: 'var(--text-secondary)', lineHeight: 1.6, marginBottom: 8 }}>
+              {missingToolInfo.downloadHint}
+            </p>
+            <a href={missingToolInfo.downloadUrl} target="_blank" rel="noopener noreferrer"
+              className="btn btn-secondary btn-sm" style={{ fontSize: 12, display: 'inline-flex', alignItems: 'center', gap: 6, textDecoration: 'none' }}>
+              <Download size={14} /> 前往下载
+            </a>
+          </div>
+        </div>
+      )}
+
       {/* YouTube 下载：URL 输入 */}
       {isYoutubeDownload && (
         <div style={{ marginTop: 4 }}>
@@ -154,14 +177,14 @@ export function FileTools({
         </div>
       )}
 
-      {/* 开始处理 */}
+      {/* 开始处理（工具缺失时禁用） */}
       {(isYoutubeDownload
         ? (utilityInput.trim().length > 0 && targetFormat)
         : (files.length > 0 && (selected.kind !== 'convert' || targetFormat))
       ) && (
         <div style={{ marginTop: 16 }}>
-          <button className="btn btn-primary" onClick={onConvert} disabled={converting}>
-            {converting ? <><Loader2 size={18} className="animate-spin" /> 处理中 {elapsedSec} 秒</> : <><Download size={18} /> 开始{selected.op === 'merge' ? '合并' : selected.op === 'watermark' ? '加水印' : selected.op === 'to-image' ? '转换' : selected.op === 'to-text' ? '提取' : selected.kind === 'youtube-download' ? '下载' : '转换'}</>}
+          <button className="btn btn-primary" onClick={onConvert} disabled={converting || toolMissing}>
+            {toolMissing ? <><AlertCircle size={18} /> 缺少依赖组件</> : converting ? <><Loader2 size={18} className="animate-spin" /> 处理中 {elapsedSec} 秒</> : <><Download size={18} /> 开始{selected.op === 'merge' ? '合并' : selected.op === 'watermark' ? '加水印' : selected.op === 'to-image' ? '转换' : selected.op === 'to-text' ? '提取' : selected.kind === 'youtube-download' ? '下载' : '转换'}</>}
           </button>
         </div>
       )}

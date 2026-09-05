@@ -78,3 +78,9 @@ qa/
 build/ffmpeg.exe
 build/ffprobe.exe
 build/yt-dlp.exe
+
+# 恢复后端源码中的 data 业务模块
+# （上面 **/data/ 规则会把 src/backend/src/modules/data 源码目录也排除掉，
+#   这里显式恢复——modules/data 是后端路由模块代码，不是本地数据）
+!src/backend/src/modules/data/
+!src/backend/src/modules/data/**

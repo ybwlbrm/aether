@@ -4,6 +4,40 @@
 
 ## [Unreleased]
 
+### 2026-09-05 — 黑屏根因修复 + 工具箱依赖检测修复 + 全量重打包
+
+**P0 黑屏（EXE/Setup 打开黑屏）**
+- `lib/keystore.ts`：DPAPI 读取输出 blob 时 `koffi.view()` 在 Electron 内置 Node（ELECTRON_RUN_AS_NODE fork）下触发 `FATAL ERROR: Error::New napi_get_last_error_info` 崩溃 → 后端连崩 5 次 → 3000 无服务 → 黑屏。改用 `koffi.decode(pbData, 'uint8', n)` 数组读取（系统 Node 与 Electron 内置 Node 双运行时 roundtrip 实证通过）
+- 实机验证：Aether EXE 启动后 UI 完整渲染（OCR 确认页面元素），/api/sync 轮询正常
+
+**工具箱依赖检测误报修复（用户已装却提示"未检测到"）**
+- `modules/toolbox/video.ts`：`tools-status` 端点 `available` 判断从伪检查 `existsSync('ffmpeg')`（相对 cwd，从不验证 PATH）改为 `isToolAvailable()` 真实探测（绝对路径 existsSync / 裸命令名 `where.exe` 搜索 PATH）
+- `video.ts` / `utils.ts`：`resolveFfmpegPath` / `resolveYtDlpPath` / `resolveSofficePath` 增加 bundle 同目录候选（`resources/app/build/*.exe`），支撑 EXE 自包含
+- 实测：ffmpeg(bundled) / yt-dlp(bundled) / LibreOffice(installed) 全部 available=true
+
+**下载弹窗白屏修复**
+- `electron/main.js`：`setWindowOpenHandler` 将所有外部 http/https 链接交给系统默认浏览器（shell.openExternal），根除 `target="_blank"` 新建空白 Electron 子窗口白屏
+
+**EXE 自包含外部工具**
+- `build-exe.js` + `electron-builder.yml`：随包分发 `build/ffmpeg.exe` / `ffprobe.exe` / `yt-dlp.exe`（~220MB），EXE/Setup 工具箱不再依赖用户机器安装
+
+**构建管线修复**
+- 根 `package.json`：`npm run build` 前置 `build:clean`（删除陈旧 `.tsbuildinfo`），根治 `composite` 增量模式下 dist 静默过期 6 天问题
+- `build-exe.js`：移除 `-c.directories.*` 参数注入（electron-builder 25.1.8 会将其误解析为配置文件路径导致 NSIS 失败）
+- `electron-builder.yml`：`publish: null` 消除打包尾部 "Cannot read properties of null (reading 'provider')"
+
+**可靠性增强**
+- `electron/main.js`：后端重启计数在成功启动后重置（restartCount=0）；`ready-to-show` 20s 超时强制显示窗口；`did-fail-load` 展示可读错误页；`render-process-gone` 自动 reload
+
+**lint 清理**
+- 删除 15 处确认未使用的 import/变量（app.ts getDb、crypto TAG_LENGTH、schema real、builtins homedir、executor resolve、validator fs 导入、code-review sep、NewCommand imgRegex/lastIdx/match 等），typecheck 保持 0 errors
+
+**全量重打包（含全部修复）**
+- EXE 便携版 693.7MB（dist_exe，内置 ffmpeg/ffprobe/yt-dlp）
+- NSIS Setup 220.8MB（根目录 Personal-AI-Command-Center-Setup.exe，11:03 同步）
+- Android APK 3.22MB（Aether-Mobile.apk，11:07 重打）
+- 验证：Build/Typecheck/Test 全部 PASS（backend 116 pass / frontend 37 pass，零回归）
+
 ### 2026-08-11 — Baseline & WeChat 修复增强
 
 - **T0**: 初始化仓库基线（git 不可用，改用 CHANGELOG.md）

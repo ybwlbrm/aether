@@ -1,6 +1,5 @@
-import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { isAbsolute, resolve, sep, relative } from 'node:path';
+import { isAbsolute, resolve, sep } from 'node:path';
 import { FORBIDDEN_PATH_PATTERNS } from './constants.js';
 
 /** 输出截断：超过上限时保留头部并标注原始长度 */

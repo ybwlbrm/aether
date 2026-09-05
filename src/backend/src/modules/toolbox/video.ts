@@ -4,7 +4,7 @@ import { writeFileSync, existsSync, mkdirSync, readFileSync, unlinkSync, readdir
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
-import { execFile } from 'node:child_process';
+import { execFile, spawnSync } from 'node:child_process';
 import { exportDir } from './utils.js';
 
 // ESM 兼容：项目为 "type": "module"，无 __dirname 全局变量
@@ -20,12 +20,16 @@ function resolveFfmpegPath(): string | null {
   const candidates = [
     resolve(__dirname, '../../../build/ffmpeg.exe'),
     resolve(process.cwd(), 'build/ffmpeg.exe'),
+    // EXE 打包版：bundle 位于 resources/app/build，工具随包同目录分发
+    resolve(__dirname, 'ffmpeg.exe'),
+    resolve(__dirname, '../ffmpeg.exe'),
+    resolve(dirname(__dirname), 'ffmpeg.exe'),
   ];
   for (const c of candidates) {
     if (existsSync(c)) return c;
   }
   try {
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
+     
     const staticPath = require('ffmpeg-static');
     if (typeof staticPath === 'string' && existsSync(staticPath)) return staticPath;
   } catch { /* ffmpeg-static 未安装，回退系统 PATH */ }
@@ -39,11 +43,28 @@ function resolveYtDlpPath(): string {
   const candidates = [
     resolve(__dirname, '../../../build/yt-dlp.exe'),
     resolve(process.cwd(), 'build/yt-dlp.exe'),
+    // EXE 打包版：bundle 同目录
+    resolve(__dirname, 'yt-dlp.exe'),
+    resolve(__dirname, '../yt-dlp.exe'),
+    resolve(dirname(__dirname), 'yt-dlp.exe'),
   ];
   for (const c of candidates) {
     if (existsSync(c)) return c;
   }
   return 'yt-dlp'; // 回退系统 PATH
+}
+
+/** 真实探测工具可用性：绝对路径直接检查文件；裸命令名通过 where/which 搜索 PATH */
+function isToolAvailable(p: string | null): boolean {
+  if (!p) return false;
+  if (p.includes('\\') || p.includes('/')) return existsSync(p);
+  try {
+    const cmd = process.platform === 'win32' ? 'where.exe' : 'which';
+    const r = spawnSync(cmd, [p], { shell: false, encoding: 'utf8' });
+    return r.status === 0 && (r.stdout || '').length > 0;
+  } catch {
+    return false;
+  }
 }
 
 const VIDEO_EXTS = new Set(['mp4', 'mkv', 'webm', 'mov', 'avi', 'flv', 'wmv', 'm4v', 'ts', 'mts']);
@@ -213,14 +234,46 @@ export function registerVideoRoutes(app: FastifyInstance, config: BackendConfig)
   });
 
   // 检测工具可用性（前端用于禁用按钮/提示）
-  app.get('/api/toolbox/video-tools-status', {
-    schema: { description: '检测视频工具依赖（ffmpeg / yt-dlp）', tags: ['工具箱'] },
+  // 检测逻辑：内置 build/ 目录 → 环境变量 → 系统 PATH；缺失时给出下载指引
+  app.get('/api/toolbox/tools-status', {
+    schema: { description: '检测外部工具依赖（ffmpeg / yt-dlp / LibreOffice）', tags: ['工具箱'] },
   }, async () => {
-    const ffmpeg = resolveFfmpegPath();
-    const ytDlp = resolveYtDlpPath();
+    const ffmpegPath = resolveFfmpegPath();
+    const ytDlpPath = resolveYtDlpPath();
+    // LibreOffice 检测：内置目录 → 环境变量 → 常见安装路径 → 系统 PATH
+    const sofficeCandidates = [
+      process.env.SOFFICE_PATH || '',
+      'C:\\Program Files\\LibreOffice\\program\\soffice.exe',
+      'C:\\Program Files (x86)\\LibreOffice\\program\\soffice.exe',
+      'C:\\Program Files\\LibreOffice\\program\\soffice.com',
+      resolve(__dirname, '../../../build/soffice/program/soffice.exe'),
+    ];
+    const sofficeFound = sofficeCandidates.find(c => c && existsSync(c)) || 'soffice';
+
     return {
-      ffmpeg: ffmpeg !== 'ffmpeg' ? 'available' : 'system',
-      ytDlp: ytDlp !== 'yt-dlp' ? 'available' : 'system',
+      ffmpeg: {
+        // 修复：真实探测工具可用性（原先 existsSync('ffmpeg') 是相对 cwd 的假检查，
+        // 系统 PATH 中已安装的 ffmpeg 也会被误报为"未检测到"）
+        available: isToolAvailable(ffmpegPath),
+        source: ffmpegPath !== 'ffmpeg' ? 'bundled' : 'system',
+        detectPath: ffmpegPath !== 'ffmpeg' ? ffmpegPath : '',
+        downloadUrl: 'https://ffmpeg.org/download.html',
+        downloadHint: 'Windows 推荐：https://www.gyan.dev/ffmpeg/builds/（下载 release-essentials 版，解压后把 bin 目录加入 PATH，或设置 FFMPEG_PATH 环境变量指向 ffmpeg.exe）',
+      },
+      ytDlp: {
+        available: isToolAvailable(ytDlpPath),
+        source: ytDlpPath !== 'yt-dlp' ? 'bundled' : 'system',
+        detectPath: ytDlpPath !== 'yt-dlp' ? ytDlpPath : '',
+        downloadUrl: 'https://github.com/yt-dlp/yt-dlp/releases',
+        downloadHint: 'Windows 下载 yt-dlp.exe，放入任意目录并加入 PATH，或设置 YT_DLP_PATH 环境变量指向该文件',
+      },
+      libreOffice: {
+        available: isToolAvailable(sofficeFound),
+        source: sofficeFound !== 'soffice' ? 'installed' : 'missing',
+        detectPath: sofficeFound !== 'soffice' ? sofficeFound : '',
+        downloadUrl: 'https://www.libreoffice.org/download/download-libreoffice/',
+        downloadHint: '安装后默认路径为 C:\\Program Files\\LibreOffice，或设置 SOFFICE_PATH 环境变量指向 soffice.exe',
+      },
     };
   });
 }

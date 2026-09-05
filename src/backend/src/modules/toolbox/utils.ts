@@ -16,6 +16,10 @@ function resolveFfmpegPath(): string {
   const candidates = [
     resolve(__dirname, '../../../build/ffmpeg.exe'),   // dist/modules/toolbox → 项目根/build
     resolve(process.cwd(), 'build/ffmpeg.exe'),
+    // EXE 打包版：bundle 位于 resources/app/build，工具随包同目录分发
+    resolve(__dirname, 'ffmpeg.exe'),
+    resolve(__dirname, '../ffmpeg.exe'),
+    resolve(pathDirname(__dirname), 'ffmpeg.exe'),
   ];
   for (const c of candidates) {
     if (existsSync(c)) return c;
@@ -31,6 +35,8 @@ function resolveSofficePath(): string {
     resolve(__dirname, '../../../build/soffice/program/soffice.exe'),
     'C:\\Program Files\\LibreOffice\\program\\soffice.exe',
     resolve(process.cwd(), 'build/soffice/program/soffice.exe'),
+    resolve(__dirname, 'soffice/program/soffice.exe'),
+    resolve(__dirname, '../soffice/program/soffice.exe'),
   ];
   for (const c of candidates) {
     if (existsSync(c)) return c;

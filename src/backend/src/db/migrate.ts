@@ -232,7 +232,7 @@ export async function runMigrations(config: BackendConfig): Promise<void> {
     }
     // 回填：从现有 assistant 消息的 toolResults 中提取 total_tokens 汇总到 conversations.token_total
     // 逻辑与原 GET /api/conversations 聚合一致：解析 toolResults JSON，累加 total_tokens
-    const backfillResult = db.exec(`
+    db.exec(`
       UPDATE conversations
       SET token_total = (
         SELECT COALESCE(SUM(

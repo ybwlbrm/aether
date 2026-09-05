@@ -4,7 +4,7 @@ import swagger from '@fastify/swagger';
 import swaggerUi from '@fastify/swagger-ui';
 import { registerErrorHandler } from './plugins/error-handler.js';
 import { loadBackendConfig, type BackendConfig, migratePlaintextApiKeys } from './config/index.js';
-import { initDb, getDb, markDirty, flushDbSync } from './db/client.js';
+import { initDb, markDirty, flushDbSync } from './db/client.js';
 import { runMigrations } from './db/migrate.js';
 import { registerHealthRoutes } from './modules/health/index.js';
 import { registerProviderRoutes } from './modules/providers/index.js';

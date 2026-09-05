@@ -1,6 +1,8 @@
 ﻿appId: com.pacc.app
 productName: Aether
 copyright: Copyright © 2026
+# 无自动更新服务，禁用 publish 以避免打包尾部 "Cannot read properties of null (reading 'provider')"
+publish: null
 # 版本号从根 package.json 的 version 字段自动读取（electron-builder 25 不支持 yml 根级 version）
 
 directories:
@@ -18,13 +20,14 @@ files:
   - build/backend-bundle.js
   - build/sql-wasm.wasm
   - build/sql-wasm.js
-  - build/yt-dlp.exe
-  - build/ffmpeg.exe
-  - build/ffprobe.exe
   - build/sql.js-package.json
   - build/lib/**/*
   - build/worker.js
   - build/static/**/*
+  # 随包分发外部工具（工具箱自包含：ffmpeg/ffprobe/yt-dlp）
+  - build/ffmpeg.exe
+  - build/ffprobe.exe
+  - build/yt-dlp.exe
   - src/frontend/dist/**/*
   - node_modules/sql.js/**/*
   - node_modules/@napi-rs/canvas/**/*
