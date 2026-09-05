@@ -84,7 +84,7 @@ APK 签名验证：`CN=Aether, OU=Personal, O=Aether` 证书签名有效（SHA-2
 | 项 | 值 |
 |----|-----|
 | 开源目录 | `D:\Aether-OpenSource`（独立目录，原项目未动） |
-| GitHub 仓库 | **https://github.com/yangjyalexander-ctrl/aether**（Public） |
+| GitHub 仓库 | **https://github.com/ybwlbrm/aether**（Public） |
 | 首次提交 | `1fed471` feat: Aether 开源版 |
 | 数据安全 | `data/`、`*.db`、`*.jks`、`keystore.properties`、`.env`、`.encryption_key*` 全部 gitignore + 清洗 |
 | 敏感扫描 | API Key/token/supabase key 模式扫描 **0 残留** |

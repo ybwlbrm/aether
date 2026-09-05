@@ -160,7 +160,7 @@ npm run dev
 ### 第 2 步：拉取并安装
 
 ```bash
-git clone https://github.com/yangjyalexander-ctrl/aether.git
+git clone https://github.com/ybwlbrm/aether.git
 cd aether
 npm install
 ```
