@@ -21,6 +21,7 @@ import {
 } from './tool-result.js';
 import { ToolTimeoutManager } from './tool-timeout.js';
 import { ToolPolicy as ToolPolicyImpl } from './tool-policy.js';
+import type { PolicyEngine } from '../permissions/policy.js';
 
 /**
  * Options for ToolExecutor constructor.
@@ -28,16 +29,25 @@ import { ToolPolicy as ToolPolicyImpl } from './tool-policy.js';
 export interface ToolExecutorOptions {
   /** Policy for tool execution control */
   policy?: ToolPolicy;
+  /**
+   * PERM-001 (P0-19/20)：可选的 capability 化 PolicyEngine（新权限体系）。
+   * 注入后，deny 规则对 `tool:<name>` capability 生效（默认放行，零行为变化）。
+   * 提供 migration layer：旧 ToolPolicy（compatibility）与新 PolicyEngine 可并存；
+   * 新部署只注入 policyEngine，不注入 policy。
+   */
+  policyEngine?: PolicyEngine;
   /** Default timeout in milliseconds */
   defaultTimeoutMs?: number;
 }
 
 /**
  * ToolExecutor — Orchestrates tool execution with policy, validation, timeout, and error handling.
+ * 权限链路（PERM-001）：Capability → PolicyEngine → Approval → ToolRuntime → Executor
  */
 export class ToolExecutor {
   #registry: ToolRegistry;
   #policy: ToolPolicy;
+  #policyEngine?: PolicyEngine;
   #timeoutManager: ToolTimeoutManager;
 
   /**
@@ -49,7 +59,27 @@ export class ToolExecutor {
   constructor(registry: ToolRegistry, options: ToolExecutorOptions = {}) {
     this.#registry = registry;
     this.#policy = options.policy ?? new ToolPolicyImpl();
+    this.#policyEngine = options.policyEngine;
     this.#timeoutManager = new ToolTimeoutManager(options.defaultTimeoutMs);
+  }
+
+  /**
+   * PERM-001: capability 化 PolicyEngine 裁决（capability 名为 `tool.<name>`，
+   * 与 PolicyEngine 点分段通配约定一致 —— `tool.*` 可通配所有工具）。
+   * 迁移语义（default-safe）：仅当**显式 deny 规则**命中时拒绝；
+   * 未命中规则（default effect，无论 capabilities 是否授予）一律放行，
+   * 由 legacy ToolPolicy 继续接管 —— 避免"注入空 engine 即拒绝全部工具"的部署陷阱。
+   * 未注入 policyEngine 时完全跳过（旧行为零变化）。
+   */
+  #evaluatePolicyEngine(toolName: string, context: ToolContext): boolean {
+    if (!this.#policyEngine) return true;
+    const decision = this.#policyEngine.evaluate(`tool.${toolName}`, {
+      capabilities: context.permissions ?? [],
+      agentId: context.agentId,
+      runId: context.runId,
+      extra: { tool: toolName },
+    });
+    return decision.effect !== 'deny';
   }
 
   /**
@@ -73,7 +103,14 @@ export class ToolExecutor {
       }, durationMs);
     }
 
-    // Evaluate policy
+    // Evaluate policy (PERM-001: 先过 capability 化 PolicyEngine，再走 legacy ToolPolicy)
+    if (!this.#evaluatePolicyEngine(toolName, context)) {
+      const durationMs = Date.now() - startTime;
+      return errorResult(toolName, {
+        message: `Tool '${toolName}' is denied by policy`,
+        code: 'TOOL_DENIED',
+      }, durationMs);
+    }
     const policyResult = this.#policy.evaluate(toolName);
     if (policyResult.action === 'deny') {
       const durationMs = Date.now() - startTime;

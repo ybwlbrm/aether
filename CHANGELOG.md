@@ -25,6 +25,9 @@
 - **symlink/junction 逃逸**：路径校验使用 realpath 解析物理路径，allowedDirs 内 junction 指向外部目录被拦截（L2/L3 均生效）
 - **gitignore 误伤**：`data/` 规则改为 `/data/`，不再误伤 `src/backend/src/modules/data`（7 个源码文件已入版本库）
 
+### Permission（权限）
+- **权限体系收敛（PERM-001）**：ToolPolicy 标记 deprecated；ToolExecutor 支持注入 capability 化 PolicyEngine（	ool.* 通配 deny 规则生效，default-safe 迁移语义 —— 无显式 deny 时行为零变化）
+
 ### Security（安全）
 - yt-dlp 下载禁止访问云元数据 / 内网 / 回环 / 链路本地地址
 - 上传文件真实类型校验（magic bytes）

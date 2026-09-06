@@ -78,4 +78,11 @@ describe('evaluateCondition — 13 operators (WF-001)', () => {
       'greater_or_equal', 'less_or_equal', 'exists', 'not_exists',
     ]);
   });
+
+  test('数值比较支持数字输入（非字符串化）', () => {
+    assert.equal(evaluateCondition('greater_than', 500, 100), true);
+    assert.equal(evaluateCondition('less_or_equal', 2, 2), true);
+    // workflow 数据经 JSON 序列化传递：数字与字符串在比较语义中等同
+    assert.equal(evaluateCondition('equals', 5, '5'), true);
+  });
 });

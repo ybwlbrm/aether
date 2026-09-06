@@ -13,6 +13,7 @@ import { createToolContext } from './tool-runtime.js';
 import { ToolError } from '../errors/index.js';
 import { CancellationError, isCancellationError } from '../runtime/index.js';
 import type { ToolContext } from './tool-runtime.js';
+import { PolicyEngine } from '../permissions/policy.js';
 import type { ToolResult } from './tool-result.js';
 import {
   successResult,
@@ -290,6 +291,58 @@ describe('tool-executor', () => {
       assert.equal(executor.registry, registry);
       assert.equal(executor.policy, policy);
       assert.ok(executor.timeoutManager instanceof ToolTimeoutManager);
+    });
+  });
+
+  describe('PERM-001: capability PolicyEngine integration', () => {
+    test('deny rule（tool.secret-tool）拒绝执行', async () => {
+      const registry = new ToolRegistry();
+      registry.register(createTestTool({ name: 'secret-tool' }));
+      const engine = new PolicyEngine([{ id: 'r1', capability: 'tool.secret-tool', effect: 'deny' }]);
+      const executor = new ToolExecutor(registry, { policyEngine: engine });
+
+      const result = await executor.execute('secret-tool', { input: 'x' }, createContext());
+      assert.equal(result.kind, 'error');
+      assert.equal((result as { error: { code: string } }).error.code, 'TOOL_DENIED');
+    });
+
+    test('注入空规则 engine → 正常执行（无显式 deny，迁移语义默认放行）', async () => {
+      const registry = new ToolRegistry();
+      registry.register(createTestTool());
+      const executor = new ToolExecutor(registry, { policyEngine: new PolicyEngine() });
+
+      const result = await executor.execute('test-tool', { input: 'hello' }, createContext());
+      assert.equal(result.kind, 'success');
+    });
+
+    test('未注入 policyEngine → 行为完全不变（无 policyEngine 分支零影响）', async () => {
+      const registry = new ToolRegistry();
+      registry.register(createTestTool());
+      const executor = new ToolExecutor(registry);
+
+      const result = await executor.execute('test-tool', { input: 'hello' }, createContext());
+      assert.equal(result.kind, 'success');
+    });
+
+    test('explicit allow 规则不改变默认放行（allow 仅作声明）', async () => {
+      const registry = new ToolRegistry();
+      registry.register(createTestTool({ name: 'allow-tool' }));
+      const engine = new PolicyEngine([{ id: 'r3', capability: 'tool.allow-tool', effect: 'allow' }]);
+      const executor = new ToolExecutor(registry, { policyEngine: engine });
+
+      const result = await executor.execute('allow-tool', { input: 'x' }, createContext());
+      assert.equal(result.kind, 'success');
+    });
+
+    test('capability 通配 deny（tool.*）同样拦截', async () => {
+      const registry = new ToolRegistry();
+      registry.register(createTestTool({ name: 'wild-tool' }));
+      const engine = new PolicyEngine([{ id: 'r2', capability: 'tool.*', effect: 'deny' }]);
+      const executor = new ToolExecutor(registry, { policyEngine: engine });
+
+      const result = await executor.execute('wild-tool', { input: 'x' }, createContext());
+      assert.equal(result.kind, 'error');
+      assert.equal((result as { error: { code: string } }).error.code, 'TOOL_DENIED');
     });
   });
 });

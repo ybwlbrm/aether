@@ -1,8 +1,15 @@
 /**
  * ToolPolicy — Policy engine for tool execution control.
  *
- * Transport-agnostic: no Fastify, no SSE, no React, no zod-for-runtime deps.
+ * TRANSPORT-AGNOSTIC: no Fastify, no SSE, no React, no zod-for-runtime deps.
  * Pure TypeScript only.
+ *
+ * @deprecated PERM-001 (P0-19/20)：本类为兼容层（legacy tool-pattern 规则）。
+ * 新权限体系为 capability 化的 `PolicyEngine`（src/core/permissions/policy.ts），
+ * 语义：Capability → PolicyEngine → Approval → ToolRuntime → Executor。
+ * - 新代码应使用 PolicyEngine（工具名以 `tool:<name>` capability 表达）
+ * - 本类仅在 ToolExecutor 内保留为**可选**兼容检查（toolExecutorOptions.policyEngine 注入时启用）
+ * - 计划在下一个大版本移除
  */
 
 import type { Capability, CapabilitySet } from '../permissions/index.js';
