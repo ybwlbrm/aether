@@ -1,6 +1,40 @@
 # Changelog
 
-## [2.2.0] - 2026-09-06 · 第三轮审计收敛版（详见更新）
+## [2.2.0] - 2026-09-06 · 第三轮审计收敛版
+
+### Added（新增）
+- RunCancellationRegistry（run-scoped 取消）：同一会话多 Run 并发互不影响；`POST /api/runs/:runId/cancel` 打通执行流中止 + 状态机
+- Memory 单一事实源：SQLite memories 表 v14 迁移（scope/importance/lastUsedAt/expiresAt），JSON 仅迁移/导入/导出/备份
+- Auth Matrix：approvals/permissions/sync 纳入本地 token 保护；敏感数据 GET（导出/云下载）不再豁免
+- Approval 生命周期绑定 run/task/agent/toolCall，批准后重新校验策略
+- PolicyEngine enforce 模式（decision.allowed 唯一裁决）+ ToolPolicy 默认拒绝可配置
+
+### Changed（变更）
+- ModelRuntime 全收口：7+ 业务模块移除直连 /chat/completions（tool-loop×2/编排/文档/压缩/AI 创作）
+- Provider 选择修复：isDefault 生效、能力优先校验、无匹配不再悄悄 fallback
+- SSRF 统一基础设施：IPv6 字面量全拒（::1/fc00::/fe80::/::ffff:*）+ DNS 解析防 rebinding + 搜索/下载/Provider 一致
+- 重试系统：404 去重、Retry-After 支持 seconds 与 HTTP-date、等待可立即取消
+- 前端 Activity Store 完全 Run 化（eventsByRun/cursorByRun/taskCardByRun/reasoningByRun）
+- Supabase 下载全链路 user_id + device_id 所有权过滤
+
+### Fixed（修复）
+- Path Guard Unix 敏感段匹配 bug（/usr/bin、/etc 现在真正拦截）+ junction/symlink 逃逸
+- 导入 Provider 补 SSRF 校验
+- 同步结果区分 success/partial/failed（不再假成功）
+- userId 不可由请求体伪造；切换同步配置自动重置设备注册
+- 16 个回归测试修复（迁移版本期望/审批超时/记忆测试隔离/取消计数语义）
+
+### Security（安全）
+- 见 Changed：SSRF IPv6/DNS、Auth Matrix、所有权过滤、路径守卫
+
+### Performance（性能）
+- 前端按 run 隔离投影，消除跨 Run 污染与冗余重算
+
+### Breaking Changes（破坏性变更）
+- 无 API 破坏；`/api/health` version 更新为 2.2.0
+
+### Migration（迁移）
+- 数据库 v14（memories 新列，自动执行，无破坏）
 
 （本轮完整条目待打包后回填）
 
