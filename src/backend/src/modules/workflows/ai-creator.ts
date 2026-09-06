@@ -1,8 +1,8 @@
 import type { BackendConfig } from '../../config/index.js';
 import { getProviderByCapability } from '../../lib/provider.js';
-import { fetchWithRetry } from '../../lib/fetch-retry.js';
 import { extractJson } from '../documents/index.js';
 import { isSafeFetchUrl } from '../../lib/safe-fetch.js';
+import { buildModelRuntime, type ModelRequest } from '../../core/models/index.js';
 import { randomUUID } from 'node:crypto';
 import { getDb, saveDb } from '../../db/client.js';
 import { workflows } from '../../db/schema/index.js';
@@ -57,28 +57,29 @@ export async function aiCreateWorkflow(opts: AiCreateWorkflowOptions): Promise<A
 只返回 JSON，不要输出其他内容。格式：
 {"name":"工作流名称","nodes":[...],"edges":[...]}`;
 
-  const res = await fetchWithRetry(`${provider.baseUrl.replace(/\/$/, '')}/chat/completions`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${provider.apiKey}` },
-    body: JSON.stringify({
-      model: provider.defaultModel || 'gpt-4o',
-      messages: [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: desc },
-      ],
-      max_tokens: 2048,
-      stream: false,
-    }),
+  const providerConfig = {
+    id: provider.id,
+    name: provider.name,
+    type: provider.type,
+    apiKey: provider.apiKey,
+    baseUrl: provider.baseUrl,
+    defaultModel: provider.defaultModel,
+    models: provider.models,
+    capabilities: provider.capabilities,
+  };
+  const runtime = buildModelRuntime(providerConfig);
+
+  const request: ModelRequest = {
+    provider: provider.id,
+    model: provider.defaultModel || 'gpt-4o',
+    systemPrompt,
+    messages: [{ role: 'user', content: desc }],
+    maxTokens: 2048,
     signal: AbortSignal.timeout(60000),
-  });
+  };
 
-  if (!res.ok) {
-    const errText = await res.text().catch(() => '');
-    throw new Error(`AI 生成失败 (${res.status}): ${errText.slice(0, 200)}`);
-  }
-
-  const data = await res.json() as any;
-  const rawText = (data.choices?.[0]?.message?.content || '').trim();
+  const response = await runtime.complete(request);
+  const rawText = response.content.trim();
   const parsed = extractJson(rawText);
 
   if (!parsed || !Array.isArray(parsed.nodes)) {

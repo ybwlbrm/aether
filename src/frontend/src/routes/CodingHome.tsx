@@ -98,7 +98,7 @@ interface Conversation {
 /** 当前会话的 Activity Stream（事件驱动实时展示：工具活动 + 任务进度 + 流式思考） */
 function ActivityStreamLive({ convId }: { convId: string | null }) {
   // 从 Zustand 订阅当前会话事件（事件变化触发 re-render）；任务卡通过 useMemo 投影（防无限重渲染）
-  const events = useActivityStore(s => (convId ? s.eventsByConv[convId] : undefined));
+  const events = useActivityStore(s => (convId ? s.getEvents(convId) : undefined));
   const taskCard = useMemo(() => (convId && events ? useActivityStore.getState().projectTaskCard(convId) : null), [convId, events]);
   if (!convId || !events || events.length === 0) return null;
   return <ActivityStream events={events} taskCard={taskCard} />;

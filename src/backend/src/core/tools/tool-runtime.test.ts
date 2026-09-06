@@ -11,7 +11,7 @@ import type { CapabilitySet } from '../permissions/index.js';
 describe('tool-runtime', () => {
   describe('createToolContext', () => {
     test('creates context with required fields', () => {
-      const policy = new ToolPolicy();
+      const policy = new ToolPolicy({});
       const context = createToolContext({
         runId: 'run-123',
         policy,
@@ -30,7 +30,7 @@ describe('tool-runtime', () => {
     });
 
     test('creates context with all optional fields', () => {
-      const policy = new ToolPolicy();
+      const policy = new ToolPolicy({});
       const caps = new Set(['filesystem.read']) as CapabilitySet;
       const abortController = new AbortController();
       const logger = {
@@ -71,7 +71,7 @@ describe('tool-runtime', () => {
     });
 
     test('default permissions is empty set when not provided', () => {
-      const policy = new ToolPolicy();
+      const policy = new ToolPolicy({});
       const context = createToolContext({ runId: 'run-1', policy });
 
       assert.ok(context.permissions instanceof Set);

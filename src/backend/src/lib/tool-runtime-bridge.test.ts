@@ -34,7 +34,7 @@ function sampleLegacyEntry() {
 function makeContext(overrides: Partial<ToolContext> = {}): ToolContext {
   return createToolContext({
     runId: 'run-1',
-    policy: new ToolPolicy(),
+    policy: new ToolPolicy({}),
     ...overrides,
   });
 }

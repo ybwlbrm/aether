@@ -1,18 +1,16 @@
-import { getMemories } from './memory.js';
+import { getDb } from '../../db/client.js';
+import { memories } from '../../db/schema/index.js';
+import { desc, like, or } from 'drizzle-orm';
 
 /**
  * Get active memories as formatted string for prompt injection
- * 合并两个来源：新 DB memories 表 + 旧 JSON memory.json（兼容过渡）
+ * 仅从 DB memories 表读取（JSON 文件已废弃，Wave0-MEM）
  * 可选 context 参数：传入用户消息内容，按关键词召回相关记忆
  */
 export async function getActiveMemoriesFormatted(context?: string): Promise<string> {
   const parts: string[] = [];
 
-  // 1. 从 DB memories 表读取（新系统）
   try {
-    const { getDb } = await import('../../db/client.js');
-    const { memories } = await import('../../db/schema/index.js');
-    const { desc, like, or } = await import('drizzle-orm');
     const db = getDb();
     // 如果有 context，按关键词召回相关记忆（先匹配相关记忆，再补充最新记忆）
     if (context && context.trim()) {
@@ -45,15 +43,6 @@ export async function getActiveMemoriesFormatted(context?: string): Promise<stri
       parts.push(`${key}: ${m.content}${tags ? ' (#' + tags + ')' : ''}`);
     }
   } catch { /* DB 未初始化或表不存在，静默降级 */ }
-
-  // 2. 从旧 JSON 文件读取（兼容旧数据）
-  try {
-    const mems = await getMemories();
-    const active = mems.filter(m => m.active);
-    for (const m of active) {
-      parts.push(`- ${m.content}`);
-    }
-  } catch { /* ignore */ }
 
   return parts.join('\n');
 }

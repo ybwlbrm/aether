@@ -10,7 +10,7 @@ import type { Capability, CapabilitySet } from '../permissions/index.js';
 describe('tool-policy', () => {
   describe('default behavior', () => {
     test('allows all tools by default', () => {
-      const policy = new ToolPolicy();
+      const policy = new ToolPolicy({});
       const result = policy.evaluate('any-tool');
 
       assert.equal(result.action, 'allow');
@@ -18,26 +18,28 @@ describe('tool-policy', () => {
     });
 
     test('allow() returns true for unknown tools', () => {
-      const policy = new ToolPolicy();
+      const policy = new ToolPolicy({});
       assert.equal(policy.allow('unknown-tool'), true);
     });
 
     test('denied() returns false for unknown tools', () => {
-      const policy = new ToolPolicy();
+      const policy = new ToolPolicy({});
       assert.equal(policy.denied('unknown-tool'), false);
     });
 
     test('requiresApproval() returns false for unknown tools', () => {
-      const policy = new ToolPolicy();
+      const policy = new ToolPolicy({});
       assert.equal(policy.requiresApproval('unknown-tool'), false);
     });
   });
 
   describe('exact match rules', () => {
     test('deny rule blocks exact tool name', () => {
-      const policy = new ToolPolicy([
-        { pattern: 'dangerous-tool', action: 'deny' },
-      ]);
+      const policy = new ToolPolicy({
+        rules: [
+          { pattern: 'dangerous-tool', action: 'deny' },
+        ],
+      });
 
       assert.equal(policy.denied('dangerous-tool'), true);
       assert.equal(policy.allow('dangerous-tool'), false);
@@ -45,9 +47,11 @@ describe('tool-policy', () => {
     });
 
     test('require-approval rule triggers approval for exact tool name', () => {
-      const policy = new ToolPolicy([
-        { pattern: 'sensitive-tool', action: 'require-approval' },
-      ]);
+      const policy = new ToolPolicy({
+        rules: [
+          { pattern: 'sensitive-tool', action: 'require-approval' },
+        ],
+      });
 
       assert.equal(policy.requiresApproval('sensitive-tool'), true);
       assert.equal(policy.allow('sensitive-tool'), false);
@@ -55,9 +59,11 @@ describe('tool-policy', () => {
     });
 
     test('allow rule explicitly allows (redundant but explicit)', () => {
-      const policy = new ToolPolicy([
-        { pattern: 'explicit-tool', action: 'allow' },
-      ]);
+      const policy = new ToolPolicy({
+        rules: [
+          { pattern: 'explicit-tool', action: 'allow' },
+        ],
+      });
 
       assert.equal(policy.allow('explicit-tool'), true);
     });
@@ -65,9 +71,11 @@ describe('tool-policy', () => {
 
   describe('glob pattern matching', () => {
     test('* wildcard matches prefix', () => {
-      const policy = new ToolPolicy([
-        { pattern: 'admin-*', action: 'deny' },
-      ]);
+      const policy = new ToolPolicy({
+        rules: [
+          { pattern: 'admin-*', action: 'deny' },
+        ],
+      });
 
       assert.equal(policy.denied('admin-delete'), true);
       assert.equal(policy.denied('admin-create'), true);
@@ -77,9 +85,11 @@ describe('tool-policy', () => {
     });
 
     test('* wildcard matches suffix', () => {
-      const policy = new ToolPolicy([
-        { pattern: '*-delete', action: 'deny' },
-      ]);
+      const policy = new ToolPolicy({
+        rules: [
+          { pattern: '*-delete', action: 'deny' },
+        ],
+      });
 
       assert.equal(policy.denied('file-delete'), true);
       assert.equal(policy.denied('user-delete'), true);
@@ -87,9 +97,11 @@ describe('tool-policy', () => {
     });
 
     test('* wildcard matches middle', () => {
-      const policy = new ToolPolicy([
-        { pattern: 'file-*-access', action: 'require-approval' },
-      ]);
+      const policy = new ToolPolicy({
+        rules: [
+          { pattern: 'file-*-access', action: 'require-approval' },
+        ],
+      });
 
       assert.equal(policy.requiresApproval('file-read-access'), true);
       assert.equal(policy.requiresApproval('file-write-access'), true);
@@ -98,9 +110,11 @@ describe('tool-policy', () => {
     });
 
     test('multiple wildcards', () => {
-      const policy = new ToolPolicy([
-        { pattern: '*-*-*', action: 'deny' },
-      ]);
+      const policy = new ToolPolicy({
+        rules: [
+          { pattern: '*-*-*', action: 'deny' },
+        ],
+      });
 
       assert.equal(policy.denied('a-b-c'), true);
       assert.equal(policy.denied('foo-bar-baz'), true);
@@ -109,9 +123,11 @@ describe('tool-policy', () => {
     });
 
     test('special regex characters are escaped', () => {
-      const policy = new ToolPolicy([
-        { pattern: 'tool.name', action: 'deny' }, // dot should be literal
-      ]);
+      const policy = new ToolPolicy({
+        rules: [
+          { pattern: 'tool.name', action: 'deny' }, // dot should be literal
+        ],
+      });
 
       assert.equal(policy.denied('tool.name'), true);
       assert.equal(policy.denied('toolXname'), false); // dot not matching any char
@@ -120,19 +136,23 @@ describe('tool-policy', () => {
 
   describe('rule priority (first match wins)', () => {
     test('first matching rule takes precedence', () => {
-      const policy = new ToolPolicy([
-        { pattern: 'tool-*', action: 'deny' },
-        { pattern: 'tool-allowed', action: 'allow' }, // Should not be reached
-      ]);
+      const policy = new ToolPolicy({
+        rules: [
+          { pattern: 'tool-*', action: 'deny' },
+          { pattern: 'tool-allowed', action: 'allow' }, // Should not be reached
+        ],
+      });
 
       assert.equal(policy.denied('tool-allowed'), true);
     });
 
     test('more specific rule first allows override', () => {
-      const policy = new ToolPolicy([
-        { pattern: 'tool-allowed', action: 'allow' },
-        { pattern: 'tool-*', action: 'deny' },
-      ]);
+      const policy = new ToolPolicy({
+        rules: [
+          { pattern: 'tool-allowed', action: 'allow' },
+          { pattern: 'tool-*', action: 'deny' },
+        ],
+      });
 
       assert.equal(policy.allow('tool-allowed'), true);
       assert.equal(policy.denied('tool-other'), true);
@@ -142,9 +162,12 @@ describe('tool-policy', () => {
   describe('capabilities (ignored for now per spec)', () => {
     test('capabilities field exists on rule but does not affect evaluation yet', () => {
       const caps = new Set(['filesystem.read']) as CapabilitySet;
-      const policy = new ToolPolicy([
-        { pattern: 'file-read', action: 'allow', capabilities: ['filesystem.read'] as Capability[] },
-      ], caps);
+      const policy = new ToolPolicy({
+        rules: [
+          { pattern: 'file-read', action: 'allow', capabilities: ['filesystem.read'] as Capability[] },
+        ],
+        grantedCapabilities: caps,
+      });
 
       // Currently capabilities are checked but since we grant the capability, it should allow
       assert.equal(policy.allow('file-read'), true);
@@ -152,9 +175,12 @@ describe('tool-policy', () => {
 
     test('rule with ungranted capability is skipped', () => {
       const caps = new Set(['filesystem.write']) as CapabilitySet; // missing read
-      const policy = new ToolPolicy([
-        { pattern: 'file-read', action: 'allow', capabilities: ['filesystem.read'] as Capability[] },
-      ], caps);
+      const policy = new ToolPolicy({
+        rules: [
+          { pattern: 'file-read', action: 'allow', capabilities: ['filesystem.read'] as Capability[] },
+        ],
+        grantedCapabilities: caps,
+      });
 
       // Rule requires filesystem.read but we only have write, so rule skipped -> default allow
       assert.equal(policy.allow('file-read'), true);
@@ -162,9 +188,12 @@ describe('tool-policy', () => {
 
     test('deny rule with ungranted capability is skipped', () => {
       const caps = new Set(['filesystem.write']) as CapabilitySet;
-      const policy = new ToolPolicy([
-        { pattern: 'file-read', action: 'deny', capabilities: ['filesystem.read'] as Capability[] },
-      ], caps);
+      const policy = new ToolPolicy({
+        rules: [
+          { pattern: 'file-read', action: 'deny', capabilities: ['filesystem.read'] as Capability[] },
+        ],
+        grantedCapabilities: caps,
+      });
 
       // Rule requires read but we don't have it, so rule skipped -> default allow
       assert.equal(policy.allow('file-read'), true);
@@ -173,17 +202,19 @@ describe('tool-policy', () => {
 
   describe('dynamic rule management', () => {
     test('addRule appends rule', () => {
-      const policy = new ToolPolicy();
+      const policy = new ToolPolicy({});
       policy.addRule({ pattern: 'new-tool', action: 'deny' });
 
       assert.equal(policy.denied('new-tool'), true);
     });
 
     test('removeRule removes by pattern', () => {
-      const policy = new ToolPolicy([
-        { pattern: 'tool-a', action: 'deny' },
-        { pattern: 'tool-b', action: 'deny' },
-      ]);
+      const policy = new ToolPolicy({
+        rules: [
+          { pattern: 'tool-a', action: 'deny' },
+          { pattern: 'tool-b', action: 'deny' },
+        ],
+      });
 
       assert.equal(policy.removeRule('tool-a'), true);
       assert.equal(policy.allow('tool-a'), true); // Now allowed (default)
@@ -191,14 +222,16 @@ describe('tool-policy', () => {
     });
 
     test('removeRule returns false for non-existent pattern', () => {
-      const policy = new ToolPolicy();
+      const policy = new ToolPolicy({});
       assert.equal(policy.removeRule('non-existent'), false);
     });
 
     test('getRules returns copy of rules', () => {
-      const policy = new ToolPolicy([
-        { pattern: 'tool-a', action: 'deny' },
-      ]);
+      const policy = new ToolPolicy({
+        rules: [
+          { pattern: 'tool-a', action: 'deny' },
+        ],
+      });
 
       const rules = policy.getRules();
       assert.equal(rules.length, 1);
@@ -213,12 +246,46 @@ describe('tool-policy', () => {
   describe('getGrantedCapabilities', () => {
     test('returns granted capabilities', () => {
       const caps = new Set(['filesystem.read', 'network.http']) as CapabilitySet;
-      const policy = new ToolPolicy([], caps);
+      const policy = new ToolPolicy({
+        grantedCapabilities: caps,
+      });
 
       const granted = policy.getGrantedCapabilities();
       assert.equal(granted.has('filesystem.read'), true);
       assert.equal(granted.has('network.http'), true);
       assert.equal(granted.has('filesystem.write'), false);
+    });
+  });
+
+  describe('defaultAction option (P1-37)', () => {
+    test('defaultAction: deny - unknown tools are denied', () => {
+      const policy = new ToolPolicy({ defaultAction: 'deny' });
+      assert.equal(policy.allow('unknown-tool'), false);
+      assert.equal(policy.denied('unknown-tool'), true);
+    });
+
+    test('defaultAction: allow - unknown tools are allowed (legacy default)', () => {
+      const policy = new ToolPolicy({ defaultAction: 'allow' });
+      assert.equal(policy.allow('unknown-tool'), true);
+      assert.equal(policy.denied('unknown-tool'), false);
+    });
+
+    test('defaultAction: deny - explicit allow rule still works', () => {
+      const policy = new ToolPolicy({
+        rules: [{ pattern: 'allowed-tool', action: 'allow' }],
+        defaultAction: 'deny',
+      });
+      assert.equal(policy.allow('allowed-tool'), true);
+      assert.equal(policy.denied('other-tool'), true);
+    });
+
+    test('defaultAction: deny - explicit deny rule still works', () => {
+      const policy = new ToolPolicy({
+        rules: [{ pattern: 'denied-tool', action: 'deny' }],
+        defaultAction: 'deny',
+      });
+      assert.equal(policy.denied('denied-tool'), true);
+      assert.equal(policy.denied('other-tool'), true);
     });
   });
 });

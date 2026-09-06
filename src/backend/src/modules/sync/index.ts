@@ -112,7 +112,7 @@ export function registerSyncRoutes(app: FastifyInstance, config: BackendConfig):
 }
 
 // Re-export all types and functions for external consumers
-export type { SyncConfig } from './sync-config.js';
+export type { SyncConfig, OwnershipFilters } from './sync-config.js';
 export {
   loadSyncConfig,
   persistSyncConfig,
@@ -124,9 +124,14 @@ export {
   setRealtimeChannel,
   getDeviceRegistered,
   setDeviceRegistered,
+  getConfigFingerprint,
+  setConfigFingerprint,
   registerDevice,
   syncConversationsToSupabase,
   registerSyncConfigRoutes,
+  buildOwnershipFilters,
+  computeConfigFingerprint,
+  buildSyncResponse,
 } from './sync-config.js';
 
 export { setupRealtimeListener } from './realtime.js';

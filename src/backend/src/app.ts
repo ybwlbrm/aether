@@ -118,21 +118,34 @@ export async function buildApp(config?: BackendConfig) {
       }
     }
     // 本地认证 token 校验 — 敏感端点强制要求 Authorization: Bearer <token>
-    // 受保护端点：terminal 执行、安全设置、provider key 读取/删除、导入导出全量、工作流执行、MCP 服务器测试、测试运行
-    const sensitivePaths = [
+    // Wave0-AM (P1-31/P1-32): 按「路由分类」而非「HTTP 方法」决定敏感度。
+    //   - sensitiveWritePaths: 状态变更敏感（工具执行/安全设置/provider/导入/审批/
+    //     权限设置/同步配置上传/工作流/MCP/测试）—— 非 GET 即需 token
+    //   - sensitiveReadPaths: 数据泄露面（全量导出 / 云数据下载 / 审批列表）——
+    //     GET 同样需要 token（"GET=安全"假设不成立）
+    const sensitiveWritePaths = [
       '/api/terminal/execute',
       '/api/settings/security',
       '/api/providers/',
       '/api/import/all',
-      '/api/export/all',
       '/api/workflows/',
       '/api/mcp/servers/',
       '/api/testing/run',
+      '/api/permissions/',
+      '/api/approvals/',
+      '/api/sync/config',
+      '/api/sync/upload',
     ];
-    const isSensitive = sensitivePaths.some(p =>
-      request.url === p || (p.endsWith('/') && request.url.startsWith(p))
-    );
-    if (isSensitive && method !== 'GET') {
+    const sensitiveReadPaths = [
+      '/api/export/all',
+      '/api/sync/download',
+      '/api/approvals/',
+    ];
+    const matchesSensitive = (list: string[], url: string): boolean =>
+      list.some(p => url === p || (p.endsWith('/') && url.startsWith(p)));
+    const needsAuthWrite = method !== 'GET' && matchesSensitive(sensitiveWritePaths, request.url);
+    const needsAuthRead = matchesSensitive(sensitiveReadPaths, request.url);
+    if (needsAuthWrite || needsAuthRead) {
       const authHeader = request.headers.authorization;
       if (!verifyAuthToken(authHeader)) {
         return reply.code(401).send({ error: { message: 'Unauthorized: invalid or missing auth token' } });

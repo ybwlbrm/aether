@@ -41,7 +41,7 @@ describe('tool-executor', () => {
   const createContext = (overrides: Partial<ToolContext> = {}): ToolContext => 
     createToolContext({
       runId: 'run-123',
-      policy: new ToolPolicy(),
+      policy: new ToolPolicy({}),
       ...overrides,
     });
 
@@ -95,9 +95,11 @@ describe('tool-executor', () => {
     test('returns errorResult when policy denies', async () => {
       const registry = new ToolRegistry();
       registry.register(createTestTool({ name: 'denied-tool' }));
-      const policy = new ToolPolicy([
-        { pattern: 'denied-tool', action: 'deny' },
-      ]);
+      const policy = new ToolPolicy({
+        rules: [
+          { pattern: 'denied-tool', action: 'deny' },
+        ],
+      });
       const executor = new ToolExecutor(registry, { policy });
       const context = createContext({ policy });
 
@@ -113,9 +115,11 @@ describe('tool-executor', () => {
     test('returns pendingApprovalResult when policy requires approval', async () => {
       const registry = new ToolRegistry();
       registry.register(createTestTool({ name: 'approval-tool' }));
-      const policy = new ToolPolicy([
-        { pattern: 'approval-tool', action: 'require-approval' },
-      ]);
+      const policy = new ToolPolicy({
+        rules: [
+          { pattern: 'approval-tool', action: 'require-approval' },
+        ],
+      });
       const executor = new ToolExecutor(registry, { policy });
       const context = createContext({ policy });
 
@@ -343,6 +347,138 @@ describe('tool-executor', () => {
       const result = await executor.execute('wild-tool', { input: 'x' }, createContext());
       assert.equal(result.kind, 'error');
       assert.equal((result as { error: { code: string } }).error.code, 'TOOL_DENIED');
+    });
+  });
+
+  describe('P0-06/P1-38: enforcePolicyEngine mode', () => {
+    test('enforcePolicyEngine=true: empty engine denies unknown tool (default deny)', async () => {
+      const registry = new ToolRegistry();
+      registry.register(createTestTool({ name: 'unknown-tool' }));
+      const executor = new ToolExecutor(registry, { 
+        policyEngine: new PolicyEngine(), 
+        enforcePolicyEngine: true 
+      });
+
+      const result = await executor.execute('unknown-tool', { input: 'x' }, createContext());
+      assert.equal(result.kind, 'error');
+      assert.equal((result as { error: { code: string } }).error.code, 'TOOL_DENIED');
+    });
+
+    test('enforcePolicyEngine=true: explicit allow rule permits', async () => {
+      const registry = new ToolRegistry();
+      registry.register(createTestTool({ name: 'allowed-tool' }));
+      const engine = new PolicyEngine([{ id: 'r1', capability: 'tool.allowed-tool', effect: 'allow' }]);
+      const executor = new ToolExecutor(registry, { 
+        policyEngine: engine, 
+        enforcePolicyEngine: true 
+      });
+
+      const result = await executor.execute('allowed-tool', { input: 'x' }, createContext());
+      assert.equal(result.kind, 'success');
+    });
+
+    test('enforcePolicyEngine=true: explicit deny rule denies', async () => {
+      const registry = new ToolRegistry();
+      registry.register(createTestTool({ name: 'denied-tool' }));
+      const engine = new PolicyEngine([{ id: 'r1', capability: 'tool.denied-tool', effect: 'deny' }]);
+      const executor = new ToolExecutor(registry, { 
+        policyEngine: engine, 
+        enforcePolicyEngine: true 
+      });
+
+      const result = await executor.execute('denied-tool', { input: 'x' }, createContext());
+      assert.equal(result.kind, 'error');
+      assert.equal((result as { error: { code: string } }).error.code, 'TOOL_DENIED');
+    });
+
+    test('enforcePolicyEngine=true: granted capability permits', async () => {
+      const registry = new ToolRegistry();
+      registry.register(createTestTool({ name: 'cap-tool' }));
+      const engine = new PolicyEngine([]);
+      const executor = new ToolExecutor(registry, { 
+        policyEngine: engine, 
+        enforcePolicyEngine: true 
+      });
+      const context = createContext({ 
+        permissions: new Set(['tool.cap-tool']) 
+      });
+
+      const result = await executor.execute('cap-tool', { input: 'x' }, context);
+      assert.equal(result.kind, 'success');
+    });
+
+    test('enforcePolicyEngine=false (default): empty engine allows (compat mode)', async () => {
+      const registry = new ToolRegistry();
+      registry.register(createTestTool({ name: 'compat-tool' }));
+      const executor = new ToolExecutor(registry, { 
+        policyEngine: new PolicyEngine(), 
+        enforcePolicyEngine: false 
+      });
+
+      const result = await executor.execute('compat-tool', { input: 'x' }, createContext());
+      assert.equal(result.kind, 'success');
+    });
+
+    test('enableMandatoryPolicyEngine static helper creates executor with enforce=true', async () => {
+      const registry = new ToolRegistry();
+      registry.register(createTestTool({ name: 'static-tool' }));
+      const executor = ToolExecutor.enableMandatoryPolicyEngine(registry, { 
+        policyEngine: new PolicyEngine() 
+      });
+
+      const result = await executor.execute('static-tool', { input: 'x' }, createContext());
+      assert.equal(result.kind, 'error'); // default deny
+      assert.equal(executor.enforcePolicyEngine, true);
+    });
+  });
+
+  describe('P0-11: approvalId unification with requestApproval callback', () => {
+    test('uses injected requestApproval callback and returns real apr-xxxx ID', async () => {
+      const registry = new ToolRegistry();
+      registry.register(createTestTool({ name: 'approval-tool' }));
+      const policy = new ToolPolicy({
+        rules: [
+          { pattern: 'approval-tool', action: 'require-approval' },
+        ],
+      });
+
+      let capturedApprovalId: string | null = null;
+      const executor = new ToolExecutor(registry, { 
+        policy,
+        requestApproval: ({ toolName, argsSummary, context }) => {
+          const id = `apr-${toolName}-${Date.now()}`;
+          capturedApprovalId = id;
+          return {
+            id,
+            promise: Promise.resolve({ approved: true, decision: 'approved' as const }),
+          };
+        },
+      });
+      const context = createContext({ policy });
+
+      const result = await executor.execute('approval-tool', { input: 'hello' }, context);
+
+      assert.equal(result.kind, 'pending-approval');
+      assert.equal(result.toolName, 'approval-tool');
+      assert.ok(result.approvalId.startsWith('apr-'));
+      assert.equal(result.approvalId, capturedApprovalId);
+    });
+
+    test('without requestApproval callback, uses legacy approvalId format (compat)', async () => {
+      const registry = new ToolRegistry();
+      registry.register(createTestTool({ name: 'legacy-approval' }));
+      const policy = new ToolPolicy({
+        rules: [
+          { pattern: 'legacy-approval', action: 'require-approval' },
+        ],
+      });
+      const executor = new ToolExecutor(registry, { policy });
+      const context = createContext({ policy });
+
+      const result = await executor.execute('legacy-approval', { input: 'hello' }, context);
+
+      assert.equal(result.kind, 'pending-approval');
+      assert.ok(result.approvalId.startsWith('legacy-approval:'));
     });
   });
 });

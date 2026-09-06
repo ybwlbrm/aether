@@ -19,11 +19,7 @@ const streamdownPlugins = { cjk };
 
 /** 当前会话的 Activity Stream — 显示所有过程事件（thinking、tools），按 seq 顺序排列 */
 function ChatActivityStream({ convId }: { convId: string | null }) {
-  const allEvents = useActivityStore(s => (convId ? s.eventsByConv[convId] : undefined));
-  const events = useMemo(() => {
-    if (!allEvents || allEvents.length === 0) return undefined;
-    return allEvents;
-  }, [allEvents]);
+  const events = useActivityStore(s => (convId ? s.getEvents(convId) : undefined));
   const taskCard = useMemo(() => (convId && events ? useActivityStore.getState().projectTaskCard(convId) : null), [convId, events]);
   if (!convId || !events || events.length === 0) return null;
   return <ActivityStream events={events} taskCard={taskCard} />;

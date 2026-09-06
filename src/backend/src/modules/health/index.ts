@@ -1,7 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 
 /** 当前 Aether 版本（与根 package.json / Android versionName 同步维护） */
-export const AETHER_VERSION = '2.1.0';
+export const AETHER_VERSION = '2.2.0';
 
 /** 健康载荷（纯函数，供路由与测试复用） */
 export function buildHealthPayload(): {

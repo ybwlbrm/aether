@@ -1,6 +1,7 @@
 import { useState, useRef } from 'react';
 import { Download, Upload } from 'lucide-react';
 import { confirm as confirmDialog } from '../../components/ui/confirm-dialog';
+import { api } from '../../api/client';
 
 // P2-3: 从 Settings.tsx 拆分出的数据管理组件
 export function DataManage() {
@@ -34,9 +35,8 @@ export function DataManage() {
   const handleExport = async () => {
     setExporting(true); setMsg('');
     try {
-      const res = await fetch('/api/export/all');
-      if (!res.ok) throw new Error(`导出失败: ${res.status}`);
-      const backend = await res.json();
+      // 全量导出（Wave0-AM: 后端要求 Authorization token，走带 token 的 client）
+      const backend = await api.exportAll();
       const data = {
         version: 1,
         exportedAt: new Date().toISOString(),

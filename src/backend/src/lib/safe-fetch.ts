@@ -5,9 +5,15 @@
  * - 仅允许 http/https 协议
  * - 必须阻止：云元数据地址 169.254.169.254（AWS/Azure/GCP/Aliyun）、链路本地 169.254.0.0/16
  * - 必须允许：用户配置的本地 AI 提供商（如 Ollama http://127.0.0.1:11434、LM Studio http://localhost:1234 等）
- *   因此回环地址 (127.0.0.1, localhost, ::1) 和私网段 (10.x, 192.168.x, 172.16-31.x) 应放行
+ *   因此回环 IPv4 (127.0.0.1) 和私网段 (10.x, 192.168.x, 172.16-31.x) 应放行
  * - 防止 IP 伪装（十进制/八进制/十六进制混淆、IPv6 嵌入 IPv4 等）
+ * - Wave0-SS (P0-12/P0-14): IPv6 字面量一律拒绝（消除 ::1 / fc00:: / fe80:: /
+ *   ::ffff:127.0.0.1 / ::ffff:169.254.169.254 等绕过面）；新增强制 DNS 解析校验
+ *   resolveAndValidateUrl() 防 DNS rebinding。
  */
+
+import { isIP } from 'node:net';
+import { lookup } from 'node:dns/promises';
 
 const METADATA_HOSTS = new Set([
   '169.254.169.254',           // AWS/Azure/GCP/阿里云元数据服务
@@ -109,6 +115,11 @@ export function isSafeFetchUrl(raw: string): boolean {
 
     const host = u.hostname.toLowerCase();
 
+    // Wave0-SS (P0-12): IPv6 字面量（含 ::1 / fc00:: / fe80:: / ::ffff:* / 公网字面量）
+    // 一律拒绝 —— 消除 IPv6 绕过面。合法公网 IPv6 字面量场景罕见，
+    // 且可被用于访问本机/内部/元数据映射地址。
+    if (isIpv6Literal(host)) return false;
+
     // 1. 直接命中元数据服务域名/IP
     if (isMetadataHostname(host)) return false;
 
@@ -129,6 +140,66 @@ export function isSafeFetchUrl(raw: string): boolean {
     // URL 解析失败视为不安全
     return false;
   }
+}
+
+/**
+ * Wave0-SS: 公网-only 校验 —— 用于"抓取任意 URL"场景（搜索结果 URL / web_fetch /
+ * 下载器），此类场景不允许访问本机/内网服务（与 provider 场景不同：provider 允许
+ * 本地 Ollama 等）。在 isSafeFetchUrl 基础上额外拒绝回环与私网 IPv4（IPv6 字面量已全拒）。
+ */
+export function isPublicFetchUrl(raw: string): boolean {
+  if (!isSafeFetchUrl(raw)) return false;
+  try {
+    const u = new URL(raw);
+    const host = u.hostname.toLowerCase();
+    if (host === 'localhost' || host === 'localhost.localdomain') return false;
+    const ip = parseIpv4(host);
+    if (ip && isPrivateOrLoopback(ip)) return false;
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Wave0-SS: 公网-only 校验并抛错（供路由层给出友好错误） */
+export function assertPublicFetchUrl(raw: string, fieldName = 'url'): void {
+  if (!isPublicFetchUrl(raw)) {
+    throw new Error(`${fieldName} 存在 SSRF 风险：仅允许公网地址`);
+  }
+}
+
+/**
+ * Wave0-SS: DNS 解析级 SSRF 校验 —— 防 DNS rebinding（P0-14）。
+ * 字符串级校验通过后，若 host 是域名则执行 DNS lookup 检查所有记录：
+ * - 解析出 IPv6 记录 → 拒绝（无法在字面量层区分公网/内网，保守拒绝）
+ * - 解析出链路本地 IPv4（169.254.0.0/16，含云元数据 169.254.169.254）→ 拒绝
+ * 字面量 IP 已由 isSafeFetchUrl 校验，无需 DNS。
+ * 重定向的每一跳都应再次调用（每次重新 resolve）。
+ */
+export async function resolveAndValidateUrl(raw: string): Promise<void> {
+  if (!isSafeFetchUrl(raw)) {
+    throw new Error('SSRF: 禁止访问内网/链路本地/元数据地址或非 http(s) 协议');
+  }
+  const u = new URL(raw);
+  const host = u.hostname;
+  if (isIP(host) === 4 || isIP(host) === 6) return; // 字面量已校验
+  const records = await lookup(host, { all: true, verbatim: true }).catch(() => []);
+  for (const r of records) {
+    if (r.address.includes(':')) {
+      throw new Error(`SSRF: 域名 "${host}" 解析出 IPv6 地址 ${r.address}，拒绝访问`);
+    }
+    const ipv4 = parseIpv4(r.address);
+    if (ipv4 && isLinkLocal(ipv4)) {
+      throw new Error(`SSRF: 域名 "${host}" 解析出链路本地地址 ${r.address}，拒绝访问`);
+    }
+  }
+}
+
+/** Wave0-SS: 是否为 IPv6 字面量（含 [::1] 括号形式） */
+function isIpv6Literal(host: string): boolean {
+  const h = host.startsWith('[') ? host.slice(1, -1) : host;
+  if (!h.includes(':')) return false;
+  return isIP(h) === 6;
 }
 
 /**

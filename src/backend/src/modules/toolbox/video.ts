@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
 import { execFile, spawnSync } from 'node:child_process';
 import { exportDir } from './utils.js';
-import { isSafeFetchUrl, parseIpv4, isLinkLocal, isPrivateOrLoopback, isMetadataHostname } from '../../lib/safe-fetch.js';
+import { isSafeFetchUrl, isPublicFetchUrl, parseIpv4, isLinkLocal, isPrivateOrLoopback, isMetadataHostname } from '../../lib/safe-fetch.js';
 import { assertMagicMatches } from '../../lib/magic-bytes.js';
 
 // ESM 兼容：项目为 "type": "module"，无 __dirname 全局变量
@@ -137,28 +137,20 @@ export function assertPublicHttpUrl(raw: string): void {
     throw new Error('仅支持 http/https 链接');
   }
   const host = u.hostname.toLowerCase();
-
-  // IPv6 字面量一律拒绝（回环 ::1 / 链路本地 fe80:: / ULA fc00:: 等）
-  if (host.includes(':')) {
-    throw new Error('不允许 IPv6 字面量地址');
-  }
-  // 回环主机名（localhost 非 IP 字面量，parseIpv4 无法识别，需显式拦截）
-  if (host === 'localhost' || host === 'localhost.localdomain') {
-    throw new Error('不允许访问内网/回环地址');
-  }
-  // 元数据/内部域名
-  if (isMetadataHostname(host)) {
-    throw new Error('不允许访问元数据/内部域名');
-  }
-  // IP 字面量（含混淆编码）：链路本地 / 回环 / 私网 全部拒绝
-  const ip = parseIpv4(host);
-  if (ip) {
-    if (isLinkLocal(ip)) throw new Error('不允许访问链路本地地址');
-    if (isPrivateOrLoopback(ip)) throw new Error('不允许访问内网/回环地址');
-  }
-  // 域名形式：复用基础 SSRF 检查（协议+链路本地域名兜底）
-  if (!isSafeFetchUrl(raw)) {
-    throw new Error('地址存在 SSRF 风险');
+  // Wave0-SS: 核心判定复用统一公网-only 校验（safe-fetch.isPublicFetchUrl）
+  // 其余分支仅用于给出更具体的拒绝原因
+  if (!isPublicFetchUrl(raw)) {
+    if (host.includes(':')) throw new Error('不允许 IPv6 字面量地址');
+    if (host === 'localhost' || host === 'localhost.localdomain') {
+      throw new Error('不允许访问内网/回环地址');
+    }
+    const ip = parseIpv4(host);
+    if (ip) {
+      if (isLinkLocal(ip)) throw new Error('不允许访问链路本地地址');
+      if (isPrivateOrLoopback(ip)) throw new Error('不允许访问内网/回环地址');
+    }
+    if (isMetadataHostname(host)) throw new Error('不允许访问元数据/内部域名');
+    throw new Error('不允许访问内网/回环/链路本地地址');
   }
 }
 

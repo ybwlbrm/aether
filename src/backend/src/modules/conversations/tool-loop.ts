@@ -1,14 +1,10 @@
 import { randomUUID } from 'node:crypto';
 import { executeTool } from '../../lib/tool-executor.js';
 import { buildToolPayload } from '@pacc/shared';
-import { parseToolArgsSafe } from '../../lib/stream-translate.js';
+import { parseToolArgsSafe, buildChatRequestBody } from '../../lib/stream-translate.js';
 import { createPendingApproval } from '../../lib/approvals-center.js';
 import { drainDirectives } from '../../lib/inbox.js';
-import { fetchWithRetry } from '../../lib/fetch-retry.js';
-import { buildChatRequestBody } from '../../lib/stream-translate.js';
-import { parseSse, withChunkTimeout } from '../../lib/sse-parser.js';
-import { translate } from '../../lib/stream-translate.js';
-import { SSE_CHUNK_TIMEOUT_MS } from '../../lib/sse-utils.js';
+import { buildModelRuntime, type ModelRequest } from '../../core/models/index.js';
 import { messages } from '../../db/schema/index.js';
 
 export interface ToolLoopConfig {
@@ -101,32 +97,35 @@ export async function executeToolLoop(
       apiMessages.push({ role: 'user', content: `[补充指令] ${d.text}` });
     }
 
-    // 流式调用 AI API（带重试）— 请求体用 buildChatRequestBody（thinking/reasoning_effort 门控）
-    const reqBody = buildChatRequestBody({
+    // Build ModelRuntime from config
+    const providerConfig = {
+      id: 'conversation',
+      name: 'conversation',
+      type: 'openai',
+      apiKey,
+      baseUrl,
+      defaultModel: activeModel,
+      models: [activeModel],
+      capabilities: ['text', 'tool_calling'],
+    };
+    const runtime = buildModelRuntime(providerConfig);
+
+    const request: ModelRequest = {
+      provider: providerConfig.id,
       model: activeModel,
       messages: apiMessages,
-      tools: activeTools,
-      tool_choice: 'auto',
-      deepThinking,
-      reasoningEffort,
-      supportsThinking,
-    });
-
-    const toolCallResponse = await fetchWithRetry(`${baseUrl}/chat/completions`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
-      body: JSON.stringify(reqBody),
-      // BE-05: 传 clientAbort.signal — fetchWithRetry 内部叠加 120s timeout
+      tools: activeTools.map(t => ({
+        type: 'function' as const,
+        function: {
+          name: t.function.name,
+          description: t.function.description,
+          parameters: t.function.parameters,
+        },
+      })),
+      maxTokens: 4096,
       signal: clientAbortSignal,
-    }, sseSend);
+    };
 
-    if (!toolCallResponse.ok) {
-      const errText = await toolCallResponse.text();
-      throw new Error(`AI API 请求失败 (${toolCallResponse.status}): ${errText.slice(0, 200)}`);
-    }
-
-    // 解析流式响应 — translate 统一协议
-    const reader = toolCallResponse.body!.getReader();
     let accumulatedContent = '';
     let accumulatedReasoning = '';
     let currentToolCalls: any[] = [];
@@ -134,7 +133,7 @@ export async function executeToolLoop(
     let turnFinish: 'stop' | 'tool_calls' | 'max-tokens' | 'error' = 'stop';
 
     try {
-      for await (const c of translate(parseSse(withChunkTimeout(reader, SSE_CHUNK_TIMEOUT_MS, clientAbortSignal)))) {
+      for await (const c of runtime.stream(request)) {
         switch (c.type) {
           case 'reasoning-delta': {
             hasReasoning = true;
@@ -184,7 +183,7 @@ export async function executeToolLoop(
         }
       }
     } catch (e: unknown) {
-      if (e instanceof Error && e.name === 'SseStreamError') {
+      if (e instanceof Error && e.name === 'StreamError') {
         sseSend('error', JSON.stringify({ message: `AI 响应流中断: ${e.message}` }));
       }
       throw e;

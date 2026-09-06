@@ -1,148 +1,138 @@
 /**
  * Memory Runtime Bridge — Aether 2.0 Phase 7 migration seam
  *
- * Adapts the LEGACY JSON-file memory store (lib/dal/memory.ts → memory.json,
- * MemoryItem shape) into the NEW core MemoryStore interface so the core
- * MemoryRuntime / MemoryRetriever can read and write the existing data
- * without a destructive migration (Adapter pattern, §2.1 不推倒重来).
- *
- * The legacy MemoryItem {id, content, active, createdAt, updatedAt, category}
- * maps onto core MemoryEntry {id, type, content, scope, createdAt, updatedAt,
- * confidence, importance}. Legacy rows default scope='user', type=category.
+ * Provides a SQLite-backed MemoryStore implementation (SqliteMemoryStore)
+ * that uses the `memories` table as the single source of truth (Wave0-MEM).
+ * The legacy JSON file (memory.json) is no longer used at runtime — it is
+ * only for migration/import/export/backup purposes.
  *
  * Pure TypeScript — no Fastify/SSE/React imports.
  */
 
-import path from 'node:path';
+import { getDb } from '../db/client.js';
+import { memories } from '../db/schema/index.js';
+import { eq, desc, like, or } from 'drizzle-orm';
 import { randomUUID } from 'node:crypto';
-import { DATA_DIR } from './dal/utils.js';
-import { atomicRead, atomicWrite, withFileLock } from './dal/utils.js';
 import type { MemoryStore, MemoryEntry, MemoryQuery, MemoryScope } from '../core/memory/index.js';
 
-/** Legacy memory item shape stored in memory.json */
-interface LegacyMemoryItem {
-  id: string;
-  content: string;
-  active?: boolean;
-  createdAt?: string;
-  updatedAt?: string;
-  category?: string;
-  /** Scope added by the bridge — legacy rows without it default to 'user' */
-  scope?: string;
-}
+type DbMemoryType = 'short_term' | 'project' | 'long_term';
+type DbMemoryScope = 'user' | 'agent' | 'session' | 'project' | 'workspace';
 
-const MEMORY_PATH = path.join(DATA_DIR, 'memory.json');
-
-/** Map a core MemoryEntry into the legacy storage shape (preserves extra fields) */
-function toLegacyItem(entry: MemoryEntry): LegacyMemoryItem {
-  const item: LegacyMemoryItem = {
-    id: entry.id,
-    content: entry.content,
-    active: true,
-    createdAt: entry.createdAt,
-    updatedAt: entry.updatedAt,
-    category: entry.type !== 'user' && entry.type !== 'general' ? entry.type : 'manual',
-    scope: entry.scope ?? 'user',
-  };
-  return item;
-}
-
-/** Map a legacy item into a core MemoryEntry with defaults */
-function toCoreEntry(item: LegacyMemoryItem): MemoryEntry {
+/** Map a core MemoryEntry into the DB storage shape */
+function toDbRow(entry: MemoryEntry): typeof memories.$inferInsert {
   const now = new Date().toISOString();
   return {
-    id: item.id,
-    type: item.category ?? 'general',
-    content: item.content,
-    scope: (item.scope as MemoryScope) ?? 'user',
+    id: entry.id ?? randomUUID(),
+    type: entry.type as DbMemoryType,
+    key: entry.content.slice(0, 100),
+    content: entry.content,
+    tags: '[]',
+    scope: (entry.scope ?? 'user') as DbMemoryScope,
+    importance: entry.importance ?? 0.5,
+    lastUsedAt: entry.lastUsedAt ?? null,
+    createdAt: entry.createdAt ?? now,
+    updatedAt: now,
+  };
+}
+
+/** Map a DB row into a core MemoryEntry */
+function toCoreEntry(row: typeof memories.$inferSelect): MemoryEntry {
+  return {
+    id: row.id,
+    type: row.type,
+    content: row.content,
+    scope: row.scope as MemoryScope,
     confidence: 1,
-    importance: 0.5,
-    createdAt: item.createdAt ?? now,
-    updatedAt: item.updatedAt ?? now,
+    importance: row.importance ?? 0.5,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+    lastUsedAt: row.lastUsedAt ?? undefined,
   };
 }
 
 /**
- * MemoryStore implementation backed by the legacy memory.json file.
- * Reads and writes through the same atomic file helpers as the old DAL,
- * so existing data is preserved and the legacy API keeps working.
+ * MemoryStore implementation backed by the SQLite `memories` table.
+ * Reads and writes through drizzle ORM.
  */
-export class JsonFileMemoryStore implements MemoryStore {
-  private readonly filePath: string;
-
-  constructor(filePath?: string) {
-    this.filePath = filePath ?? MEMORY_PATH;
-  }
-
+export class SqliteMemoryStore implements MemoryStore {
   async put(entry: MemoryEntry): Promise<MemoryEntry> {
-    return withFileLock(this.filePath, async () => {
-      const items = await atomicRead<LegacyMemoryItem[]>(this.filePath, []);
-      const now = new Date().toISOString();
-      const normalized: MemoryEntry = {
-        ...entry,
-        id: entry.id ?? randomUUID(),
-        createdAt: entry.createdAt ?? now,
-        updatedAt: now,
-        scope: entry.scope ?? 'user',
-        confidence: entry.confidence ?? 1,
-        importance: entry.importance ?? 0.5,
-      };
+    const db = getDb();
+    const now = new Date().toISOString();
+    const normalized: MemoryEntry = {
+      ...entry,
+      id: entry.id ?? randomUUID(),
+      createdAt: entry.createdAt ?? now,
+      updatedAt: now,
+      scope: entry.scope ?? 'user',
+      confidence: entry.confidence ?? 1,
+      importance: entry.importance ?? 0.5,
+    };
 
-      const idx = items.findIndex((m) => m.id === normalized.id);
-      const legacy = toLegacyItem(normalized);
-      if (idx >= 0) {
-        items[idx] = legacy;
-      } else {
-        items.push(legacy);
-      }
-      await atomicWrite(this.filePath, items);
-      return normalized;
-    });
+    const existing = db.select().from(memories).where(eq(memories.id, normalized.id)).get();
+    const row = toDbRow(normalized);
+    if (existing) {
+      db.update(memories).set(row).where(eq(memories.id, normalized.id)).run();
+    } else {
+      db.insert(memories).values(row).run();
+    }
+    return normalized;
   }
 
   async get(id: string): Promise<MemoryEntry | undefined> {
-    const items = await atomicRead<LegacyMemoryItem[]>(this.filePath, []);
-    const item = items.find((m) => m.id === id);
-    return item ? toCoreEntry(item) : undefined;
+    const db = getDb();
+    const row = db.select().from(memories).where(eq(memories.id, id)).get();
+    return row ? toCoreEntry(row) : undefined;
   }
 
   async query(q: MemoryQuery): Promise<MemoryEntry[]> {
-    const items = await atomicRead<LegacyMemoryItem[]>(this.filePath, []);
+    const db = getDb();
     const limit = q.limit ?? 50;
     const offset = q.offset ?? 0;
 
-    const matches = items
-      .map(toCoreEntry)
-      .filter((entry) => {
-        if (q.scope !== undefined && entry.scope !== q.scope) return false;
-        if (q.type !== undefined && entry.type !== q.type) return false;
-        if (q.contentContains !== undefined) {
-          if (!entry.content.toLowerCase().includes(q.contentContains.toLowerCase())) return false;
-        }
-        if (q.importanceMin !== undefined && (entry.importance ?? 0.5) < q.importanceMin) return false;
-        return true;
-      })
-      .sort((a, b) => {
-        const at = a.createdAt ? new Date(a.createdAt).getTime() : 0;
-        const bt = b.createdAt ? new Date(b.createdAt).getTime() : 0;
-        return bt - at;
-      });
+    // Build conditions array first
+    const conditions: any[] = [];
+    if (q.scope !== undefined) {
+      conditions.push(eq(memories.scope, q.scope));
+    }
+    if (q.type !== undefined) {
+      conditions.push(eq(memories.type, q.type as DbMemoryType));
+    }
+    if (q.contentContains !== undefined) {
+      const pattern = `%${q.contentContains}%`;
+      conditions.push(or(like(memories.content, pattern), like(memories.key, pattern)));
+    }
 
-    return matches.slice(offset, offset + limit);
+    // Use a single query with conditional where
+    const rows = db.select()
+      .from(memories)
+      .where(conditions.length > 0 ? or(...conditions) : undefined)
+      .orderBy(desc(memories.createdAt))
+      .limit(limit)
+      .offset(offset)
+      .all();
+
+    let matches = rows.map(toCoreEntry);
+
+    if (q.importanceMin !== undefined) {
+      matches = matches.filter((entry) => (entry.importance ?? 0.5) >= q.importanceMin!);
+    }
+
+    return matches;
   }
 
   async delete(id: string): Promise<boolean> {
-    return withFileLock(this.filePath, async () => {
-      const items = await atomicRead<LegacyMemoryItem[]>(this.filePath, []);
-      const filtered = items.filter((m) => m.id !== id);
-      if (filtered.length === items.length) return false;
-      await atomicWrite(this.filePath, filtered);
-      return true;
-    });
+    const db = getDb();
+    const existing = db.select().from(memories).where(eq(memories.id, id)).get();
+    if (!existing) return false;
+    db.delete(memories).where(eq(memories.id, id)).run();
+    return true;
   }
 }
 
-/** Convenience: adapt the legacy DAL functions behind the core MemoryRuntime interface */
-export function buildFileMemoryStore(): MemoryStore {
-  return new JsonFileMemoryStore();
+/** Convenience: build the SQLite-backed MemoryStore */
+export function buildSqliteMemoryStore(): MemoryStore {
+  return new SqliteMemoryStore();
 }
+
+/** @deprecated Legacy JSON file store — kept for migration/import/export/backup only */
+export { JsonFileMemoryStore, buildFileMemoryStore } from './memory-runtime-bridge.legacy.js';

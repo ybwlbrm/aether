@@ -36,19 +36,39 @@ export interface ToolExecutorOptions {
    * 新部署只注入 policyEngine，不注入 policy。
    */
   policyEngine?: PolicyEngine;
+  /**
+   * P0-06/P1-38: 强制 PolicyEngine 裁决模式。
+   * - true: decision.allowed 为唯一裁决；无显式 allow/deny 规则时按 defaultDeny 语义拒绝（默认拒绝）。
+   * - false (默认): 兼容模式，仅显式 deny 拦截，无规则时放行（避免"空 engine 拒绝一切"）。
+   * 系统收敛入口应调用 enableMandatoryPolicyEngine() 开启。
+   */
+  enforcePolicyEngine?: boolean;
   /** Default timeout in milliseconds */
   defaultTimeoutMs?: number;
+  /**
+   * P0-11: 可选的审批请求回调，注入后使用 approvals-center 真实 ID (apr-xxxx)。
+   * 回调接收工具名、参数摘要、上下文，返回 { id, promise }。
+   * 未注入时保持旧行为（生成 `${toolName}:${Date.now()}`，兼容现有测试）。
+   */
+  requestApproval?: (params: {
+    toolName: string;
+    argsSummary: string;
+    context: ToolContext;
+  }) => { id: string; promise: Promise<{ approved: boolean; decision: 'approved' | 'rejected' | 'timeout' }> };
 }
 
 /**
  * ToolExecutor — Orchestrates tool execution with policy, validation, timeout, and error handling.
  * 权限链路（PERM-001）：Capability → PolicyEngine → Approval → ToolRuntime → Executor
+ * 权限优先级（P0-06/P1-38）：Explicit Deny > Capability Deny > Approval > Explicit Allow > Default Deny
  */
 export class ToolExecutor {
   #registry: ToolRegistry;
   #policy: ToolPolicy;
   #policyEngine?: PolicyEngine;
+  #enforcePolicyEngine: boolean;
   #timeoutManager: ToolTimeoutManager;
+  #requestApproval?: ToolExecutorOptions['requestApproval'];
 
   /**
    * Creates a new ToolExecutor.
@@ -60,15 +80,23 @@ export class ToolExecutor {
     this.#registry = registry;
     this.#policy = options.policy ?? new ToolPolicyImpl();
     this.#policyEngine = options.policyEngine;
+    this.#enforcePolicyEngine = options.enforcePolicyEngine ?? false;
     this.#timeoutManager = new ToolTimeoutManager(options.defaultTimeoutMs);
+    this.#requestApproval = options.requestApproval;
   }
 
   /**
    * PERM-001: capability 化 PolicyEngine 裁决（capability 名为 `tool.<name>`，
    * 与 PolicyEngine 点分段通配约定一致 —— `tool.*` 可通配所有工具）。
-   * 迁移语义（default-safe）：仅当**显式 deny 规则**命中时拒绝；
-   * 未命中规则（default effect，无论 capabilities 是否授予）一律放行，
-   * 由 legacy ToolPolicy 继续接管 —— 避免"注入空 engine 即拒绝全部工具"的部署陷阱。
+   * 
+   * 权限优先级：Explicit Deny > Capability Deny > Approval > Explicit Allow > Default Deny
+   * 
+   * 两种模式：
+   * - 兼容模式 (enforcePolicyEngine=false, 默认)：仅显式 deny 规则拦截；无规则或仅有 allow 时放行。
+   *   避免"注入空 engine 即拒绝全部工具"的部署陷阱，零行为变化。
+   * - 强制模式 (enforcePolicyEngine=true)：decision.allowed 为唯一裁决。
+   *   无显式规则命中时按 default 效果（默认拒绝，即 defaultDeny 语义）。
+   *   系统收敛入口应显式开启。
    * 未注入 policyEngine 时完全跳过（旧行为零变化）。
    */
   #evaluatePolicyEngine(toolName: string, context: ToolContext): boolean {
@@ -79,7 +107,12 @@ export class ToolExecutor {
       runId: context.runId,
       extra: { tool: toolName },
     });
-    return decision.effect !== 'deny';
+    // 兼容模式：仅显式 deny 拦截
+    if (!this.#enforcePolicyEngine) {
+      return decision.effect !== 'deny';
+    }
+    // 强制模式：decision.allowed 为唯一裁决
+    return decision.allowed;
   }
 
   /**
@@ -122,6 +155,21 @@ export class ToolExecutor {
 
     if (policyResult.action === 'require-approval') {
       const durationMs = Date.now() - startTime;
+      // P0-11: 优先使用注入的 requestApproval 回调（返回真实 apr-xxxx ID）
+      if (this.#requestApproval) {
+        const argsSummary = this.#policy.getRules().find(r => r.pattern === toolName || this.#matchesPatternForApproval(toolName, r.pattern))
+          ? JSON.stringify(input).slice(0, 120)
+          : JSON.stringify(input).slice(0, 120);
+        const { id, promise } = this.#requestApproval({
+          toolName,
+          argsSummary,
+          context,
+        });
+        // 返回 pendingApprovalResult，但 approvalId 使用真实 ID
+        // 注意：promise 由调用方（approvals-center）管理，这里只需返回 ID
+        return pendingApprovalResult(toolName, id, durationMs);
+      }
+      // 兼容模式：未注入回调时使用旧行为
       const approvalId = `${toolName}:${Date.now()}`;
       return pendingApprovalResult(toolName, approvalId, durationMs);
     }
@@ -209,6 +257,20 @@ export class ToolExecutor {
   }
 
   /**
+   * Pattern matching helper for approval args summary (reuses ToolPolicy logic).
+   */
+  #matchesPatternForApproval(toolName: string, pattern: string): boolean {
+    if (pattern === toolName) return true;
+    if (pattern.includes('*')) {
+      const regexPattern = pattern
+        .replace(/[.+?^${}()|[\]\\]/g, '\\$&')
+        .replace(/\*/g, '.*');
+      return new RegExp(`^${regexPattern}$`).test(toolName);
+    }
+    return false;
+  }
+
+  /**
    * Gets the underlying tool registry.
    */
   get registry(): ToolRegistry {
@@ -227,5 +289,25 @@ export class ToolExecutor {
    */
   get timeoutManager(): ToolTimeoutManager {
     return this.#timeoutManager;
+  }
+
+  /**
+   * P0-06/P1-38: 是否启用强制 PolicyEngine 裁决模式。
+   * true 时 decision.allowed 为唯一裁决（默认拒绝语义）。
+   */
+  get enforcePolicyEngine(): boolean {
+    return this.#enforcePolicyEngine;
+  }
+
+  /**
+   * P0-06/P1-38: 启用强制 PolicyEngine 裁决模式的静态辅助。
+   * 供系统收敛入口调用，返回新的 ToolExecutor 实例（不可变模式）。
+   * 也可直接在构造时传入 enforcePolicyEngine: true。
+   */
+  static enableMandatoryPolicyEngine(
+    registry: ToolRegistry,
+    options: Omit<ToolExecutorOptions, 'enforcePolicyEngine'>
+  ): ToolExecutor {
+    return new ToolExecutor(registry, { ...options, enforcePolicyEngine: true });
   }
 }

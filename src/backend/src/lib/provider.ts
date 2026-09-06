@@ -20,6 +20,8 @@ export interface ResolvedProvider {
   defaultModel: string;
   models: string[];
   capabilities: string[];
+  /** Wave0-PV: DB isDefault 映射（此前未映射，导致 (p as any).isDefault 永远 undefined） */
+  isDefault: boolean;
 }
 
 /**
@@ -58,38 +60,39 @@ function readDefaultProvidersSync(): Record<string, string> {
  * 按 capability 查询 provider
  * P0-1 修复：encryptionKey 由调用方传入（来自 config.encryptionKey）。
  */
+/**
+ * Wave0-PV: 从已解析 provider 列表中选择匹配 capability 的 provider（纯函数，可单测）。
+ * 规则（P1-19/20/21 修复）：
+ * 1. 先按 capability 过滤 —— 能力不符的 provider 绝不被当作该能力返回
+ * 2. 无匹配能力 → null（拒绝悄悄 fallback 到任意 provider）
+ * 3. settings defaultProviders[capability] 仅在过滤结果内生效
+ * 4. isDefault 标记优先（DB 主源，P1-19 修复后真实生效）
+ */
+export function selectProviderByCapability(
+  all: ResolvedProvider[],
+  capability: 'image' | 'video' | 'text' | 'audio',
+  defaultIds: Record<string, string>,
+): ResolvedProvider | null {
+  if (all.length === 0) return null;
+  const filtered = all.filter(p => Array.isArray(p.capabilities) && p.capabilities.includes(capability));
+  if (filtered.length === 0) return null;
+  const defaultId = defaultIds[capability];
+  if (defaultId) {
+    const found = filtered.find(p => p.id === defaultId);
+    if (found) return found;
+  }
+  const defaultProvider = filtered.find(p => p.isDefault);
+  if (defaultProvider) return defaultProvider;
+  return filtered[0];
+}
+
 export function getProviderByCapability(
   capability: 'image' | 'video' | 'text' | 'audio',
   encryptionKey: string,
 ): ResolvedProvider | null {
   const db = getDb();
   const all = db.select().from(providers).all().map(r => rowToProvider(r, encryptionKey));
-
-  if (all.length === 0) return null;
-
-  // 尝试从 settings.json 的 defaultProviders 读取（同步读取，避免 Promise 未 await）
-  const defaultIds = readDefaultProvidersSync();
-  const defaultId = defaultIds[capability];
-  if (defaultId) {
-    const found = all.find(p => p.id === defaultId);
-    if (found) return found;
-  }
-
-  // 按能力类型过滤
-  const filtered = all.filter(p =>
-    Array.isArray(p.capabilities) && p.capabilities.includes(capability)
-  );
-
-  if (filtered.length === 0) {
-    // 没有匹配的，返回第一个可用的（有 apiKey 的）
-    return all.find(p => p.apiKey && p.apiKey !== '***encrypted***') || all[0];
-  }
-
-  // 优先 isDefault
-  const defaultProvider = filtered.find(p => (p as any).isDefault);
-  if (defaultProvider) return defaultProvider;
-
-  return filtered[0];
+  return selectProviderByCapability(all, capability, readDefaultProvidersSync());
 }
 
 /**
@@ -127,6 +130,8 @@ function rowToProvider(row: ProviderRow, encryptionKey: string): ResolvedProvide
     defaultModel: models[0] || 'gpt-4o',
     models,
     capabilities,
+    // Wave0-PV: 映射 isDefault（DB 存 0/1 或 boolean）
+    isDefault: row.isDefault === 1 || row.isDefault === true,
   };
 }
 

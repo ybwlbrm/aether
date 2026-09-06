@@ -40,12 +40,29 @@ export function resolvePhysicalPath(targetPath: string): string {
   }
 }
 
-/** 敏感路径段（路径按分隔符拆分后逐段匹配） */
-const FORBIDDEN_PATH_PATTERNS = [
+/** 敏感路径段（路径按分隔符拆分后逐段匹配；Wave0-PG: Unix 系统目录用段名，不再用带斜杠全串） */
+const FORBIDDEN_PATH_SEGMENTS = [
   'windows', 'program files', 'program files (x86)', 'system32',
-  '/etc', '/root', '/boot', '/sbin', '/bin', '/usr/bin',
+  'etc', 'root', 'boot', 'sbin',
   '.git',
 ];
+
+/**
+ * Wave0-PG: 系统敏感路径检测。
+ * - 段名整段匹配（etc / root / boot / sbin / windows / system32 / .git 等）
+ * - /usr/bin 用「usr+bin」相邻段对检测（避免 bin 段误伤合法项目 build/bin 目录）
+ * - Unix 顶层 /bin 仅在第一个段为 bin 时拦截（win32 C:\bin 不属于系统目录）
+ */
+function hasSystemSensitiveSegments(segments: string[]): boolean {
+  for (const fp of FORBIDDEN_PATH_SEGMENTS) {
+    if (segments.includes(fp)) return true;
+  }
+  if (segments[0] === 'bin') return true; // Unix 顶层 /bin
+  for (let i = 0; i < segments.length - 1; i++) {
+    if (segments[i] === 'usr' && segments[i + 1] === 'bin') return true; // /usr/bin
+  }
+  return false;
+}
 
 const HOME_DIR = homedir().toLowerCase();
 
@@ -57,10 +74,8 @@ export interface PathCheckResult {
 /** 敏感路径段检测（Level 3 也执行，防止超级权限访问 system32/.git/.config 等） */
 function checkForbiddenSegments(resolved: string, lower: string): string | null {
   const segments = lower.split(sep).filter(Boolean);
-  for (const fp of FORBIDDEN_PATH_PATTERNS) {
-    if (segments.includes(fp)) {
-      return `禁止访问敏感路径: ${fp}`;
-    }
+  if (hasSystemSensitiveSegments(segments)) {
+    return '禁止访问敏感路径（windows/system32/etc/root/boot/sbin/usr-bin/.git 等）';
   }
   if (lower.startsWith(HOME_DIR + sep + '.config') || lower.startsWith(HOME_DIR + sep + 'appdata')) {
     return '禁止访问用户配置目录';
@@ -118,13 +133,13 @@ export function isPathSafe(targetPath: string, allowedDirs?: string[], permissio
   return checkPathSafe(targetPath, allowedDirs, permissionLevel).ok;
 }
 
-/** 仅 allowedDirs 包含性（data 模块的 isPathInAllowedDirs 语义） */
+/** 仅 allowedDirs 包含性（data 模块的 isPathInAllowedDirs 语义）—— Wave0-PG: 统一走 physical path */
 export function isPathInAllowedDirs(filePath: string, allowedDirs: string[]): boolean {
   if (!filePath) return false;
   if (!allowedDirs || allowedDirs.length === 0) return false;
-  const resolved = resolve(filePath);
+  const resolved = resolvePhysicalPath(filePath);
   return allowedDirs.some(d => {
-    const allowed = resolve(d);
+    const allowed = resolvePhysicalPath(resolve(d));
     const prefix = allowed.endsWith(sep) ? allowed : allowed + sep;
     return resolved === allowed || resolved.startsWith(prefix);
   });

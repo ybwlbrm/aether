@@ -1,5 +1,5 @@
-// 可重试的状态码
-const RETRYABLE_STATUSES = [404, 429, 500, 502, 503, 504];
+// 可重试的状态码（Wave0-FR: 404 从可重试集合移除——它是"资源不存在"，重试无意义）
+const RETRYABLE_STATUSES = [429, 500, 502, 503, 504];
 
 // 非重试但需显式抛出的状态码（认证/授权/未找到/语义错误）
 const NON_RETRYABLE_THROW_STATUSES = [401, 403, 404, 422];
@@ -10,6 +10,44 @@ const CIRCUIT_BREAKER_THRESHOLD = 3; // 连续 3 次 429/5xx 触发熔断
 const CIRCUIT_BREAKER_WINDOW_MS = 60000; // 60 秒窗口内
 
 /**
+ * Wave0-FR: 解析 Retry-After 头。
+ * 支持 delta-seconds（"30"）与 HTTP-date（"Wed, 21 Oct 2026 07:28:00 GMT"）。
+ * 非法/超长值安全兜底：返回 null（走默认延迟）或夹紧到 120s 上限。
+ */
+export function parseRetryAfter(value: string | null): number | null {
+  if (!value) return null;
+  const trimmed = value.trim();
+  if (/^\d+$/.test(trimmed)) {
+    return Math.min(parseInt(trimmed, 10), 120) * 1000; // 上限 120s
+  }
+  const dateMs = Date.parse(trimmed);
+  if (!Number.isNaN(dateMs) && dateMs > 0) {
+    const delay = dateMs - Date.now();
+    return Math.min(Math.max(delay, 0), 120_000);
+  }
+  return null;
+}
+
+/**
+ * Wave0-FR: 可中断 sleep —— 支持 AbortSignal，取消后立即 reject（AbortError），
+ * 避免 Run 被取消后仍要等完整个 retry delay。
+ */
+export async function sleep(ms: number, signal?: AbortSignal | null): Promise<void> {
+  if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
+  await new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(new DOMException('Aborted', 'AbortError'));
+    };
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
+}
+
+/**
  * 带重试的 fetch — 每次重试创建新的 AbortSignal，避免复用已过期的 signal
  * 支持：抖动、Retry-After 头、熔断器（连续 3 次 429/5xx 快速失败）
  */
@@ -17,7 +55,7 @@ const RETRY_DELAYS = [3000, 5000, 10000, 30000, 45000]; // 429 专用：3s, 5s, 
 
 export async function fetchWithRetry(
   url: string,
-  options: any,
+  options: RequestInit,
   sseSend?: (event: string, data: string) => void,
   maxRetries = 5,
 ): Promise<Response> {
@@ -76,11 +114,13 @@ export async function fetchWithRetry(
 
       if (isNonRetryableThrow) {
         // BE-04b: 非重试但需显式抛出的状态码（401/403/404/422）— 抛出带 provider/status 详情的错误
+        // Wave0-FR: 标记 nonRetryable=true，catch 块据此直接放行（否则会被误当作网络错误进入指数退避重试）
         const errText = await response.text().catch(() => '');
         const err = new Error(`AI API 请求失败 (${status}): ${errText.slice(0, 200)}`);
         (err as any).status = status;
         (err as any).providerEndpoint = providerEndpoint;
         (err as any).responseBody = errText;
+        (err as any).nonRetryable = true;
         throw err;
       }
 
@@ -94,11 +134,11 @@ export async function fetchWithRetry(
           return response;
         }
 
-        // 计算延迟：优先使用 Retry-After 头，其次预设延迟，最后指数退避
+        // 计算延迟：优先使用 Retry-After 头（支持 seconds/HTTP-date），其次预设延迟，最后指数退避
         let delay: number;
         if (status === 429) {
           const retryAfter = response.headers.get('Retry-After');
-          delay = retryAfter ? parseInt(retryAfter) * 1000 : (RETRY_DELAYS[attempt] || 45000);
+          delay = parseRetryAfter(retryAfter) ?? (RETRY_DELAYS[attempt] || 45000);
         } else {
           delay = Math.min(1000 * Math.pow(2, attempt), 30000);
         }
@@ -108,21 +148,21 @@ export async function fetchWithRetry(
         delay = Math.max(0, Math.round(delay + jitter));
 
         if (sseSend) sseSend('retry', JSON.stringify({ attempt: attempt + 1, maxRetries, status, delay: Math.round(delay) }));
-        await new Promise(r => setTimeout(r, delay));
+        await sleep(delay, options.signal);
         continue;
       }
 
       // 其他非 ok 状态码：返回响应让调用方处理
       return response;
     } catch (e: unknown) {
-      if (e instanceof Error && e.name === 'AbortError') throw e;
+      if (e instanceof Error && (e.name === 'AbortError' || (e as { nonRetryable?: boolean }).nonRetryable)) throw e;
       lastError = e instanceof Error ? e : new Error(String(e));
       if (attempt >= maxRetries) throw e;
 
       // 网络错误等异常：指数退避 + 抖动
       const delay = Math.min(1000 * Math.pow(2, attempt), 30000) + Math.random() * 1000;
       if (sseSend) sseSend('retry', JSON.stringify({ attempt: attempt + 1, maxRetries, status: 0, delay: Math.round(delay), error: (e instanceof Error ? e.message : String(e)) }));
-      await new Promise(r => setTimeout(r, delay));
+      await sleep(delay, options.signal);
     }
   }
   throw lastError || new Error('Max retries exceeded');

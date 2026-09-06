@@ -1,9 +1,6 @@
 import { compactRemovedHistory, buildCompactionSystemMessage } from '../../lib/compaction.js';
 import { buildChatRequestBody } from '../../lib/stream-translate.js';
-import { fetchWithRetry } from '../../lib/fetch-retry.js';
-import { parseSse, withChunkTimeout } from '../../lib/sse-parser.js';
-import { translate } from '../../lib/stream-translate.js';
-import { SSE_CHUNK_TIMEOUT_MS } from '../../lib/sse-utils.js';
+import { buildModelRuntime, type ModelRequest } from '../../core/models/index.js';
 
 export interface CompactionConfig {
   baseUrl: string;
@@ -68,47 +65,53 @@ export async function executeForceSummary(
   runContext: any
 ): Promise<string | null> {
   try {
-    const summaryReq = buildChatRequestBody({
+    const providerConfig = {
+      id: 'compaction',
+      name: 'compaction',
+      type: 'openai',
+      apiKey,
+      baseUrl,
+      defaultModel: activeModel,
+      models: [activeModel],
+      capabilities: ['text', 'tool_calling'],
+    };
+    const runtime = buildModelRuntime(providerConfig);
+
+    const request: ModelRequest = {
+      provider: providerConfig.id,
       model: activeModel,
       messages: [
         ...apiMessages,
         { role: 'user', content: '请基于上面所有工具执行的结果，给出完整的总结与最终答复。如果任务还没完成，请继续说明还需要做什么。' }
       ],
-      tools: activeTools,
-      tool_choice: 'none',
-      deepThinking,
-      reasoningEffort,
-      supportsThinking,
-    });
-
-    const summaryRes = await fetchWithRetry(`${baseUrl}/chat/completions`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
-      body: JSON.stringify(summaryReq),
+      tools: activeTools.map(t => ({
+        type: 'function' as const,
+        function: {
+          name: t.function.name,
+          description: t.function.description,
+          parameters: t.function.parameters,
+        },
+      })),
+      maxTokens: 4096,
       signal: clientAbortSignal,
-    }, sseSend);
+    };
 
-    if (!summaryRes.ok) return null;
-
-    const sReader = summaryRes.body!.getReader();
     let summaryText = '';
-    try {
-      for await (const c of translate(parseSse(withChunkTimeout(sReader, SSE_CHUNK_TIMEOUT_MS, clientAbortSignal)))) {
-        if (c.type === 'text-delta') summaryText += c.text;
+    for await (const c of runtime.stream(request)) {
+      if (c.type === 'text-delta') {
+        summaryText += c.text;
+        // 流式推送给前端
+        sseSend('message', JSON.stringify({ content: c.text }));
+        eventBus.emit(runContext.sessionId, 'agent.message.delta', {
+          taskId: runContext.taskId,
+          agentId: runContext.agentId,
+          agentType: runContext.agentType,
+          content: c.text,
+        });
       }
-    } catch {
-      // 流式解析失败则用已累积文本
     }
 
     if (summaryText.trim()) {
-      // 流式推送给前端
-      sseSend('message', JSON.stringify({ content: summaryText.trim() }));
-      eventBus.emit(runContext.sessionId, 'agent.message.delta', {
-        taskId: runContext.taskId,
-        agentId: runContext.agentId,
-        agentType: runContext.agentType,
-        content: summaryText.trim(),
-      });
       return summaryText.trim();
     }
   } catch {

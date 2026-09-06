@@ -9,6 +9,9 @@
  * - If no rule matches and the context carries the capability → allowed.
  * - If an explicit `allow` rule matches (and no deny matched) → allowed.
  * - Otherwise → denied (default deny for ungranted capabilities).
+ * 
+ * 权限优先级（P0-06/P1-38，与 ToolPolicy/PolicyEngine 注释对齐）：
+ * Explicit Deny > Capability Deny > Approval > Explicit Allow > Default Deny
  */
 
 import type { Capability, CapabilitySet } from './capability.js';

@@ -20,14 +20,30 @@ describe('compaction — 上下文压缩', () => {
   });
 
   it('provider 返回摘要文本', async () => {
-    // 本地 mock provider：收到压缩请求，返回固定摘要
+    // 本地 mock provider：收到压缩请求，返回固定摘要（SSE 格式）
     const server = createServer((req, res) => {
-      let body = '';
-      req.on('data', (c) => (body += c));
-      req.on('end', () => {
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ choices: [{ message: { content: '压缩后的历史摘要。' } }] }));
-      });
+      if (req.method === 'POST' && req.url === '/chat/completions') {
+        let body = '';
+        req.on('data', (c) => (body += c));
+        req.on('end', () => {
+          res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', 'Connection': 'keep-alive' });
+          // SSE 格式：发送 content delta，然后 finish_reason=stop，最后 [DONE]
+          const chunk = JSON.stringify({
+            id: 'test-chunk',
+            object: 'chat.completion.chunk',
+            created: Date.now(),
+            model: 'm',
+            choices: [{ index: 0, delta: { content: '压缩后的历史摘要。' }, finish_reason: 'stop' }],
+            usage: { prompt_tokens: 10, completion_tokens: 20, total_tokens: 30 }
+          });
+          res.write(`data: ${chunk}\n\n`);
+          res.write('data: [DONE]\n\n');
+          res.end();
+        });
+      } else {
+        res.writeHead(404);
+        res.end();
+      }
     });
     await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
     const port = (server.address() as { port: number }).port;

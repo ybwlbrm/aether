@@ -8,6 +8,9 @@
  * - 超时（默认 60s）自动拒绝，防止前端失联导致执行永久挂起。
  *
  * 本模块为无状态库：approval 表由调用方（executeTool 路径）持有。
+ * 
+ * 权限优先级（P0-06/P1-38，与 PolicyEngine/ToolPolicy 注释对齐）：
+ * Explicit Deny > Capability Deny > Approval > Explicit Allow > Default Deny
  */
 
 export type ApprovalDecision = 'approved' | 'rejected' | 'timeout';

@@ -10,8 +10,8 @@ describe('backend health (E1-001: Aether identity)', () => {
     assert.ok(/aether/i.test(p.name), 'name 应含 aether');
   });
 
-  it('version 与根版本一致（2.1.0）', () => {
-    assert.equal(AETHER_VERSION, '2.1.0');
+  it('version 与根版本一致（2.2.0）', () => {
+    assert.equal(AETHER_VERSION, '2.2.0');
     assert.match(buildHealthPayload().version, /^\d+\.\d+\.\d+$/);
   });
 

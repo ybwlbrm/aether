@@ -42,12 +42,17 @@ async function request<T>(path: string, options?: RequestInit & { timeout?: numb
   // 确保所有请求都带 X-Requested-With（CSRF 防护要求）
   headers['X-Requested-With'] = 'XMLHttpRequest';
   // 敏感端点需要 Authorization header（终端执行、安全设置、provider key、导入导出等）
+  // Wave0-AM: 与后端 Auth Matrix 对齐（permissions/approvals/sync 为新增敏感写路径）
   const sensitivePaths = [
     '/terminal/execute',
     '/settings/security',
     '/providers/',
     '/import/all',
     '/export/all',
+    '/permissions/',
+    '/approvals/',
+    '/sync/config',
+    '/sync/upload',
   ];
   const needsAuth = sensitivePaths.some(p =>
     path === p || (p.endsWith('/') && path.startsWith(p))
@@ -191,6 +196,15 @@ export const api = {
   // Data Layer (JSON persistence)
   getSettings: () => request<any>('/settings'),
   saveSettings: (data: any) => request<any>('/settings', { method: 'POST', body: JSON.stringify(data) }),
+  // Wave0-AM: 全量导出/导入走带 Authorization 的 client（DataManage 不再用裸 fetch）
+  exportAll: () => request<any>('/export/all'),
+  importAll: (data: any) => request<any>('/import/all', { method: 'POST', body: JSON.stringify(data) }),
+  // Wave0-AM：approvals list（decideApproval 已在下方 Permissions/审批段定义，避免重名）
+  listApprovals: () => request<{ id: string; toolName: string; argsSummary: string }[]>('/approvals'),
+  // Sync（写路径带 Authorization；getSyncConfig GET 后端豁免 token）
+  getSyncConfig: () => request<any>('/sync/config'),
+  saveSyncConfig: (data: any) => request<any>('/sync/config', { method: 'POST', body: JSON.stringify(data) }),
+  syncUpload: (data: any) => request<any>('/sync/upload', { method: 'POST', body: JSON.stringify(data) }),
   execProject: (data: any) => request<any>('/projects/exec', { method: 'POST', body: JSON.stringify(data) }),
   testProviderConnection: (data: any) => request<any>('/providers/test', { method: 'POST', body: JSON.stringify(data) }),
   updateDocument: (id: string, data: any) => request<any>(`/documents/${id}`, { method: 'PUT', body: JSON.stringify(data) }),

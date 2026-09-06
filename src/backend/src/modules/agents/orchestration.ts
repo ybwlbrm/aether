@@ -21,7 +21,7 @@ import type { StreamChunk } from '@pacc/shared';
 import { SSE_CHUNK_TIMEOUT_MS, startHeartbeat } from '../../lib/sse-utils.js';
 import { createPendingApproval } from '../../lib/approvals-center.js';
 import { drainDirectives } from '../../lib/inbox.js';
-import { MANDATORY_COMPLIANCE_PROMPT, SISYPHUS_SYNTH_SYSTEM_PROMPT } from '../../lib/system-prompts.js';
+import { MANDATORY_COMPLIANCE_PROMPT, SISYPHUS_SYSTEM_PROMPT, SISYPHUS_SYNTH_SYSTEM_PROMPT } from '../../lib/system-prompts.js';
 import { truncateHistoryByTokenBudget } from '../../lib/context-window.js';
 import { AGENTS, routeMessage } from './agent-definitions.js';
 import { setupSse, cleanupSse, sendErrorAndEnd, type SseContext } from './sse-handler.js';
@@ -33,11 +33,10 @@ import { emitV2Event, ensureRunRow, finalizeRunTokens } from '../../lib/event-st
 // Aether 2.0 Model Runtime bridge (FIX-6): wire the legacy providers table
 // into the core ModelRuntime/ModelRegistry so the bridge runs in production
 // instead of being dead code. Legacy fetch path is untouched (Adapter §2.1).
-import { buildAllRuntimes } from '../../lib/model-runtime-bridge.js';
+import { buildAllRuntimes, buildRuntimeForProvider } from '../../lib/model-runtime-bridge.js';
 import { ModelRegistry } from '../../core/models/index.js';
-
-// 活跃的 AI 请求 AbortController 映射表（按 conversationId）
-const activeRequests = new Map<string, AbortController>();
+// P0-01/P0-02: Run-scoped cancellation registry (replaces conversation-scoped activeRequests)
+import { runCancellationRegistry } from '../../lib/run-cancellation-registry.js';
 
 // P1-7 修复：运行时自定义提示词存放在局部 Map，不再突变模块级共享的 AGENTS 数组
 const customPrompts = new Map<string, string>();
@@ -163,9 +162,9 @@ export async function handleOrchestrate(
   const { eventBus, clientAbort, heartbeatInterval } = sseCtx;
   const sseSend = sseCtx.sseSend;
 
-  // 注册到全局映射表，用于取消端点
-  activeRequests.set(body.conversationId || '', clientAbort);
-  reply.raw.on('close', () => { if (body.conversationId) activeRequests.delete(body.conversationId); });
+  // 注册到 RunCancellationRegistry（run-scoped，而非 conversation-scoped）
+  runCancellationRegistry.register(runTaskId, body.conversationId || '', clientAbort);
+  reply.raw.on('close', () => { runCancellationRegistry.unregister(runTaskId); });
 
   try {
     // 解析文件操作权限
@@ -207,22 +206,18 @@ export async function handleOrchestrate(
         .join('\n');
       const analysisPrompt = `你是AI编排器。分析任务该交给哪些Agent。Agent能力:atlas=架构设计,hephaestus=写代码构建,prometheus=规划,momus=审查,oracle=推理,librarian=搜索,explore=探索代码,metis=分析需求,multimodal-looker=图片分析,sisyphus-junior=子任务。任务:${body.prompt}${recentContext ? `\n上下文:\n${recentContext}` : ''}。只输出JSON数组，如["hephaestus","atlas"]。注意：简单问答不需要分配Agent，输出空数组[]即可。`;
 
-      const analysisRes = await fetchWithRetry(`${sisyphusEp.baseUrl}/chat/completions`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${sisyphusEp.apiKey}` },
-        body: JSON.stringify({
-          model: sisyphusEp.model,
+      // P0-01/P0-02: 使用 Model Runtime Bridge 进行非流式完成（分析阶段）
+      const sisyphusRuntime = buildRuntimeForProvider(db, 'sisyphus', config.encryptionKey);
+      if (sisyphusRuntime) {
+        const analysisRes = await sisyphusRuntime.runtime.complete({
+          provider: sisyphusRuntime.config.type,
+          model: sisyphusRuntime.config.defaultModel,
           messages: [{ role: 'user', content: analysisPrompt }],
-          max_tokens: 300,
+          maxTokens: 300,
           temperature: 0,
-          stream: false,
-        }),
-        signal: clientAbort.signal,
-      }, sseSend);
-
-      if (analysisRes.ok) {
-        const analysisData = await analysisRes.json() as any;
-        const text = (analysisData.choices?.[0]?.message?.content || '').trim();
+          signal: clientAbort.signal,
+        });
+        const text = analysisRes.content.trim();
         // 先尝试直接解析 JSON
         try {
           const parsed = JSON.parse(text);
@@ -247,9 +242,47 @@ export async function handleOrchestrate(
           }
         }
       } else {
-        // BE-04a: 显式记录 AI 分析非 ok 响应，避免静默落入关键词兜底
-        const errText = await analysisRes.text().catch(() => '');
-        console.warn('[Agents] AI 分析请求失败，状态码:', analysisRes.status, '响应:', errText.slice(0, 200), '将回退到关键词路由');
+        // 回退到 legacy fetchWithRetry（bridge 未就绪时）
+        const analysisRes = await fetchWithRetry(`${sisyphusEp.baseUrl}/chat/completions`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${sisyphusEp.apiKey}` },
+          body: JSON.stringify({
+            model: sisyphusEp.model,
+            messages: [{ role: 'user', content: analysisPrompt }],
+            max_tokens: 300,
+            temperature: 0,
+            stream: false,
+          }),
+          signal: clientAbort.signal,
+        }, sseSend);
+
+        if (analysisRes.ok) {
+          const analysisData = await analysisRes.json() as any;
+          const text = (analysisData.choices?.[0]?.message?.content || '').trim();
+          try {
+            const parsed = JSON.parse(text);
+            if (Array.isArray(parsed)) {
+              aiParsedOk = true;
+              targetIds = parsed.filter((id: string) => AGENTS.some(a => a.id === id));
+            }
+          } catch {
+            const jsonMatch = text.match(/\[[\s\S]*?\]/);
+            if (jsonMatch) {
+              try {
+                const parsed = JSON.parse(jsonMatch[0]);
+                if (Array.isArray(parsed)) {
+                  aiParsedOk = true;
+                  targetIds = parsed.filter((id: string) => AGENTS.some(a => a.id === id));
+                }
+              } catch (e: unknown) {
+                console.warn('[Agents] AI 路由 JSON 提取失败，原文前 200 字符:', text.slice(0, 200), e instanceof Error ? e.message : String(e));
+              }
+            }
+          }
+        } else {
+          const errText = await analysisRes.text().catch(() => '');
+          console.warn('[Agents] AI 分析请求失败，状态码:', analysisRes.status, '响应:', errText.slice(0, 200), '将回退到关键词路由');
+        }
       }
     } catch (e: unknown) {
       // BE-04a: 显式记录 AI 分析异常，避免静默落入关键词兜底
@@ -468,58 +501,53 @@ ${errorResults.length > 0 ? `\n注意：以下 Agent 执行失败，结果不可
     let finalReply = '';
     let totalAgentTokens = results.reduce((sum: number, r: any) => sum + (r.tokens || 0), 0);
     try {
-      const synthRes = await fetchWithRetry(`${sisyphusEp.baseUrl}/chat/completions`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${sisyphusEp.apiKey}` },
-        body: JSON.stringify(buildChatRequestBody({
-          model: sisyphusEp.model,
-          messages: [
-            { role: 'system', content: MANDATORY_COMPLIANCE_PROMPT + '\n\n' + SISYPHUS_SYNTH_SYSTEM_PROMPT },
-            { role: 'user', content: synthPrompt },
-            // 修复3：汇总阶段也附加用户上传的图片（多模态可见，避免依赖子 Agent 文本转述）
-            ...(hasImages ? body.images!.map(img => ({ role: 'user' as const, content: [{ type: 'image_url', image_url: { url: img } }] })) : []),
-          ],
-          deepThinking: body.deepThinking,
-          reasoningEffort: body.reasoningEffort,
-          supportsThinking: providerSupportsThinking({ baseUrl: sisyphusEp.baseUrl, defaultModel: sisyphusEp.model, models: [sisyphusEp.model] } as never),
-          max_tokens: 2048,
-        })),
-        signal: clientAbort.signal,
-      }, sseSend);
+      // P0-01/P0-02: 使用 Model Runtime Bridge 进行流式完成（汇总阶段）
+      const sisyphusRuntime = buildRuntimeForProvider(db, 'sisyphus', config.encryptionKey);
+      if (sisyphusRuntime) {
+        const messages: Array<Record<string, unknown>> = [
+          { role: 'system', content: MANDATORY_COMPLIANCE_PROMPT + '\n\n' + SISYPHUS_SYNTH_SYSTEM_PROMPT },
+          { role: 'user', content: synthPrompt },
+          // 修复3：汇总阶段也附加用户上传的图片（多模态可见，避免依赖子 Agent 文本转述）
+          ...(hasImages ? body.images!.map(img => ({ role: 'user' as const, content: [{ type: 'image_url', image_url: { url: img } }] })) : []),
+        ];
+        const stream = sisyphusRuntime.runtime.stream({
+          provider: sisyphusRuntime.config.type,
+          model: sisyphusRuntime.config.defaultModel,
+          messages,
+          maxTokens: 2048,
+          signal: clientAbort.signal,
+        });
 
-      let synthReasoning = ''; // 汇总阶段 thinking 截获（用于 completion 事件回传）
-      if (synthRes.ok && synthRes.body) {
-        const reader = synthRes.body.getReader();
-        // 最终输出专属事件：agent.output.delta（过程与最终回答分离的关键——前端只在 process 面板展示过程）
+        let synthReasoning = ''; // 汇总阶段 thinking 截获（用于 completion 事件回传）
         try {
-          for await (const c of translate(parseSse(withChunkTimeout(reader, SSE_CHUNK_TIMEOUT_MS, clientAbort.signal)))) {
-            switch (c.type) {
+          for await (const chunk of stream) {
+            switch (chunk.type) {
               case 'reasoning-delta': {
-                synthReasoning += c.text;
-                sseSend('reasoning', JSON.stringify({ content: c.text }));
+                synthReasoning += chunk.text;
+                sseSend('reasoning', JSON.stringify({ content: chunk.text }));
                 if (body.conversationId) {
                   eventBus.emit(convId, 'agent.reasoning.delta', {
-                    taskId: runTaskId, agentId: 'sisyphus', agentType: 'orchestrator', content: c.text,
+                    taskId: runTaskId, agentId: 'sisyphus', agentType: 'orchestrator', content: chunk.text,
                   });
                 }
                 break;
               }
               case 'text-delta': {
-                finalReply += c.text;
-                sseSend('message', JSON.stringify({ content: c.text }));
+                finalReply += chunk.text;
+                sseSend('message', JSON.stringify({ content: chunk.text }));
                 if (body.conversationId) {
                   eventBus.emit(convId, 'agent.output.delta', {
-                    taskId: runTaskId, agentId: 'sisyphus', agentType: 'orchestrator', content: c.text,
+                    taskId: runTaskId, agentId: 'sisyphus', agentType: 'orchestrator', content: chunk.text,
                   });
                 }
                 break;
               }
               case 'usage': {
-                totalAgentTokens += c.usage.totalTokens ?? (c.usage.inputTokens + c.usage.outputTokens);
+                totalAgentTokens += chunk.usage?.totalTokens ?? (chunk.usage?.inputTokens ?? 0) + (chunk.usage?.outputTokens ?? 0);
                 break;
               }
               case 'finish': {
-                if (c.reason.kind === 'error') throw new Error(c.reason.message || '汇总生成失败');
+                if (chunk.reason.kind === 'error') throw new Error(chunk.reason.message || '汇总生成失败');
                 break;
               }
               default: break;
@@ -537,6 +565,79 @@ ${errorResults.length > 0 ? `\n注意：以下 Agent 执行失败，结果不可
             sseSend('error', JSON.stringify({ message: `AI 响应流中断: ${e.message}` }));
           }
           throw e;
+        }
+      } else {
+        // 回退到 legacy fetchWithRetry（bridge 未就绪时）
+        const synthRes = await fetchWithRetry(`${sisyphusEp.baseUrl}/chat/completions`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${sisyphusEp.apiKey}` },
+          body: JSON.stringify(buildChatRequestBody({
+            model: sisyphusEp.model,
+            messages: [
+              { role: 'system', content: MANDATORY_COMPLIANCE_PROMPT + '\n\n' + SISYPHUS_SYNTH_SYSTEM_PROMPT },
+              { role: 'user', content: synthPrompt },
+              // 修复3：汇总阶段也附加用户上传的图片（多模态可见，避免依赖子 Agent 文本转述）
+              ...(hasImages ? body.images!.map(img => ({ role: 'user' as const, content: [{ type: 'image_url', image_url: { url: img } }] })) : []),
+            ],
+            deepThinking: body.deepThinking,
+            reasoningEffort: body.reasoningEffort,
+            supportsThinking: providerSupportsThinking({ baseUrl: sisyphusEp.baseUrl, defaultModel: sisyphusEp.model, models: [sisyphusEp.model] } as never),
+            max_tokens: 2048,
+          })),
+          signal: clientAbort.signal,
+        }, sseSend);
+
+        let synthReasoning = ''; // 汇总阶段 thinking 截获（用于 completion 事件回传）
+        if (synthRes.ok && synthRes.body) {
+          const reader = synthRes.body.getReader();
+          // 最终输出专属事件：agent.output.delta（过程与最终回答分离的关键——前端只在 process 面板展示过程）
+          try {
+            for await (const c of translate(parseSse(withChunkTimeout(reader, SSE_CHUNK_TIMEOUT_MS, clientAbort.signal)))) {
+              switch (c.type) {
+                case 'reasoning-delta': {
+                  synthReasoning += c.text;
+                  sseSend('reasoning', JSON.stringify({ content: c.text }));
+                  if (body.conversationId) {
+                    eventBus.emit(convId, 'agent.reasoning.delta', {
+                      taskId: runTaskId, agentId: 'sisyphus', agentType: 'orchestrator', content: c.text,
+                    });
+                  }
+                  break;
+                }
+                case 'text-delta': {
+                  finalReply += c.text;
+                  sseSend('message', JSON.stringify({ content: c.text }));
+                  if (body.conversationId) {
+                    eventBus.emit(convId, 'agent.output.delta', {
+                      taskId: runTaskId, agentId: 'sisyphus', agentType: 'orchestrator', content: c.text,
+                    });
+                  }
+                  break;
+                }
+                case 'usage': {
+                  totalAgentTokens += c.usage.totalTokens ?? (c.usage.inputTokens + c.usage.outputTokens);
+                  break;
+                }
+                case 'finish': {
+                  if (c.reason.kind === 'error') throw new Error(c.reason.message || '汇总生成失败');
+                  break;
+                }
+                default: break;
+              }
+            }
+            // 最终回答完成事件（含完整文本；username 前端据此投影最终气泡）
+            if (body.conversationId) {
+              eventBus.emit(convId, 'agent.output.completed', {
+                taskId: runTaskId, agentId: 'sisyphus', agentType: 'orchestrator',
+                status: 'completed', content: finalReply,
+              });
+            }
+          } catch (e: unknown) {
+            if (e instanceof SseStreamError) {
+              sseSend('error', JSON.stringify({ message: `AI 响应流中断: ${e.message}` }));
+            }
+            throw e;
+          }
         }
       }
     } catch { /* 汇总失败则用第一个结果 */
@@ -649,6 +750,6 @@ ${errorResults.length > 0 ? `\n注意：以下 Agent 执行失败，结果不可
   } finally {
     // 清理
     cleanupSse(sseCtx, body.conversationId);
-    if (body.conversationId) activeRequests.delete(body.conversationId);
+    runCancellationRegistry.unregister(runTaskId);
   }
 }

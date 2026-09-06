@@ -2,7 +2,7 @@
 
 > **本地优先的 AI 工作操作系统**：对话、智能体编排、工具箱、知识、文档、记忆一站式，AI 能力全都在你自己的电脑上运行。
 
-![Version](https://img.shields.io/badge/版本-2.1.0-brightgreen) ![Tests](https://img.shields.io/badge/测试-961%2B-blue) ![License](https://img.shields.io/badge/License-MIT-orange) ![Platform](https://img.shields.io/badge/Windows%20%2F%20WEB%20%2F%20Android-✓-lightgrey)
+![Version](https://img.shields.io/badge/版本-2.2.0-brightgreen) ![Tests](https://img.shields.io/badge/测试-978%2B-blue) ![License](https://img.shields.io/badge/License-MIT-orange) ![Platform](https://img.shields.io/badge/Windows%20%2F%20WEB%20%2F%20Android-✓-lightgrey)
 
 ---
 
@@ -61,7 +61,7 @@ Aether 是一个把 **AI 对话、多 Agent 协作、自动化工具箱、知识
 | 🔄 **断线续传** | SSE 实时流 + `afterSeq` 增量回放 + `Last-Event-ID` 重连，不丢、不重 |
 | 📱 **Android 远程控制** | 手机实时查看 Run/Agent/Tool 执行过程、接收审批请求、发送远程命令 |
 | 🔒 **本地优先，隐私第一** | API Key 用 AES-256-GCM 加密、钥匙交 Windows DPAPI 保护；数据默认存本地 |
-| 📊 **工程级质量** | 26 个后端模块、120+ API、**961+ 自动化测试**全绿、TypeScript 严格模式 |
+| 📊 **工程级质量** | 26 个后端模块、120+ API、**978+ 自动化测试**全绿、TypeScript 严格模式 |
 
 ---
 
@@ -195,7 +195,7 @@ npm run build:exe   # 一键生成便携版 + NSIS 安装包
 | 产物 | 位置 | 说明 |
 |------|------|------|
 | 便携版 | `dist_exe/` | 免安装，双击 `启动应用.bat` |
-| 安装包 | `dist_electron/Aether Setup 2.1.0.exe` | 一键安装，桌面/开始菜单快捷方式 |
+| 安装包 | `dist_electron/Aether Setup 2.2.0.exe` | 一键安装，桌面/开始菜单快捷方式 |
 
 ### 版本 C：Android APK
 
@@ -318,7 +318,7 @@ npm run typecheck      # 类型检查
 npm run lint           # Lint
 ```
 
-**质量基线：961+ 自动化测试全绿**（backend 882 + shared 32 + frontend 47）+ TypeScript 严格模式 + ESLint。
+**质量基线：978+ 自动化测试全绿**（backend 978 + shared 32 + frontend 58）+ TypeScript 严格模式 + ESLint。
 
 覆盖范围：Event 协议 / Run 状态机 / Packed Replay / Ghost Claim / Model 解密 / FK 级联删除 / SSE 错误传播 / Activity 投影 / Workflow 执行 / 前端 race 守卫 等。
 

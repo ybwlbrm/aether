@@ -12,6 +12,11 @@ type DbType = SQLJsDatabase<typeof schema>;
 let db: DbType | null = null;
 let sqlDb: SqlJsDb | null = null;
 
+/** 测试专用：注入内存数据库实例 */
+export function setDbForTest(testDb: DbType | null): void {
+  db = testDb;
+}
+
 export function getDb(): DbType {
   if (!db) throw new Error('Database not initialized. Call initDb() first.');
   return db;

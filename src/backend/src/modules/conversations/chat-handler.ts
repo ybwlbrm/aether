@@ -25,7 +25,7 @@ import { SISYPHUS_SYSTEM_PROMPT, MANDATORY_COMPLIANCE_PROMPT } from '../../lib/s
 import { compactRemovedHistory, buildCompactionSystemMessage } from '../../lib/compaction.js';
 import { createPendingApproval } from '../../lib/approvals-center.js';
 import { pushDirective, drainDirectives } from '../../lib/inbox.js';
-import { activeRequests } from './state.js';
+import { runCancellationRegistry } from '../../lib/run-cancellation-registry.js';
 import { fetchWithRetry } from '../../lib/fetch-retry.js';
 import { initSseHeaders, createSseSender, startSseHeartbeat, clearSseHeartbeat, sendSseError, sendSseDone, endSseResponse } from './sse-stream.js';
 import { processCompaction, executeForceSummary } from './compaction.js';
@@ -53,7 +53,9 @@ export async function handleSendMessage(
   if (!conv) throw AppError.notFound('对话', id);
 
   // A6 修复：并发发送互斥 — 若该对话已有进行中的 AI 生成，拒绝新请求
-  if (activeRequests.has(id)) {
+  // 使用 runCancellationRegistry 检查是否有属于该对话的活跃 run
+  const activeRunIds = runCancellationRegistry.runIdsForConversation(id);
+  if (activeRunIds.length > 0) {
     return reply.code(409).send({ error: { message: '该对话正在生成中，请等待完成或先停止再发送' } });
   }
 
@@ -117,15 +119,23 @@ export async function handleSendMessage(
   // 读取对话全部历史（含刚保存的用户消息），作为多轮上下文
   const history = db.select().from(messages).where(eq(messages.conversationId, id)).orderBy(messages.createdAt).all();
 
+  // 本轮会话事件统一归属的 agent 上下文（提前声明，供注册使用）
+  const runContext = {
+    sessionId: id,
+    taskId: randomUUID(),
+    agentId: 'main' as const,
+    agentType: 'conversation' as const,
+  };
+
   // 设置 SSE 响应头
   initSseHeaders(reply);
 
   // 不再监听客户端断连 abort AI 请求：用户切换页面时对话继续处理，
   // 结果保存到数据库，回来后通过轮询自动恢复
   const clientAbort = new AbortController();
-  // 注册到全局映射表，用于取消端点
-  activeRequests.set(id, clientAbort);
-  reply.raw.on('close', () => { activeRequests.delete(id); });
+  // 注册到 RunCancellationRegistry（run-scoped，使用 runContext.taskId 作为 runId）
+  runCancellationRegistry.register(runContext.taskId, id, clientAbort);
+  reply.raw.on('close', () => { runCancellationRegistry.unregister(runContext.taskId); });
 
   // 发送 SSE 事件（忽略客户端已断开的写入错误）
   const sseSend = createSseSender(reply);
@@ -142,13 +152,6 @@ export async function handleSendMessage(
     },
     () => saveDb(config),
   );
-  // 本轮会话事件统一归属的 agent 上下文
-  const runContext = {
-    sessionId: id,
-    taskId: randomUUID(),
-    agentId: 'main' as const,
-    agentType: 'conversation' as const,
-  };
 
   // 会话持久化：标记对话正在生成
   db.update(conversations).set({ generationStatus: 'generating', updatedAt: now }).where(eq(conversations.id, id)).run();

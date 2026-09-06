@@ -10,8 +10,7 @@ import { resolve, dirname, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { getFirstAvailableProvider } from '../../lib/provider.js';
 import { getSettings } from '../../lib/dal.js';
-// P1-17 修复：引入 fetchWithRetry 替代裸 fetch，429/5xx 自动重试
-import { fetchWithRetry } from '../../lib/fetch-retry.js';
+import { buildModelRuntime, type ModelRequest } from '../../core/models/index.js';
 
 // 懒加载 pptxgenjs 和 docx
 let _pptxgen: typeof import('pptxgenjs')['default'] | null = null;
@@ -321,23 +320,32 @@ async function generateSlidesWithAI(title: string, encryptionKey: string): Promi
     if (provider?.apiKey) {
       const systemPrompt = '你是专业的演示文稿内容策划。根据用户给出的标题，生成一份结构完整的 PPT 幻灯片大纲。' +
         '只返回一个 JSON 对象，不要包含任何其他文字或 markdown，格式如下：' +
-        '{"slides":[{"title":"幻灯片标题","content":"该页详细内容（可多行，用\\n分隔要点）"}]}。' +
+        '{"slides":[{"title":"幻灯片标题","content":"该页详细内容（可多行，用\\n分隔要点")}]}。' +
         '第一页为封面，最后一页为结束页。内容用简体中文，每页 3-6 个要点。';
-      // P1-17 修复：使用 fetchWithRetry 替代裸 fetch，429/5xx 自动重试
-      const response = await fetchWithRetry(`${provider.baseUrl.replace(/\/$/, '')}/chat/completions`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${provider.apiKey}` },
-        body: JSON.stringify({
-          model: provider.defaultModel || 'gpt-4o',
-          messages: [
-            { role: 'system', content: systemPrompt },
-            { role: 'user', content: `演示文稿标题：${title}` },
-          ],
-        }),
+
+      const providerConfig = {
+        id: provider.id,
+        name: provider.name,
+        type: provider.type,
+        apiKey: provider.apiKey,
+        baseUrl: provider.baseUrl,
+        defaultModel: provider.defaultModel,
+        models: provider.models,
+        capabilities: provider.capabilities,
+      };
+      const runtime = buildModelRuntime(providerConfig);
+
+      const request: ModelRequest = {
+        provider: provider.id,
+        model: provider.defaultModel || 'gpt-4o',
+        systemPrompt,
+        messages: [{ role: 'user', content: `演示文稿标题：${title}` }],
+        maxTokens: 2048,
         signal: AbortSignal.timeout(30000),
-      });
-      const data = await response.json() as any;
-      const raw = data?.choices?.[0]?.message?.content || '';
+      };
+
+      const response = await runtime.complete(request);
+      const raw = response.content.trim();
       const parsed = extractJson(raw);
       if (parsed && Array.isArray(parsed.slides)) {
         const slides = parsed.slides
@@ -362,21 +370,30 @@ async function generateSectionsWithAI(title: string, description: string, encryp
         '{"sections":[{"heading":"章节标题","body":"章节正文内容"}]}。' +
         '内容用简体中文，每个章节正文 3-6 句话或要点。';
       const userContent = `文档标题：${title}${description ? `\n描述要求：${description}` : ''}`;
-      // P1-17 修复：使用 fetchWithRetry 替代裸 fetch
-      const response = await fetchWithRetry(`${provider.baseUrl.replace(/\/$/, '')}/chat/completions`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${provider.apiKey}` },
-        body: JSON.stringify({
-          model: provider.defaultModel || 'gpt-4o',
-          messages: [
-            { role: 'system', content: systemPrompt },
-            { role: 'user', content: userContent },
-          ],
-        }),
+
+      const providerConfig = {
+        id: provider.id,
+        name: provider.name,
+        type: provider.type,
+        apiKey: provider.apiKey,
+        baseUrl: provider.baseUrl,
+        defaultModel: provider.defaultModel,
+        models: provider.models,
+        capabilities: provider.capabilities,
+      };
+      const runtime = buildModelRuntime(providerConfig);
+
+      const request: ModelRequest = {
+        provider: provider.id,
+        model: provider.defaultModel || 'gpt-4o',
+        systemPrompt,
+        messages: [{ role: 'user', content: userContent }],
+        maxTokens: 2048,
         signal: AbortSignal.timeout(30000),
-      });
-      const data = await response.json() as any;
-      const raw = data?.choices?.[0]?.message?.content || '';
+      };
+
+      const response = await runtime.complete(request);
+      const raw = response.content.trim();
       const parsed = extractJson(raw);
       if (parsed && Array.isArray(parsed.sections)) {
         const sections = parsed.sections

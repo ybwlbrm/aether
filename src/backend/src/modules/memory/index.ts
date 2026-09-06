@@ -6,7 +6,7 @@ import { eq, desc, like, or } from 'drizzle-orm';
 import { randomUUID } from 'node:crypto';
 import { AppError } from '@pacc/shared';
 import { getProviderByCapability } from '../../lib/provider.js';
-import { fetchWithRetry } from '../../lib/fetch-retry.js';
+import { buildRuntimeForProvider } from '../../lib/model-runtime-bridge.js';
 
 /** 记忆类型枚举（与 schema 一致） */
 const MEMORY_TYPES = ['short_term', 'long_term', 'project'] as const;
@@ -161,29 +161,23 @@ export function registerMemoryRoutes(app: FastifyInstance, config: BackendConfig
     const provider = getProviderByCapability('text', config.encryptionKey);
     if (!provider?.apiKey) throw AppError.internal('未配置 AI Provider 或 API Key。请在「AI Providers」页面配置后再试。');
 
-    // 非流式调用 AI，要求输出结构化 JSON
-    const res = await fetchWithRetry(`${provider.baseUrl.replace(/\/$/, '')}/chat/completions`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${provider.apiKey}` },
-      body: JSON.stringify({
-        model: provider.defaultModel || 'gpt-4o',
-        messages: [
-          { role: 'system', content: EXTRACT_SYSTEM_PROMPT },
-          { role: 'user', content: content.slice(0, 8000) },
-        ],
-        temperature: 0.3,
-        max_tokens: 2048,
-        stream: false,
-      }),
-      signal: AbortSignal.timeout(60000),
-    });
-    if (!res.ok) {
-      const errText = await res.text();
-      throw new Error(`AI 提取请求失败 (${res.status}): ${errText.slice(0, 200)}`);
-    }
+    // 使用 ModelRuntime 替代直接 fetch
+    const runtimeResult = buildRuntimeForProvider(db, provider.id, config.encryptionKey);
+    if (!runtimeResult) throw AppError.internal('无法构建 ModelRuntime');
+    const { runtime } = runtimeResult;
 
-    const data = await res.json() as any;
-    const rawText = data.choices?.[0]?.message?.content || '';
+    const response = await runtime.complete({
+      provider: provider.type,
+      model: provider.defaultModel || 'gpt-4o',
+      messages: [
+        { role: 'system', content: EXTRACT_SYSTEM_PROMPT },
+        { role: 'user', content: content.slice(0, 8000) },
+      ],
+      temperature: 0.3,
+      maxTokens: 2048,
+    });
+
+    const rawText = response.content || '';
     const extracted = parseMemoriesJson(rawText);
 
     const now = new Date().toISOString();
@@ -201,6 +195,8 @@ export function registerMemoryRoutes(app: FastifyInstance, config: BackendConfig
         key,
         content: memContent,
         tags: JSON.stringify(tags),
+        scope: 'user',
+        importance: 0.5,
         createdAt: now,
         updatedAt: now,
       }).run();

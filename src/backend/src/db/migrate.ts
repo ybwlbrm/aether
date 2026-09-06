@@ -433,6 +433,21 @@ export async function runMigrations(config: BackendConfig): Promise<void> {
     db.run(`INSERT INTO schema_version (version, applied_at) VALUES (13, ?)`, [new Date().toISOString()]);
   }
 
+  // 版本 14 (Wave0-MEM): memories 表新增列 — scope/importance/lastUsedAt/expiresAt
+  // 使 memories 表成为运行时唯一事实源，兼容旧 JSON 数据迁移
+  if (currentVersion < 14) {
+    const memCols = db.exec('PRAGMA table_info(memories)');
+    const hasScope = memCols.length > 0
+      && memCols[0].values.some((row: unknown[]) => row[1] === 'scope');
+    if (!hasScope) {
+      db.run("ALTER TABLE memories ADD COLUMN scope TEXT NOT NULL DEFAULT 'user'");
+      db.run("ALTER TABLE memories ADD COLUMN importance REAL NOT NULL DEFAULT 0.5");
+      db.run("ALTER TABLE memories ADD COLUMN last_used_at TEXT");
+      db.run("ALTER TABLE memories ADD COLUMN expires_at TEXT");
+    }
+    db.run(`INSERT INTO schema_version (version, applied_at) VALUES (14, ?)`, [new Date().toISOString()]);
+  }
+
   // 保存到文件（原子写，防止强杀损坏主库）
   const data = db.export();
   const buffer = Buffer.from(data);

@@ -8,6 +8,7 @@ import { resolve } from 'node:path';
 import { getSettings, saveSettings } from '../../lib/dal.js';
 import { isPathInAllowedDirs } from './utils.js';
 import { filterSettingsFields } from './settings.js';
+import { assertSafeFetchUrl } from '../../lib/safe-fetch.js';
 
 /** 导入导出相关路由 */
 export function registerImportExportRoutes(app: FastifyInstance, config: BackendConfig): void {
@@ -72,6 +73,16 @@ export function registerImportExportRoutes(app: FastifyInstance, config: Backend
     if (Array.isArray(body.providers)) {
       for (const p of body.providers) {
         if (!p?.id) continue;
+        // Wave0-IM (P1-28): 导入 Provider 与创建/更新端点一致执行 SSRF 校验 ——
+        // 否则恶意导入文件可写入内网 baseUrl，绕过 POST /api/providers 的检查。
+        if (typeof p.baseUrl === 'string' && p.baseUrl.trim() !== '') {
+          try {
+            assertSafeFetchUrl(p.baseUrl.trim());
+          } catch {
+            skipped.push(`providers:${p.id} (baseUrl 存在 SSRF 风险，已跳过)`);
+            continue;
+          }
+        }
         const now = new Date().toISOString();
         // P0-4: 导出的 apiKey 已脱敏为 ***encrypted*** — 跳过 apiKey 更新保留 existing
         // 真实明文值则用 encrypt 加密存储

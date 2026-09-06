@@ -253,12 +253,8 @@ function SyncSettings() {
       } catch (_e: unknown) { /* ignore - intentional */ }
       // 连接成功后自动开启实时同步
       realtimeChannelRef.current = await setupRealtime(sb);
-      // 通知后端：保存同步配置，让后端也启动 Realtime 监听远程命令
-      fetch('/api/sync/config', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
-        body: JSON.stringify({ supabaseUrl, supabaseKey: resolvedKey }),
-      }).catch((e: unknown) => console.warn('[Sync] 后端同步配置失败:', e));
+      // 通知后端：保存同步配置（POST 为敏感写路径，Wave0-AM 后必须带 Authorization token）
+      api.saveSyncConfig({ supabaseUrl, supabaseKey: resolvedKey }).catch((e: unknown) => console.warn('[Sync] 后端同步配置失败:', e));
     } catch (e: unknown) {
       setSyncMsg('❌ 连接失败: ' + (e instanceof Error ? e.message : String(e)));
     }

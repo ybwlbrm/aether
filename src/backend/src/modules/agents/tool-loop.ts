@@ -1,14 +1,12 @@
 import type { StreamChunk } from '@pacc/shared';
-import { fetchWithRetry } from '../../lib/fetch-retry.js';
-import { parseSse, withChunkTimeout, SseStreamError } from '../../lib/sse-parser.js';
-import { translate, buildChatRequestBody, parseToolArgsSafe } from '../../lib/stream-translate.js';
+import { buildModelRuntime, type ModelRequest } from '../../core/models/index.js';
+import { buildChatRequestBody, parseToolArgsSafe } from '../../lib/stream-translate.js';
 import { executeTool } from '../../lib/tool-executor.js';
 import { buildToolPayload } from '@pacc/shared';
 import { filterToolsByWebSearch } from '../../lib/tool-registry.js';
 import { providerSupportsThinking } from '../../lib/provider.js';
 import { createPendingApproval } from '../../lib/approvals-center.js';
 import { drainDirectives } from '../../lib/inbox.js';
-import { SSE_CHUNK_TIMEOUT_MS } from '../../lib/sse-utils.js';
 import { MANDATORY_COMPLIANCE_PROMPT } from '../../lib/system-prompts.js';
 import { dedupToolResultReplacement } from '../../lib/deduplicate.js';
 import { getActiveMemoriesFormatted, getSettings } from '../../lib/dal.js';
@@ -66,6 +64,19 @@ export async function runAgentToolLoop(ctx: ToolLoopContext): Promise<ToolLoopRe
   // 循环模式：loop 开启时持续执行直到任务完整完成（极大上限，防死循环）；否则 30 轮
   let fcTurns = ctx.body.loop ? 500 : 30;
 
+  // Build ModelRuntime from endpoint config (outside loop for reuse in force summary)
+  const providerConfig = {
+    id: 'ep',
+    name: 'endpoint',
+    type: 'openai',
+    apiKey: ctx.ep.apiKey,
+    baseUrl: ctx.ep.baseUrl,
+    defaultModel: ctx.ep.model,
+    models: [ctx.ep.model],
+    capabilities: ['text', 'tool_calling'],
+  };
+  const runtime = buildModelRuntime(providerConfig);
+
   while (fcTurns-- > 0) {
     // inbox 指令（steer/followup）：运行中用户补充的指令 → drain 为 user 消息注入下一轮
     const convKey = (ctx.body.conversationId as string | undefined) ?? 'anonymous';
@@ -85,29 +96,22 @@ export async function runAgentToolLoop(ctx: ToolLoopContext): Promise<ToolLoopRe
       max_tokens: 4096,
     });
 
-    const res = await fetchWithRetry(`${ctx.ep.baseUrl}/chat/completions`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${ctx.ep.apiKey}` },
-      body: JSON.stringify(reqBody),
+    const request: ModelRequest = {
+      provider: providerConfig.id,
+      model: ctx.ep.model,
+      messages: ctx.agentMessages,
+      tools: ctx.toolListForThisAgent.map(t => ({
+        type: 'function' as const,
+        function: {
+          name: t.function.name,
+          description: t.function.description,
+          parameters: t.function.parameters,
+        },
+      })),
+      maxTokens: 4096,
       signal: ctx.clientAbort.signal,
-    }, ctx.sseSend);
+    };
 
-    if (!res.ok) {
-      const errResult = {
-        agentId: ctx.agent.id,
-        name: ctx.agent.name,
-        icon: ctx.agent.icon,
-        role: ctx.agent.role,
-        status: 'error',
-        reply: `API error: ${res.status}`,
-        tokens: 0,
-      };
-      ctx.sseSend('agent-result', JSON.stringify(errResult));
-      throw new Error(`API error: ${res.status}`);
-    }
-
-    // 解析流式响应 — translate 统一协议
-    const reader = res.body!.getReader();
     let accumulatedContent = '';
     let accumulatedReasoning = '';
     let currentToolCalls: any[] = [];
@@ -115,7 +119,7 @@ export async function runAgentToolLoop(ctx: ToolLoopContext): Promise<ToolLoopRe
     let turnFinish: 'stop' | 'tool_calls' | 'max-tokens' | 'error' = 'stop';
 
     try {
-      for await (const c of translate(parseSse(withChunkTimeout(reader, SSE_CHUNK_TIMEOUT_MS, ctx.clientAbort.signal)))) {
+      for await (const c of runtime.stream(request)) {
         switch (c.type) {
           case 'reasoning-delta': {
             const r = c.text;
@@ -165,7 +169,7 @@ export async function runAgentToolLoop(ctx: ToolLoopContext): Promise<ToolLoopRe
         }
       }
     } catch (e: unknown) {
-      if (e instanceof SseStreamError) {
+      if (e instanceof Error && e.name === 'StreamError') {
         ctx.sseSend('error', JSON.stringify({ message: `AI 响应流中断: ${e.message}` }));
       }
       throw e;
@@ -341,43 +345,34 @@ export async function runAgentToolLoop(ctx: ToolLoopContext): Promise<ToolLoopRe
   // 追加一轮「强制总结」调用，让 AI 基于全部工具结果给出完整总结，而不是填占位符
   if (!agentReply) {
     try {
-      const summaryReq = buildChatRequestBody({
+      const summaryRequest: ModelRequest = {
+        provider: providerConfig.id,
         model: ctx.ep.model,
         messages: [...ctx.agentMessages, { role: 'user', content: '请基于上面所有工具执行的结果，给出完整的总结与最终答复。如果任务还没完成，请继续说明还需要做什么。' }],
-        tools: ctx.toolListForThisAgent,
-        tool_choice: 'none',
-        deepThinking: ctx.deepThinking,
-        reasoningEffort: ctx.reasoningEffort,
-        supportsThinking: ctx.epSupportsThinking,
-        max_tokens: 4096,
-      });
-      const summaryRes = await fetchWithRetry(`${ctx.ep.baseUrl}/chat/completions`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${ctx.ep.apiKey}` },
-        body: JSON.stringify(summaryReq),
+        tools: ctx.toolListForThisAgent.map(t => ({
+          type: 'function' as const,
+          function: {
+            name: t.function.name,
+            description: t.function.description,
+            parameters: t.function.parameters,
+          },
+        })),
+        maxTokens: 4096,
         signal: ctx.clientAbort.signal,
-      }, ctx.sseSend);
-      if (summaryRes.ok) {
-        const sReader = summaryRes.body!.getReader();
-        let summaryText = '';
-        try {
-          for await (const c of translate(parseSse(withChunkTimeout(sReader, SSE_CHUNK_TIMEOUT_MS, ctx.clientAbort.signal)))) {
-            if (c.type === 'text-delta') {
-              summaryText += c.text;
-              if (ctx.body.conversationId) {
-                ctx.eventBus.emit(ctx.convId, 'agent.message.delta', {
-                  taskId: ctx.runTaskId,
-                  agentId: ctx.agent.id,
-                  agentType: ctx.agentCtx.agentType,
-                  content: c.text,
-                }, { persist: false });
-              }
-            }
-          }
-        } catch {
-          // 流式解析失败则用已累积文本
+      };
+      const summaryResponse = await runtime.complete(summaryRequest);
+      let summaryText = summaryResponse.content.trim();
+      if (summaryText) {
+        // 流式推送给前端（模拟流式输出）
+        if (ctx.body.conversationId) {
+          ctx.eventBus.emit(ctx.convId, 'agent.message.delta', {
+            taskId: ctx.runTaskId,
+            agentId: ctx.agent.id,
+            agentType: ctx.agentCtx.agentType,
+            content: summaryText,
+          }, { persist: false });
         }
-        if (summaryText.trim()) agentReply = summaryText.trim();
+        agentReply = summaryText;
       }
     } catch {
       // 强制总结失败则回退占位符

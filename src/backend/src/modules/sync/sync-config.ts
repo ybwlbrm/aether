@@ -21,6 +21,35 @@ export interface SyncConfig {
   userId?: string;
 }
 
+/** 所有权过滤器：用于 Supabase 查询的 user_id / device_id 条件 */
+export interface OwnershipFilters {
+  userId: string | null;
+  deviceId: string | null;
+}
+
+/**
+ * 从 SyncConfig 构造所有权过滤器（纯函数，便于单测）
+ * - userId 来自配置绑定（设备注册归属），不可由请求体覆盖
+ * - deviceId 来自配置
+ * - 若 userId 未配置，返回 null 表示"无权访问任何数据"（调用方应返回空数组而非全量查询）
+ */
+export function buildOwnershipFilters(cfg: SyncConfig | null): OwnershipFilters {
+  if (!cfg) return { userId: null, deviceId: null };
+  return {
+    userId: cfg.userId ?? null,
+    deviceId: cfg.deviceId ?? null,
+  };
+}
+
+/**
+ * 计算配置指纹：用于检测 URL/Key/deviceId 变化，触发重新注册
+ * 仅包含影响身份/连接的字段，排除 deviceName/deviceType 等非关键字段
+ */
+export function computeConfigFingerprint(cfg: SyncConfig | null): string {
+  if (!cfg) return 'none';
+  return `${cfg.supabaseUrl}|${cfg.supabaseKey}|${cfg.deviceId}`;
+}
+
 const SYNC_CONFIG_FILE = 'sync-config.json';
 
 export function loadSyncConfig(config: BackendConfig): SyncConfig | null {
@@ -45,6 +74,8 @@ let supabase: SupabaseClient | null = null;
 let realtimeChannel: any = null;
 // Q4 优化：设备已注册标记 — 避免每次命令处理都重复 upsert devices（一次 Supabase 往返）
 let deviceRegistered = false;
+// 配置指纹：用于检测 URL/Key/deviceId 变化，触发重新注册 (P1-17)
+let configFingerprint: string = 'none';
 
 export function getSyncConfig(): SyncConfig | null {
   return syncConfig;
@@ -76,6 +107,14 @@ export function getDeviceRegistered(): boolean {
 
 export function setDeviceRegistered(registered: boolean): void {
   deviceRegistered = registered;
+}
+
+export function getConfigFingerprint(): string {
+  return configFingerprint;
+}
+
+export function setConfigFingerprint(fp: string): void {
+  configFingerprint = fp;
 }
 
 function getSupabase(): SupabaseClient | null {
@@ -115,6 +154,22 @@ export async function registerDevice(sb: SupabaseClient, cfg: SyncConfig): Promi
 // ============================================================
 // 同步数据到 Supabase
 // ============================================================
+
+/**
+ * 统计成功/失败并生成统一响应格式 (P1-18)
+ * - 全部成功：success=true
+ * - 有失败：success=false, partial=true, failed=N, 成功项仍列出
+ * 判定失败：值以 '失败' 开头（知识库/设置同步的错误格式），conversations 结果始终以 '同步' 开头
+ */
+export function buildSyncResponse<T extends Record<string, string>>(
+  results: T
+): { success: boolean; partial?: boolean; failed?: number; results: T } {
+  const failedCount = Object.values(results).filter(v => v.startsWith('失败')).length;
+  if (failedCount === 0) {
+    return { success: true, results };
+  }
+  return { success: false, partial: true, failed: failedCount, results };
+}
 
 export async function syncConversationsToSupabase(sb: SupabaseClient, cfg: SyncConfig): Promise<{ ok: number; fail: number }> {
   const db = getDb();
@@ -196,15 +251,27 @@ export function registerSyncConfigRoutes(app: FastifyInstance, config: BackendCo
       return reply.code(400).send({ error: '缺少 Supabase URL 或 Key' });
     }
 
+    // P0-16: userId 不得由请求体任意指定 —— 保留已有配置的 userId（来自设备注册/云端身份）
+    // 若首次配置且无 userId，则保持 undefined（后续通过 registerDevice 绑定或云端 auth 决定）
+    const preservedUserId = syncConfig?.userId;
+
     const newConfig: SyncConfig = {
       supabaseUrl: body.supabaseUrl,
       supabaseKey: body.supabaseKey,
       deviceId: body.deviceId || `desktop-${Date.now()}`,
       deviceName: body.deviceName || 'Aether 桌面端',
       deviceType: 'desktop',
-      // 可选：Supabase Auth 用户 id，用于 RLS 行级隔离（桌面端主动同步数据对手机端登录用户可见）
-      userId: body.userId ? String(body.userId) : undefined,
+      userId: preservedUserId,
     };
+
+    // P1-17: 检测配置指纹变化（URL/Key/deviceId），变化则重置 deviceRegistered 触发重新注册
+    const newFingerprint = computeConfigFingerprint(newConfig);
+    const fingerprintChanged = newFingerprint !== configFingerprint;
+    if (fingerprintChanged) {
+      console.log('[Sync] 配置指纹变化，重置设备注册状态:', { old: configFingerprint, new: newFingerprint });
+      deviceRegistered = false;
+      configFingerprint = newFingerprint;
+    }
 
     // 断开旧连接
     if (supabase && realtimeChannel) {
@@ -227,7 +294,12 @@ export function registerSyncConfigRoutes(app: FastifyInstance, config: BackendCo
       // BE-UA-02: 连接后全量同步 fire-and-forget → await 确保错误可感知，同时不阻塞响应
       const syncResult = await syncConversationsToSupabase(sb, syncConfig);
       console.log(`[Sync] 连接后全量同步完成: ${syncResult.ok} 条消息，${syncResult.fail} 条失败`);
-      return { success: true, message: '同步配置已保存，Realtime 监听已启动', deviceId: syncConfig.deviceId };
+      
+      // P1-18: 返回 success/partial/failed 格式
+      const response = buildSyncResponse({
+        conversations: `同步 ${syncResult.ok} 条消息，${syncResult.fail} 条失败`,
+      });
+      return { ...response, message: '同步配置已保存，Realtime 监听已启动', deviceId: syncConfig.deviceId };
     } catch (e: unknown) {
       return reply.code(500).send({ error: `连接失败: ${e instanceof Error ? e.message : String(e)}` });
     }
@@ -312,7 +384,8 @@ export function registerSyncConfigRoutes(app: FastifyInstance, config: BackendCo
       created_at: now,
     });
 
-    return { success: true, results, syncedAt: now };
+    // P1-18: 返回 success/partial/failed 格式
+    return { ...buildSyncResponse(results), syncedAt: now };
   });
 
   // 从 Supabase 下载数据
@@ -325,11 +398,25 @@ export function registerSyncConfigRoutes(app: FastifyInstance, config: BackendCo
     const query = request.query as any;
     const deviceId = query?.deviceId || syncConfig.deviceId;
 
+    // P0-15/P1-35: 构造所有权过滤器 —— userId 来自配置绑定，不可由查询参数覆盖
+    // 若 userId 未配置，返回空数组而非全量查询（安全原则：无身份不可见数据）
+    const { userId, deviceId: cfgDeviceId } = buildOwnershipFilters(syncConfig);
+    if (!userId) {
+      return {
+        success: true,
+        data: { knowledge: {}, settings: {}, remoteConversations: [] },
+        lastSyncAt: null,
+        syncedAt: new Date().toISOString(),
+      };
+    }
+
     const result: Record<string, any> = {};
 
-    // 下载知识库
+    // 下载知识库 —— 按 user_id + device_id 过滤
     const { data: knowledgeData } = await sb.from('knowledge')
       .select('*')
+      .eq('user_id', userId)
+      .eq('device_id', cfgDeviceId)
       .order('updated_at', { ascending: false })
       .limit(1);
     if (knowledgeData && knowledgeData.length > 0) {
@@ -337,9 +424,11 @@ export function registerSyncConfigRoutes(app: FastifyInstance, config: BackendCo
       result.knowledge = typeof raw === 'string' ? JSON.parse(raw || '{}') : (raw || {});
     }
 
-    // 下载设置
+    // 下载设置 —— 按 user_id + device_id 过滤
     const { data: settingsData } = await sb.from('settings')
       .select('*')
+      .eq('user_id', userId)
+      .eq('device_id', cfgDeviceId)
       .order('updated_at', { ascending: false })
       .limit(1);
     if (settingsData && settingsData.length > 0) {
@@ -347,16 +436,19 @@ export function registerSyncConfigRoutes(app: FastifyInstance, config: BackendCo
       result.settings = typeof raw === 'string' ? JSON.parse(raw || '{}') : (raw || {});
     }
 
-    // 下载远程对话记录
+    // 下载远程对话记录 —— 按 user_id 过滤 (P0-15: conversations_sync 必须按 user_id)
     const { data: remoteConvs } = await sb.from('conversations_sync')
       .select('*')
+      .eq('user_id', userId)
       .order('updated_at', { ascending: false })
       .limit(50);
     result.remoteConversations = remoteConvs || [];
 
-    // 获取最后同步时间
+    // 获取最后同步时间 —— 按 user_id + device_id 过滤
     const { data: lastSync } = await sb.from('sync_log')
       .select('created_at')
+      .eq('user_id', userId)
+      .eq('device_id', cfgDeviceId)
       .order('created_at', { ascending: false })
       .limit(1);
 

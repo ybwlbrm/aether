@@ -16,16 +16,13 @@ import { codeReviewTools, executeCodeReview } from '../../lib/code-review.js';
 import { listMcpTools, callMcpTool } from '../../lib/mcp-client.js';
 import { mcpServers } from '../../db/schema/index.js';
 import { getSettings } from '../../lib/dal.js';
-import { parseSse, withChunkTimeout } from '../../lib/sse-parser.js';
-import { translate } from '../../lib/stream-translate.js';
-import { SSE_CHUNK_TIMEOUT_MS } from '../../lib/sse-utils.js';
 import { createEventBus } from '../../lib/event-bus.js';
 import { buildToolPayload } from '@pacc/shared';
 import { MANDATORY_COMPLIANCE_PROMPT } from '../../lib/system-prompts.js';
 import { registerDevice } from './sync-config.js';
 import { resolve } from 'node:path';
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
-import { isSafeFetchUrl } from '../../lib/safe-fetch.js';
+import { buildRuntimeForProvider } from '../../lib/model-runtime-bridge.js';
 
 // ============================================================
 // 处理远程命令（手机端发来的指令）
@@ -326,7 +323,10 @@ export async function processRemoteCommand(
 
     // ========== 流式调用 AI（带文件工具 + MCP 工具，支持 function calling 操作电脑） ==========
     // 流式输出：手机端可见逐字显示 + 思考过程
-    const baseUrl = provider.baseUrl.replace(/\/$/, '');
+    // 使用 ModelRuntime 替代直接 fetch
+    const runtimeResult = buildRuntimeForProvider(db, provider.id, backendConfig.encryptionKey);
+    if (!runtimeResult) throw new Error('无法构建 ModelRuntime');
+    const { runtime } = runtimeResult;
     const model = provider.defaultModel;
     const history = db.select()
       .from(messages)
@@ -348,15 +348,15 @@ export async function processRemoteCommand(
     // 加载 MCP 工具（与文件工具合并）
     const getMcpServers = () => db.select().from(mcpServers).all() as any[];
     const mcpTools = await listMcpTools(getMcpServers);
-    const allTools = [
-      ...fileTools,
-      ...commandTools,
-      ...searchTools,
-      ...lspTools,
-      ...testTools,
-      ...codeReviewTools,
+    const allTools: Array<{ type: 'function'; function: { name: string; description?: string; parameters?: unknown } }> = [
+      ...(fileTools as Array<{ type: 'function'; function: { name: string; description?: string; parameters?: unknown } }>),
+      ...(commandTools as Array<{ type: 'function'; function: { name: string; description?: string; parameters?: unknown } }>),
+      ...(searchTools as Array<{ type: 'function'; function: { name: string; description?: string; parameters?: unknown } }>),
+      ...(lspTools as Array<{ type: 'function'; function: { name: string; description?: string; parameters?: unknown } }>),
+      ...(testTools as Array<{ type: 'function'; function: { name: string; description?: string; parameters?: unknown } }>),
+      ...(codeReviewTools as Array<{ type: 'function'; function: { name: string; description?: string; parameters?: unknown } }>),
       ...mcpTools.map(t => ({
-        type: 'function',
+        type: 'function' as const,
         function: {
           name: t.name,
           description: t.description || '',
@@ -367,7 +367,7 @@ export async function processRemoteCommand(
     // 手机端联网搜索开关：remoteWeb=false 时过滤搜索系工具
     const activeTools = remoteWeb
       ? allTools
-      : allTools.filter((t: any) => !/web_search|web_fetch|browser\./.test(t.function?.name ?? ''));
+      : allTools.filter((t) => !/web_search|web_fetch|browser\./.test(t.function?.name ?? ''));
 
     const systemPrompt = `${MANDATORY_COMPLIANCE_PROMPT}
 
@@ -453,44 +453,21 @@ export async function processRemoteCommand(
 
     while (maxTurns-- > 0) {
       // 429 重试：最多 3 次，指数退避
-      let aiResponse: Response | null = null;
+      let stream: AsyncIterable<any> | null = null;
       for (let attempt = 0; attempt < 4; attempt++) {
         try {
           // 纵深防御：显式校验 baseUrl（虽受控但防配置篡改/注入）
-          if (!isSafeFetchUrl(baseUrl)) throw new Error('baseUrl 存在 SSRF 风险：禁止访问链路本地/元数据地址或非 http(s) 协议');
-          const resp = await fetch(`${baseUrl}/chat/completions`, {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              'Authorization': `Bearer ${provider.apiKey}`,
-            },
-            body: JSON.stringify({
-              model,
-              messages: apiMessages,
-              tools: activeTools,
-              tool_choice: 'auto',
-              stream: true, // 流式输出，手机端可见逐字显示
-              // 手机端深度思考开关：remoteDeep=true 时附加 thinking 参数
-              ...(remoteDeep ? { thinking: { type: 'enabled' } } : {}),
-            }),
+          // ModelRuntime 内部已处理，此处保留以兼容旧逻辑
+          const request = {
+            provider: provider.type,
+            model,
+            messages: apiMessages,
+            tools: activeTools,
+            toolChoice: 'auto',
+            ...(remoteDeep ? { thinking: true } : {}),
             signal: AbortSignal.timeout(300000), // 5分钟超时
-          });
-          if (resp.status === 429 && attempt < 3) {
-            const delay = 5000 * Math.pow(2, attempt);
-            console.log(`[Sync] AI 429 限流，${delay / 1000}s 后重试 (${attempt + 1}/3)`);
-            await new Promise(r => setTimeout(r, delay));
-            continue;
-          }
-          if (!resp.ok) {
-            const errText = (await resp.text().catch(() => '')).slice(0, 200);
-            lastErr = `AI API 请求失败 (${resp.status}): ${errText}`;
-            if (resp.status === 429) {
-              await syncAssistantError(sb, cfg, convId, commandId, command.user_id, content, `❌ AI 服务被限流（429）。请稍后再试或更换 API Key。${errText}`, now, backendConfig);
-              return;
-            }
-            throw new Error(lastErr);
-          }
-          aiResponse = resp;
+          };
+          stream = runtime.stream(request);
           break;
         } catch (e: unknown) {
           if (e instanceof Error && e.name === 'AbortError') {
@@ -508,15 +485,12 @@ export async function processRemoteCommand(
         }
       }
 
-      if (!aiResponse) {
+      if (!stream) {
         await syncAssistantError(sb, cfg, convId, commandId, command.user_id, content, `❌ AI 调用失败: ${lastErr || '未知错误'}`, now, backendConfig);
         return;
       }
 
-      // ========== 流式读取 SSE 响应（零节流，每 chunk 立即同步双端） ==========
-      const reader = aiResponse.body!.getReader();
-      const decoder = new TextDecoder();
-      let streamBuffer = '';
+      // ========== 流式读取 ModelRuntime StreamChunk（零节流，每 chunk 立即同步双端） ==========
       let accumulatedContent = '';
       let reasoningContent = '';
       let currentToolCalls: any[] = [];
@@ -580,15 +554,15 @@ export async function processRemoteCommand(
         }
       };
 
-      // 流式过程：每收到 chunk 立即调度（20ms 微节流），几乎无延迟且丝滑
+      // 流式过程：每收到 StreamChunk 立即调度
       try {
-        for await (const c of translate(parseSse(withChunkTimeout(reader, SSE_CHUNK_TIMEOUT_MS)))) {
-          switch (c.type) {
+        for await (const chunk of stream) {
+          switch (chunk.type) {
             case 'reasoning-delta': {
-              reasoningContent += c.text;
+              reasoningContent += chunk.text;
               // 必须落库（persist 默认 true），桌面端 fetchEvents 才能读到 → ActivityStream 渲染 thinking
               eventBus.emit(convId, 'agent.reasoning.delta', {
-                taskId: runTaskId, agentId: 'main', agentType: 'conversation', content: c.text,
+                taskId: runTaskId, agentId: 'main', agentType: 'conversation', content: chunk.text,
               });
               // 思考之后还有正文，等待正文 chunk 一起同步（避免频繁写）
               if (!accumulatedContent) {
@@ -597,31 +571,31 @@ export async function processRemoteCommand(
               break;
             }
             case 'text-delta': {
-              accumulatedContent += c.text;
+              accumulatedContent += chunk.text;
               // 必须落库，桌面端 ActivityStream 才能渲染消息增量
               eventBus.emit(convId, 'agent.message.delta', {
-                taskId: runTaskId, agentId: 'main', agentType: 'conversation', content: c.text,
+                taskId: runTaskId, agentId: 'main', agentType: 'conversation', content: chunk.text,
               });
               scheduleSync(accumulatedContent, reasoningContent);
               break;
             }
             case 'block-end': {
-              if (c.block.kind === 'tool-call') {
-                currentToolCalls.push({ id: c.block.id, function: { name: c.block.name, arguments: c.block.arguments }, index: currentToolCalls.length });
+              if (chunk.block?.kind === 'tool-call') {
+                currentToolCalls.push({ id: chunk.block.id, function: { name: chunk.block.name, arguments: chunk.block.arguments }, index: currentToolCalls.length });
               }
               break;
             }
             case 'usage': {
-              streamUsage.prompt_tokens += c.usage.inputTokens;
-              streamUsage.completion_tokens += c.usage.outputTokens;
-              streamUsage.total_tokens += c.usage.totalTokens ?? (c.usage.inputTokens + c.usage.outputTokens);
+              streamUsage.prompt_tokens += chunk.usage?.inputTokens ?? 0;
+              streamUsage.completion_tokens += chunk.usage?.outputTokens ?? 0;
+              streamUsage.total_tokens += chunk.usage?.totalTokens ?? ((chunk.usage?.inputTokens ?? 0) + (chunk.usage?.outputTokens ?? 0));
               break;
             }
             default: break;
           }
         }
       } catch (e: unknown) {
-        // SseStreamError/MALFORMED：sync 上下文不炸整体流程，记日志并走正常收尾（已产出内容已同步）
+        // StreamError：sync 上下文不炸整体流程，记日志并走正常收尾（已产出内容已同步）
         if (e instanceof Error) console.warn(`[Sync] AI 流式解析中断: ${e.message}`);
       }
 
@@ -765,31 +739,14 @@ export async function processRemoteCommand(
       // 核心修复：工具循环结束后 AI 没给文本总结（aiContentFinal 为空），追加一轮强制总结，
       // 让 AI 基于所有工具结果给出完整答复，而不是填占位符
       try {
-        const summaryReq = {
+        const summaryResponse = await runtime.complete({
+          provider: provider.type,
           model,
           messages: [...apiMessages, { role: 'user', content: '请基于上面所有工具执行的结果，给出完整的总结与最终答复。如果任务还没完成，请继续说明还需要做什么。' }],
           tools: allTools,
-          tool_choice: 'none',
-          stream: true,
-        };
-        // 纵深防御：显式校验 baseUrl
-        if (!isSafeFetchUrl(baseUrl)) throw new Error('baseUrl 存在 SSRF 风险');
-        const summaryRes = await fetch(`${baseUrl}/chat/completions`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${provider.apiKey}` },
-          body: JSON.stringify(summaryReq),
           signal: AbortSignal.timeout(120000),
         });
-        if (summaryRes.ok) {
-          const sReader = summaryRes.body!.getReader();
-          let summaryText = '';
-          try {
-            for await (const c of translate(parseSse(withChunkTimeout(sReader, SSE_CHUNK_TIMEOUT_MS)))) {
-              if (c.type === 'text-delta') summaryText += c.text;
-            }
-          } catch { /* 流式解析失败则用已累积文本 */ }
-          if (summaryText.trim()) aiContentFinal = summaryText.trim();
-        }
+        if (summaryResponse.content?.trim()) aiContentFinal = summaryResponse.content.trim();
       } catch { /* 强制总结失败则回退占位符 */ }
     }
     if (!aiContentFinal) {

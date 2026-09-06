@@ -10,6 +10,7 @@ import { AppError } from '@pacc/shared';
 import { AGENTS, routeMessage } from './agent-definitions.js';
 import { handleOrchestrate } from './orchestration.js';
 import { isSafeFetchUrl } from '../../lib/safe-fetch.js';
+import { buildModelRuntime, type ModelRequest } from '../../core/models/index.js';
 
 // 活跃的 AI 请求 AbortController 映射表（按 conversationId）
 const activeRequests = new Map<string, AbortController>();
@@ -216,43 +217,46 @@ export function registerAgentRoutes(app: FastifyInstance, config: BackendConfig)
     try {
       // 纵深防御：显式校验 baseUrl（虽受控但防配置篡改/注入）
       if (!isSafeFetchUrl(activeProvider.baseUrl)) throw new Error('Provider baseUrl 存在 SSRF 风险：禁止访问链路本地/元数据地址或非 http(s) 协议');
-      const res = await fetch(`${activeProvider.baseUrl.replace(/\/$/, '')}/chat/completions`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${activeProvider.apiKey}` },
-        body: JSON.stringify({
-          model: activeModel,
-          messages: [
-            // P1-7 修复：优先使用运行时自定义提示词（局部 Map），回退到内置提示词
-            { role: 'system', content: (customPrompts.get(sisyphus.id) ?? sisyphus.systemPrompt) },
-            ...(body.history || [])
-              .filter((m: any) => m.role === 'user' || m.role === 'assistant')
-              .map((m: any) => ({
-                ...m,
-                // 剥离图片 markdown URL（服务端虚拟路径 AI 无法访问）
-                content: typeof m.content === 'string'
-                  ? m.content
-                    .replace(/!\[[^\]]*\]\(\/data\/chat-images\/[^)]+\)/g, '[图片]')
-                    .replace(/!\[[^\]]*\]\((data:image\/[^)]+)\)/g, '[图片]')
-                    .trim()
-                  : m.content,
-              })),
-            { role: 'user', content: body.prompt },
-          ],
-          max_tokens: 2048,
-          stream: false,
-        }),
+      
+      const providerConfig = {
+        id: activeProvider.id,
+        name: activeProvider.name,
+        type: activeProvider.type,
+        apiKey: activeProvider.apiKey,
+        baseUrl: activeProvider.baseUrl,
+        defaultModel: activeProvider.defaultModel,
+        models: activeProvider.models,
+        capabilities: activeProvider.capabilities,
+      };
+      const runtime = buildModelRuntime(providerConfig);
+      
+      const request: ModelRequest = {
+        provider: activeProvider.id,
+        model: activeModel,
+        systemPrompt: (customPrompts.get(sisyphus.id) ?? sisyphus.systemPrompt),
+        messages: (body.history || [])
+          .filter((m: any) => m.role === 'user' || m.role === 'assistant')
+          .map((m: any) => ({
+            ...m,
+            // 剥离图片 markdown URL（服务端虚拟路径 AI 无法访问）
+            content: typeof m.content === 'string'
+              ? m.content
+                .replace(/!\[[^\]]*\]\(\/data\/chat-images\/[^)]+\)/g, '[图片]')
+                .replace(/!\[[^\]]*\]\((data:image\/[^)]+)\)/g, '[图片]')
+                .trim()
+              : m.content,
+          })),
+        maxTokens: 2048,
         signal: AbortSignal.timeout(60000),
-      });
-      if (!res.ok) {
-        db.insert(messages).values({
-          id: randomUUID(), conversationId: convId, role: 'assistant',
-          content: `[API Error] ${res.status}`, createdAt: new Date().toISOString(),
-        }).run();
-        return { error: `API error: ${res.status}`, conversationId: convId };
-      }
-      const data = await res.json() as any;
-      const reply = data.choices?.[0]?.message?.content || '';
-      const usage = data.usage || {};
+      };
+      
+      const response = await runtime.complete(request);
+      const reply = response.content.trim();
+      const usage = response.usage ? {
+        prompt_tokens: response.usage.inputTokens,
+        completion_tokens: response.usage.outputTokens,
+        total_tokens: response.usage.totalTokens,
+      } : {};
 
       // 4. 保存 AI 回复
       const aiMsgId = randomUUID();

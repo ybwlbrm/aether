@@ -6,6 +6,7 @@ import { randomUUID } from 'node:crypto';
 import { desc, like, eq } from 'drizzle-orm';
 import { getDb, saveDb } from '../../db/client.js';
 import { searchHistory, messages, conversations } from '../../db/schema/index.js';
+import { isPublicFetchUrl } from '../../lib/safe-fetch.js';
 
 /** 扫描目录查找文件名/内容匹配本地文件的简单全文搜索 */
 function searchLocalFiles(dir: string, query: string, maxResults = 10): { title: string; url: string; snippet: string }[] {
@@ -51,37 +52,14 @@ function searchLocalFiles(dir: string, query: string, maxResults = 10): { title:
 }
 
 /** 简单网页抓取：提取 title 和 meta description */
-// P0 修复：SSRF 防护 — 网页抓取仅允许 http/https 公网地址，禁止本地/内网/云元数据地址。
-// DuckDuckGo 结果 URL 由第三方站点决定，恶意结果页可将请求导向 169.254.169.254（云元数据）等内网地址。
-function isSafeFetchUrl(raw: string): boolean {
-  try {
-    const u = new URL(raw);
-    if (u.protocol !== 'http:' && u.protocol !== 'https:') return false;
-    const host = u.hostname.toLowerCase();
-    // 本地回环 / 本机
-    if (host === '127.0.0.1' || host === 'localhost' || host === '0.0.0.0' || host === '::1') return false;
-    // 云元数据地址（AWS/Azure/GCP/Aliyun）
-    if (host === '169.254.169.254' || host.endsWith('.metadata.google.internal') || host === 'metadata.google.internal') return false;
-    // 私网段 / 链路本地 / 多播
-    if (/^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|127\.|169\.254\.)/.test(host)) return false;
-    // 内网域名后缀（常见本地服务域名）
-    if (host.endsWith('.local') || host.endsWith('.internal')) return false;
-    // 防止十进制/八进制混淆 IP（如 http://2130706433 指向 127.0.0.1）
-    try {
-      const ip = u.hostname.startsWith('[') ? u.hostname.slice(1, -1) : u.hostname;
-      if (/^\d+$/.test(ip.replace(/\./g, '')) && ip.includes('.')) {
-        if (/^(127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|169\.254\.)/.test(ip)) return false;
-      }
-    } catch { /* 忽略解析失败 */ }
-    return true;
-  } catch {
-    return false;
-  }
-}
+// Wave0-SS (P0-13): SSRF 校验统一复用 lib/safe-fetch 的 isPublicFetchUrl（公网-only），
+// 与 provider/media/下载器共享同一套基础设施 —— 消除本文件第三份独立实现。
+// DuckDuckGo 结果 URL 由第三方站点决定，恶意结果页可将请求导向 169.254.169.254
+// （云元数据）等内网地址；IPv6 字面量与 DNS rebinding 由 safe-fetch 层统一拦截。
 
 async function fetchWebPage(url: string, query: string): Promise<{ title: string; url: string; snippet: string }[]> {
-  // P0：SSRF 校验 — 不安全地址直接跳过，不发出请求
-  if (!isSafeFetchUrl(url)) return [];
+  // Wave0-SS: 公网-only 校验 — 不安全地址直接跳过，不发出请求
+  if (!isPublicFetchUrl(url)) return [];
 
   let currentUrl = url;
   let redirectCount = 0;
@@ -109,8 +87,8 @@ async function fetchWebPage(url: string, query: string): Promise<{ title: string
         } catch {
           return [];
         }
-        // 校验重定向目标
-        if (!isSafeFetchUrl(nextUrl)) {
+        // Wave0-SS: 重定向目标同样走公网-only 校验
+        if (!isPublicFetchUrl(nextUrl)) {
           return [];
         }
         currentUrl = nextUrl;

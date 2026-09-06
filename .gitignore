@@ -57,9 +57,6 @@ pack_*.log
 /src/data/
 
 
-# Aether 2.0 build artifacts (from bundle build)
-build/lib/
-build/static/
-build/worker.js
-.idea/
+# release artifacts (not committed - uploaded to GitHub Release)
+dist_release/
 

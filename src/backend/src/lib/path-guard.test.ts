@@ -132,3 +132,44 @@ describe('path-guard ・ symlink/junction 逃逸防护 (PATH-001)', () => {
     assert.equal(isPathSafe('C:/workspace/app/file.ts', ['C:/workspace']), true);
   });
 });
+
+describe('path-guard ・ Unix 敏感段修复 (Wave0-PG)', () => {
+  it('REGRESSION-FIX: /usr/bin 段必须被拒绝（原实现 split 后段名无斜杠，/usr/bin 永远不匹配）', () => {
+    const r = checkPathSafe('/usr/bin/env', ['/']);
+    assert.equal(r.ok, false, '/usr/bin 属于系统目录，必须拒绝（win32 下按段名/usr+bin 相邻对同理拦截）');
+  });
+
+  it('REGRESSION-FIX: /etc 段必须被拒绝（不再依赖带斜杠字符串匹配）', () => {
+    const r = checkPathSafe('/etc/passwd', ['/']);
+    assert.equal(r.ok, false);
+  });
+
+  it('非 bin 顶层段（如 bin-tools）不受影响，避免误伤', () => {
+    if (process.platform === 'win32') {
+      assert.equal(isPathSafe('C:/bin-tools/legit/x', ['C:/']), true);
+    } else {
+      assert.equal(isPathSafe('/bin-tools/legit/x', ['/']), true);
+    }
+  });
+
+  it('项目内 bin 目录（C:/project/bin）不误伤（仅 usr/bin 或 Unix 顶层 /bin 敏感）', () => {
+    assert.equal(isPathSafe('C:/workspace/bin/tools', ['C:/workspace']), true);
+  });
+
+  it('isPathInAllowedDirs 走 physical path（junction 指向外部仍拒绝）', () => {
+    if (process.platform !== 'win32') return;
+    let base: string | null = null;
+    try {
+      base = mkdtempSync(join(tmpdir(), 'pg-ina-'));
+      const allowed = join(base, 'safe');
+      const secret = join(base, 'secret');
+      mkdirSync(allowed, { recursive: true });
+      mkdirSync(secret, { recursive: true });
+      const link = join(allowed, 'link');
+      try { symlinkSync(secret, link, 'junction'); } catch { return; }
+      assert.equal(isPathInAllowedDirs(join(link, 'x.txt'), [allowed]), false, 'isPathInAllowedDirs 必须使用 physical path');
+    } finally {
+      if (base) { try { rmSync(base, { recursive: true, force: true }); } catch { /* ignore */ } }
+    }
+  });
+});

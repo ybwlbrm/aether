@@ -3,9 +3,10 @@ import { create } from 'zustand';
 
 /**
  * Activity Store — Event-driven Agent Activity Stream 的前端状态层。
- * - 单一事件源：eventsByConv[convId] 按 seq 有序
+ * - 单一事件源：eventsByRun[runId] 按 seq 有序
  * - appendEvent 按 seq 去重追加（SSE 实时 + 回放共用）
  * - 投影函数（纯计算）：消息列表 / Activity Stream / 任务进度
+ * - runsByConversation: 聚合索引（conversation 不再作为事件事实源）
  */
 
 export interface TaskProgressState {
@@ -44,33 +45,66 @@ export interface TaskCard {
   plan?: string;
 }
 
-/** 增量投影缓存：每个会话的 TaskCard 状态 + 最后处理的 seq */
+/** 增量投影缓存：每个 run 的 TaskCard 状态 + 最后处理的 seq */
 interface TaskCardCacheEntry {
   card: TaskCard | null;
   lastProcessedSeq: number;
 }
 
-interface ActivityState {
-  eventsByConv: Record<string, AgentEventEnvelope[]>;
-  /** seq 游标（用于回放增量 catch-up） */
-  cursorByConv: Record<string, number>;
-  /** TaskCard 增量投影缓存 */
-  taskCardCache: Record<string, TaskCardCacheEntry>;
+/** Run 元数据（用于聚合索引与调试） */
+export interface RunMeta {
+  runId: string;
+  conversationId: string;
+  taskId: string;
+  sessionId: string;
+  startedAt: string;
+  endedAt?: string;
+  status: 'running' | 'completed' | 'failed' | 'cancelled';
+  endReason?: string;
+}
 
+/** 推理缓存：每个 run 下按 agentId 隔离的 reasoning 累积 */
+interface ReasoningCacheEntry {
+  byAgent: Map<string, string>;
+  lastProcessedSeq: number;
+}
+
+interface ActivityState {
+  // 核心状态：按 runId 索引
+  eventsByRun: Record<string, AgentEventEnvelope[]>;
+  cursorByRun: Record<string, number>;
+  taskCardCache: Record<string, TaskCardCacheEntry>;
+  reasoningCache: Record<string, ReasoningCacheEntry>;
+  runMetaById: Record<string, RunMeta>;
+  runsByConversation: Record<string, string[]>; // 聚合索引：convId -> runId[]
+
+  // 核心操作
   appendEvent: (convId: string, event: AgentEventEnvelope) => void;
   appendEvents: (convId: string, events: AgentEventEnvelope[]) => void;
   replaceEvents: (convId: string, events: AgentEventEnvelope[]) => void;
   clearConv: (convId: string) => void;
+  clearRun: (runId: string) => void;
+
+  // 读取接口（保留 conv 便捷方法，内部按 run 聚合）
   getEvents: (convId: string) => AgentEventEnvelope[];
+  getEventsByRun: (runId: string) => AgentEventEnvelope[];
   getLastSeq: (convId: string) => number;
-  /** 投影：Activity Stream 条目列表 */
+  getLastSeqByRun: (runId: string) => number;
+  getRunsForConversation: (convId: string) => string[];
+  getRunMeta: (runId: string) => RunMeta | undefined;
+
+  // 投影：Activity Stream 条目列表
   projectActivity: (convId: string) => AgentEventEnvelope[];
-  /** 投影：任务进度 */
+  projectActivityByRun: (runId: string) => AgentEventEnvelope[];
+  // 投影：任务进度
   projectTaskProgress: (convId: string) => TaskProgressState | null;
-  /** 投影：最终回答文本（agent.message.delta 累积，按 agentId 分） */
+  projectTaskProgressByRun: (runId: string) => TaskProgressState | null;
+  // 投影：最终回答文本（agent.message.delta 累积，按 agentId 分）
   projectReplies: (convId: string) => Map<string, string>;
-  /** 投影：任务进度卡（task 生命周期 + 步骤链 + 流式思考 + Agent 输出） */
+  projectRepliesByRun: (runId: string) => Map<string, string>;
+  // 投影：任务进度卡（task 生命周期 + 步骤链 + 流式思考 + Agent 输出）
   projectTaskCard: (convId: string) => TaskCard | null;
+  projectTaskCardByRun: (runId: string) => TaskCard | null;
 }
 
 function sortBySeq(events: AgentEventEnvelope[]): AgentEventEnvelope[] {
@@ -86,82 +120,356 @@ export function getEventIdentity(ev: AgentEventEnvelope): string {
   return ev.eventId || `${ev.sessionId}::${ev.taskId}::${ev.seq}`;
 }
 
+/**
+ * 从 envelope 推导 runKey。
+ * 优先使用 envelope.runId（v2 协议）；v1 协议用 sessionId+taskId 组合生成稳定 run key。
+ */
+function getRunKey(ev: AgentEventEnvelope): string {
+  // v2 协议有 runId 字段（通过 metadata 或扩展字段）
+  const runId = (ev as any).runId;
+  if (runId && typeof runId === 'string') {
+    return runId;
+  }
+  // v1 兼容：用 sessionId + taskId 组合
+  return `${ev.sessionId}:${ev.taskId}`;
+}
+
+/**
+ * 从 envelope 推导 conversationId（用于维护 runsByConversation 索引）
+ */
+function getConversationId(ev: AgentEventEnvelope): string {
+  return ev.sessionId;
+}
+
 export const useActivityStore = create<ActivityState>((set, get) => ({
-  eventsByConv: {},
-  cursorByConv: {},
+  eventsByRun: {},
+  cursorByRun: {},
   taskCardCache: {},
+  reasoningCache: {},
+  runMetaById: {},
+  runsByConversation: {},
 
   appendEvent: (convId, event) => {
-    const list = get().eventsByConv[convId] ?? [];
+    const runKey = getRunKey(event);
+    const list = get().eventsByRun[runKey] ?? [];
     // P0-08/EVT-003：去重身份统一走 getEventIdentity（eventId 优先，回退 sessionId+taskId+seq）
     const identity = getEventIdentity(event);
     const isDup = list.some(e => getEventIdentity(e) === identity);
     if (isDup) return;
     list.push(event);
     const sorted = sortBySeq(list);
-    set(s => ({
-      eventsByConv: { ...s.eventsByConv, [convId]: sorted },
-      cursorByConv: { ...s.cursorByConv, [convId]: Math.max(s.cursorByConv[convId] ?? 0, event.seq) },
-      taskCardCache: { ...s.taskCardCache, [convId]: { ...s.taskCardCache[convId], lastProcessedSeq: -1 } },
-    }));
+    const maxSeq = sorted.length > 0 ? sorted[sorted.length - 1].seq : (get().cursorByRun[runKey] ?? 0);
+
+    set(s => {
+      // 更新 runsByConversation 聚合索引
+      const runs = s.runsByConversation[convId] ?? [];
+      const runExists = runs.includes(runKey);
+      const newRuns = runExists ? runs : [...runs, runKey];
+
+      // 更新 runMeta
+      const existingMeta = s.runMetaById[runKey];
+      const newMeta: RunMeta = existingMeta ?? {
+        runId: runKey,
+        conversationId: convId,
+        taskId: event.taskId,
+        sessionId: event.sessionId,
+        startedAt: event.timestamp,
+        status: 'running',
+      };
+      // 如果是任务边界事件，更新结束状态
+      if (event.eventType === 'task.completed' || event.eventType === 'task.failed' || event.eventType === 'task.cancelled') {
+        newMeta.status = event.eventType === 'task.failed' ? 'failed' : event.eventType === 'task.cancelled' ? 'cancelled' : 'completed';
+        newMeta.endedAt = event.timestamp;
+        newMeta.endReason = event.endReason;
+      }
+
+      return {
+        eventsByRun: { ...s.eventsByRun, [runKey]: sorted },
+        cursorByRun: { ...s.cursorByRun, [runKey]: maxSeq },
+        taskCardCache: { ...s.taskCardCache, [runKey]: { ...s.taskCardCache[runKey], lastProcessedSeq: -1 } },
+        reasoningCache: { ...s.reasoningCache, [runKey]: { ...s.reasoningCache[runKey], lastProcessedSeq: -1 } },
+        runMetaById: { ...s.runMetaById, [runKey]: newMeta },
+        runsByConversation: { ...s.runsByConversation, [convId]: newRuns },
+      };
+    });
   },
 
   appendEvents: (convId, events) => {
     if (events.length === 0) return;
-    const list = get().eventsByConv[convId] ?? [];
-    // P0-17/EVT-003：统一身份（与 appendEvent 同一函数），杜绝双入口键不一致
-    const known = new Set(list.map(e => getEventIdentity(e)));
+    // 按 runKey 分组处理
+    const byRun = new Map<string, AgentEventEnvelope[]>();
     for (const ev of events) {
-      const key = getEventIdentity(ev);
-      if (known.has(key)) continue;
-      known.add(key);
-      list.push(ev);
+      const runKey = getRunKey(ev);
+      const arr = byRun.get(runKey) ?? [];
+      arr.push(ev);
+      byRun.set(runKey, arr);
     }
-    const sorted = sortBySeq(list);
-    const maxSeq = sorted.length > 0 ? sorted[sorted.length - 1].seq : (get().cursorByConv[convId] ?? 0);
-    set(s => ({
-      eventsByConv: { ...s.eventsByConv, [convId]: sorted },
-      cursorByConv: { ...s.cursorByConv, [convId]: maxSeq },
-      taskCardCache: { ...s.taskCardCache, [convId]: { ...s.taskCardCache[convId], lastProcessedSeq: -1 } },
-    }));
+
+    set(s => {
+      const newEventsByRun = { ...s.eventsByRun };
+      const newCursorByRun = { ...s.cursorByRun };
+      const newTaskCardCache = { ...s.taskCardCache };
+      const newReasoningCache = { ...s.reasoningCache };
+      const newRunMetaById = { ...s.runMetaById };
+      const newRunsByConversation = { ...s.runsByConversation };
+
+      for (const [runKey, runEvents] of byRun) {
+        const list = newEventsByRun[runKey] ?? [];
+        const known = new Set(list.map(e => getEventIdentity(e)));
+        for (const ev of runEvents) {
+          const key = getEventIdentity(ev);
+          if (known.has(key)) continue;
+          known.add(key);
+          list.push(ev);
+        }
+        const sorted = sortBySeq(list);
+        const maxSeq = sorted.length > 0 ? sorted[sorted.length - 1].seq : (newCursorByRun[runKey] ?? 0);
+
+        newEventsByRun[runKey] = sorted;
+        newCursorByRun[runKey] = maxSeq;
+        newTaskCardCache[runKey] = { ...newTaskCardCache[runKey], lastProcessedSeq: -1 };
+        newReasoningCache[runKey] = { ...newReasoningCache[runKey], lastProcessedSeq: -1 };
+
+        // 更新 runsByConversation 聚合索引
+        const runs = newRunsByConversation[convId] ?? [];
+        if (!runs.includes(runKey)) {
+          newRunsByConversation[convId] = [...runs, runKey];
+        }
+
+        // 更新 runMeta
+        const existingMeta = newRunMetaById[runKey];
+        const firstEv = runEvents[0];
+        const newMeta: RunMeta = existingMeta ?? {
+          runId: runKey,
+          conversationId: convId,
+          taskId: firstEv.taskId,
+          sessionId: firstEv.sessionId,
+          startedAt: firstEv.timestamp,
+          status: 'running',
+        };
+        // 检查是否有任务边界事件
+        for (const ev of runEvents) {
+          if (ev.eventType === 'task.completed' || ev.eventType === 'task.failed' || ev.eventType === 'task.cancelled') {
+            newMeta.status = ev.eventType === 'task.failed' ? 'failed' : ev.eventType === 'task.cancelled' ? 'cancelled' : 'completed';
+            newMeta.endedAt = ev.timestamp;
+            newMeta.endReason = ev.endReason;
+            break;
+          }
+        }
+        newRunMetaById[runKey] = newMeta;
+      }
+
+      return {
+        eventsByRun: newEventsByRun,
+        cursorByRun: newCursorByRun,
+        taskCardCache: newTaskCardCache,
+        reasoningCache: newReasoningCache,
+        runMetaById: newRunMetaById,
+        runsByConversation: newRunsByConversation,
+      };
+    });
   },
 
   replaceEvents: (convId, events) => {
-    const sorted = sortBySeq(events);
-    const maxSeq = sorted.length > 0 ? sorted[sorted.length - 1].seq : 0;
-    set(s => ({
-      eventsByConv: { ...s.eventsByConv, [convId]: sorted },
-      cursorByConv: { ...s.cursorByConv, [convId]: maxSeq },
-      taskCardCache: { ...s.taskCardCache, [convId]: { card: null, lastProcessedSeq: -1 } },
-    }));
+    // 按 runKey 分组
+    const byRun = new Map<string, AgentEventEnvelope[]>();
+    for (const ev of events) {
+      const runKey = getRunKey(ev);
+      const arr = byRun.get(runKey) ?? [];
+      arr.push(ev);
+      byRun.set(runKey, arr);
+    }
+
+    set(s => {
+      // 先清除该 conversation 下所有旧 run 的数据
+      const oldRunIds = s.runsByConversation[convId] ?? [];
+      const newEventsByRun = { ...s.eventsByRun };
+      const newCursorByRun = { ...s.cursorByRun };
+      const newTaskCardCache = { ...s.taskCardCache };
+      const newReasoningCache = { ...s.reasoningCache };
+      const newRunMetaById = { ...s.runMetaById };
+
+      for (const runId of oldRunIds) {
+        delete newEventsByRun[runId];
+        delete newCursorByRun[runId];
+        delete newTaskCardCache[runId];
+        delete newReasoningCache[runId];
+        delete newRunMetaById[runId];
+      }
+
+      const newRunsByConversation = { ...s.runsByConversation };
+      // 重置该 conversation 的 runs 列表
+      newRunsByConversation[convId] = [];
+
+      for (const [runKey, runEvents] of byRun) {
+        const sorted = sortBySeq(runEvents);
+        const maxSeq = sorted.length > 0 ? sorted[sorted.length - 1].seq : 0;
+
+        newEventsByRun[runKey] = sorted;
+        newCursorByRun[runKey] = maxSeq;
+        newTaskCardCache[runKey] = { card: null, lastProcessedSeq: -1 };
+        newReasoningCache[runKey] = { byAgent: new Map(), lastProcessedSeq: -1 };
+
+        // 更新 runsByConversation 聚合索引
+        const runs = newRunsByConversation[convId] ?? [];
+        if (!runs.includes(runKey)) {
+          newRunsByConversation[convId] = [...runs, runKey];
+        }
+
+        // 更新 runMeta
+        const firstEv = runEvents[0];
+        const newMeta: RunMeta = {
+          runId: runKey,
+          conversationId: convId,
+          taskId: firstEv.taskId,
+          sessionId: firstEv.sessionId,
+          startedAt: firstEv.timestamp,
+          status: 'running',
+        };
+        for (const ev of runEvents) {
+          if (ev.eventType === 'task.completed' || ev.eventType === 'task.failed' || ev.eventType === 'task.cancelled') {
+            newMeta.status = ev.eventType === 'task.failed' ? 'failed' : ev.eventType === 'task.cancelled' ? 'cancelled' : 'completed';
+            newMeta.endedAt = ev.timestamp;
+            newMeta.endReason = ev.endReason;
+            break;
+          }
+        }
+        newRunMetaById[runKey] = newMeta;
+      }
+
+      return {
+        eventsByRun: newEventsByRun,
+        cursorByRun: newCursorByRun,
+        taskCardCache: newTaskCardCache,
+        reasoningCache: newReasoningCache,
+        runMetaById: newRunMetaById,
+        runsByConversation: newRunsByConversation,
+      };
+    });
   },
 
   clearConv: (convId) => {
     set(s => {
-      const { [convId]: _drop, ...rest } = s.eventsByConv;
-      const cursors = { ...s.cursorByConv };
-      delete cursors[convId];
-      const cache = { ...s.taskCardCache };
-      delete cache[convId];
-      return { eventsByConv: rest, cursorByConv: cursors, taskCardCache: cache };
+      const runIds = s.runsByConversation[convId] ?? [];
+      const newEventsByRun = { ...s.eventsByRun };
+      const newCursorByRun = { ...s.cursorByRun };
+      const newTaskCardCache = { ...s.taskCardCache };
+      const newReasoningCache = { ...s.reasoningCache };
+      const newRunMetaById = { ...s.runMetaById };
+
+      for (const runId of runIds) {
+        delete newEventsByRun[runId];
+        delete newCursorByRun[runId];
+        delete newTaskCardCache[runId];
+        delete newReasoningCache[runId];
+        delete newRunMetaById[runId];
+      }
+
+      const newRunsByConversation = { ...s.runsByConversation };
+      delete newRunsByConversation[convId];
+
+      return {
+        eventsByRun: newEventsByRun,
+        cursorByRun: newCursorByRun,
+        taskCardCache: newTaskCardCache,
+        reasoningCache: newReasoningCache,
+        runMetaById: newRunMetaById,
+        runsByConversation: newRunsByConversation,
+      };
     });
   },
 
-  getEvents: (convId) => get().eventsByConv[convId] ?? [],
-  getLastSeq: (convId) => get().cursorByConv[convId] ?? 0,
+  clearRun: (runId) => {
+    set(s => {
+      const newEventsByRun = { ...s.eventsByRun };
+      const newCursorByRun = { ...s.cursorByRun };
+      const newTaskCardCache = { ...s.taskCardCache };
+      const newReasoningCache = { ...s.reasoningCache };
+      const newRunMetaById = { ...s.runMetaById };
+
+      delete newEventsByRun[runId];
+      delete newCursorByRun[runId];
+      delete newTaskCardCache[runId];
+      delete newReasoningCache[runId];
+      delete newRunMetaById[runId];
+
+      // 从 runsByConversation 中移除
+      const newRunsByConversation = { ...s.runsByConversation };
+      for (const [convId, runs] of Object.entries(newRunsByConversation)) {
+        newRunsByConversation[convId] = runs.filter(r => r !== runId);
+      }
+
+      return {
+        eventsByRun: newEventsByRun,
+        cursorByRun: newCursorByRun,
+        taskCardCache: newTaskCardCache,
+        reasoningCache: newReasoningCache,
+        runMetaById: newRunMetaById,
+        runsByConversation: newRunsByConversation,
+      };
+    });
+  },
+
+  getEvents: (convId) => {
+    const runIds = get().runsByConversation[convId] ?? [];
+    const allEvents: AgentEventEnvelope[] = [];
+    for (const runId of runIds) {
+      allEvents.push(...(get().eventsByRun[runId] ?? []));
+    }
+    return sortBySeq(allEvents);
+  },
+
+  getEventsByRun: (runId) => get().eventsByRun[runId] ?? [],
+
+  getLastSeq: (convId) => {
+    const runIds = get().runsByConversation[convId] ?? [];
+    let maxSeq = 0;
+    for (const runId of runIds) {
+      maxSeq = Math.max(maxSeq, get().cursorByRun[runId] ?? 0);
+    }
+    return maxSeq;
+  },
+
+  getLastSeqByRun: (runId) => get().cursorByRun[runId] ?? 0,
+
+  getRunsForConversation: (convId) => get().runsByConversation[convId] ?? [],
+
+  getRunMeta: (runId) => get().runMetaById[runId],
 
   projectActivity: (convId) => {
-    return get().eventsByConv[convId] ?? [];
+    return get().getEvents(convId);
+  },
+
+  projectActivityByRun: (runId) => {
+    return get().eventsByRun[runId] ?? [];
   },
 
   projectTaskProgress: (convId) => {
-    return projectTaskProgress(get().eventsByConv[convId] ?? []);
+    const events = get().getEvents(convId);
+    return projectTaskProgress(events);
+  },
+
+  projectTaskProgressByRun: (runId) => {
+    const events = get().eventsByRun[runId] ?? [];
+    return projectTaskProgress(events);
   },
 
   projectReplies: (convId) => {
-    const events = get().eventsByConv[convId] ?? [];
+    const events = get().getEvents(convId);
     const replies = new Map<string, string>();
-    // 按 agentId 累积最终回答；agent.message.completed 时替换为完整值
+    for (const ev of events) {
+      if (ev.eventType === 'agent.message.delta' && typeof ev.content === 'string') {
+        replies.set(ev.agentId, (replies.get(ev.agentId) ?? '') + ev.content);
+      } else if (ev.eventType === 'agent.message.completed') {
+        replies.set(ev.agentId, ev.content ?? '');
+      }
+    }
+    return replies;
+  },
+
+  projectRepliesByRun: (runId) => {
+    const events = get().eventsByRun[runId] ?? [];
+    const replies = new Map<string, string>();
     for (const ev of events) {
       if (ev.eventType === 'agent.message.delta' && typeof ev.content === 'string') {
         replies.set(ev.agentId, (replies.get(ev.agentId) ?? '') + ev.content);
@@ -173,10 +481,28 @@ export const useActivityStore = create<ActivityState>((set, get) => ({
   },
 
   projectTaskCard: (convId) => {
-    const events = get().eventsByConv[convId] ?? [];
+    const events = get().getEvents(convId);
     if (events.length === 0) return null;
 
-    const cache = get().taskCardCache[convId];
+    // 找到最新的 task.started 所在的 run
+    let latestRunId: string | null = null;
+    let latestStartedSeq = -1;
+    for (const ev of events) {
+      if (ev.eventType === 'task.started' && ev.seq > latestStartedSeq) {
+        latestStartedSeq = ev.seq;
+        latestRunId = getRunKey(ev);
+      }
+    }
+    if (!latestRunId) return null;
+
+    return get().projectTaskCardByRun(latestRunId);
+  },
+
+  projectTaskCardByRun: (runId) => {
+    const events = get().eventsByRun[runId] ?? [];
+    if (events.length === 0) return null;
+
+    const cache = get().taskCardCache[runId];
     const lastProcessedSeq = cache?.lastProcessedSeq ?? -1;
     const maxSeq = events.length > 0 ? events[events.length - 1].seq : -1;
 
@@ -337,7 +663,7 @@ export const useActivityStore = create<ActivityState>((set, get) => ({
 
     if (cardChanged) {
       set(s => ({
-        taskCardCache: { ...s.taskCardCache, [convId]: { card: newCard, lastProcessedSeq: maxSeq } },
+        taskCardCache: { ...s.taskCardCache, [runId]: { card: newCard, lastProcessedSeq: maxSeq } },
       }));
     }
 

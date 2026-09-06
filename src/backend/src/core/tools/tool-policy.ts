@@ -10,6 +10,9 @@
  * - 新代码应使用 PolicyEngine（工具名以 `tool:<name>` capability 表达）
  * - 本类仅在 ToolExecutor 内保留为**可选**兼容检查（toolExecutorOptions.policyEngine 注入时启用）
  * - 计划在下一个大版本移除
+ * 
+ * 权限优先级（P0-06/P1-38）：Explicit Deny > Capability Deny > Approval > Explicit Allow > Default Deny
+ * 注意：本类的 "First match wins" 仅在 legacy 模式下生效；PolicyEngine 优先级以 decision.allowed 为准。
  */
 
 import type { Capability, CapabilitySet } from '../permissions/index.js';
@@ -27,6 +30,18 @@ export interface ToolPolicyRule {
 }
 
 /**
+ * ToolPolicy constructor options.
+ */
+export interface ToolPolicyOptions {
+  /** Policy rules (evaluated in order, first match wins) */
+  rules?: ToolPolicyRule[];
+  /** Capabilities granted to the current context */
+  grantedCapabilities?: CapabilitySet;
+  /** P1-37: Default action when no rule matches. Default: 'allow' (legacy behavior). */
+  defaultAction?: 'allow' | 'deny';
+}
+
+/**
  * Evaluation result from the policy engine.
  */
 export interface PolicyEvaluation {
@@ -40,21 +55,22 @@ export interface PolicyEvaluation {
  * ToolPolicy — Evaluates tool execution against a set of rules.
  *
  * Rules are evaluated in order. First match wins.
- * Default behavior: allow unless a deny/require-approval rule matches.
+ * Default behavior: configurable via defaultAction (legacy default: 'allow').
  */
 export class ToolPolicy {
   #rules: ToolPolicyRule[];
   #grantedCapabilities: CapabilitySet;
+  #defaultAction: 'allow' | 'deny';
 
   /**
    * Creates a new ToolPolicy.
    *
-   * @param rules - Policy rules (evaluated in order, first match wins)
-   * @param grantedCapabilities - Capabilities granted to the current context
+   * @param options - Policy options including rules, grantedCapabilities, and defaultAction
    */
-  constructor(rules: ToolPolicyRule[] = [], grantedCapabilities?: CapabilitySet) {
-    this.#rules = [...rules];
-    this.#grantedCapabilities = grantedCapabilities ?? new Set() as CapabilitySet;
+  constructor(options: ToolPolicyOptions = {}) {
+    this.#rules = [...(options.rules ?? [])];
+    this.#grantedCapabilities = options.grantedCapabilities ?? new Set() as CapabilitySet;
+    this.#defaultAction = options.defaultAction ?? 'allow';
   }
 
   /**
@@ -81,8 +97,8 @@ export class ToolPolicy {
         };
       }
     }
-    // Default: allow
-    return { action: 'allow' };
+    // Default: use configured defaultAction
+    return { action: this.#defaultAction };
   }
 
   /**

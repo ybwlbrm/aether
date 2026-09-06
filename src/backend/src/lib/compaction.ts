@@ -1,4 +1,5 @@
 import { isSafeFetchUrl } from './safe-fetch.js';
+import { buildModelRuntime, type ModelRequest } from '../core/models/index.js';
 
 /**
  * 上下文压缩（compaction）— 参考 DeepSeek Harness `packages/compaction`。
@@ -39,43 +40,42 @@ export async function compactRemovedHistory(
   // 超出 24k 字符的老历史只压缩样本（摘要本身就要受控大小）
   const sample = transcript.length > 24000 ? transcript.slice(-24000) : transcript;
 
-  const reqBody: Record<string, unknown> = {
+  // 纵深防御：显式校验 baseUrl（虽受控但防配置篡改/注入）
+  if (!isSafeFetchUrl(baseUrl)) return null;
+
+  const providerConfig = {
+    id: 'compaction',
+    name: 'compaction',
+    type: 'openai',
+    apiKey,
+    baseUrl,
+    defaultModel: model,
+    models: [model],
+    capabilities: ['text'],
+  };
+  const runtime = buildModelRuntime(providerConfig);
+
+  const request: ModelRequest = {
+    provider: providerConfig.id,
     model,
+    systemPrompt: '你是会话压缩器。把以下对话历史压缩成一个简明、信息密度高的中文摘要（保留用户意图、关键决策、重要结论、文件路径与工具结果要点）。输出纯文本摘要，不要加标题框、不要复述原文。',
     messages: [
-      {
-        role: 'system',
-        content: '你是会话压缩器。把以下对话历史压缩成一个简明、信息密度高的中文摘要（保留用户意图、关键决策、重要结论、文件路径与工具结果要点）。输出纯文本摘要，不要加标题框、不要复述原文。',
-      },
       {
         role: 'user',
         content: `以下是需要压缩的旧对话历史：\n${sample}\n\n当前对话主题参考：${recentContext.slice(0, 300)}`,
       },
     ],
-    stream: false,
-    max_tokens: 1500,
+    maxTokens: 1500,
     temperature: 0.3,
+    signal: signal ?? AbortSignal.timeout(30000),
   };
 
-  let res: Response;
   try {
-    // 纵深防御：显式校验 baseUrl（虽受控但防配置篡改/注入）
-    if (!isSafeFetchUrl(baseUrl)) return null;
-    res = await fetch(`${baseUrl.replace(/\/$/, '')}/chat/completions`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
-      body: JSON.stringify(reqBody),
-      signal: signal ?? AbortSignal.timeout(30000),
-    });
-  } catch {
-    return null; // 网络失败静默回退
-  }
-  if (!res.ok) return null;
-  try {
-    const data = await res.json() as { choices?: Array<{ message?: { content?: string } }> };
-    const text = (data.choices?.[0]?.message?.content ?? '').trim();
+    const response = await runtime.complete(request);
+    const text = response.content.trim();
     return text.length > 0 ? text : null;
   } catch {
-    return null;
+    return null; // 网络失败静默回退
   }
 }
 

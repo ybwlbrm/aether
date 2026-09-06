@@ -6,6 +6,14 @@
  *
  * The DB-backed implementation lands in a later wave; this module is
  * transport-agnostic pure TypeScript with zero new dependencies.
+ * 
+ * 权限优先级（P0-06/P1-38，与 PolicyEngine/ToolPolicy 注释对齐）：
+ * Explicit Deny > Capability Deny > Approval > Explicit Allow > Default Deny
+ * 
+ * 注意：本模块的 ApprovalManager 与 lib/approvals-center.ts 协作：
+ * - approvals-center 为唯一审批入口（pending Map + create/decide/list）
+ * - 本模块的 createApproval 仅提供 token/promise/超时机制
+ * - 唯一 Approval 生命周期 = approvals-center + core createApproval token
  */
 
 import { randomUUID } from 'node:crypto';

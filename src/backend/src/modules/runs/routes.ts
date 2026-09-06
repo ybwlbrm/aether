@@ -14,6 +14,8 @@ import type { SQLJsDatabase } from 'drizzle-orm/sql-js';
 import * as schema from '../../db/schema/index.js';
 import { AppError } from '@pacc/shared';
 import { randomUUID } from 'node:crypto';
+// P0-01/P0-02: Run-scoped cancellation registry
+import { runCancellationRegistry } from '../../lib/run-cancellation-registry.js';
 
 type Db = SQLJsDatabase<typeof schema>;
 type RunRow = typeof runs.$inferSelect;
@@ -171,11 +173,13 @@ export function registerRunRoutes(app: FastifyInstance, config: BackendConfig): 
 
   // 通用状态转移端点（start / pause / resume / cancel）：
   // run 不存在 → 404 RUN_NOT_FOUND；当前状态不在 allowed 内（含终态吸收）→ 409 INVALID_TRANSITION
+  // after 回调（Wave0-CX）：状态转移成功后执行（如 cancel 时真正 abort 执行流）
   const registerTransition = (
     path: string,
     action: string,
     allowed: readonly RunStatus[],
     patch: (now: string) => Partial<RunInsert>,
+    after?: (runId: string) => void,
   ) => {
     app.post(path, {
       schema: {
@@ -194,6 +198,7 @@ export function registerRunRoutes(app: FastifyInstance, config: BackendConfig): 
       saveDb(config);
       const updated = db.select().from(runs).where(eq(runs.id, runId)).get();
       if (!updated) return reply.code(404).send({ error: runNotFound(runId) });
+      after?.(runId);
       return rowToJson(updated);
     });
   };
@@ -201,7 +206,10 @@ export function registerRunRoutes(app: FastifyInstance, config: BackendConfig): 
   registerTransition('/api/runs/:runId/start', 'start', ['created'], (now) => ({ status: 'running', startedAt: now }));
   registerTransition('/api/runs/:runId/pause', 'pause', ['running'], () => ({ status: 'waiting' }));
   registerTransition('/api/runs/:runId/resume', 'resume', ['waiting'], () => ({ status: 'running' }));
-  registerTransition('/api/runs/:runId/cancel', 'cancel', ['running', 'waiting'], (now) => ({ status: 'cancelled', completedAt: now, endReason: 'cancelled' }));
+  // Wave0-CX: cancel 除状态机转移外，真正 abort 执行流（runCancellationRegistry，幂等）
+  registerTransition('/api/runs/:runId/cancel', 'cancel', ['running', 'waiting'], (now) => ({ status: 'cancelled', completedAt: now, endReason: 'cancelled' }), (runId) => {
+    runCancellationRegistry.cancel(runId);
+  });
 
   // GET /api/runs/:runId — 获取单个 Run
   app.get('/api/runs/:runId', {

@@ -10,7 +10,7 @@ import { createEventBus } from '../../lib/event-bus.js';
 import { getSyncClient } from '../../lib/supabase-sync.js';
 import { pushDirective, drainDirectives } from '../../lib/inbox.js';
 import { handleSendMessage } from './chat-handler.js';
-import { activeRequests } from './state.js';
+import { runCancellationRegistry } from '../../lib/run-cancellation-registry.js';
 import { deleteConversationCascade } from './delete-conversation.js';
 
 /**
@@ -81,11 +81,12 @@ export function registerConversationRoutes(app: FastifyInstance, config: Backend
     },
   }, async (request) => {
     const { id } = request.params as { id: string };
-    const inMemory = activeRequests.has(id);
+    const activeRunIds = runCancellationRegistry.runIdsForConversation(id);
+    const inMemory = activeRunIds.length > 0;
     // 如果内存中有活跃请求，确保 DB 状态同步
     if (inMemory) {
       db.update(conversations).set({ generationStatus: 'generating', updatedAt: new Date().toISOString() }).where(eq(conversations.id, id)).run();
-      return { generating: true, generationStatus: 'generating' };
+      return { generating: true, generationStatus: 'generating', activeRunIds };
     }
     // 内存中没有时，检查 DB 持久化状态
     const conv = db.select().from(conversations).where(eq(conversations.id, id)).get();
@@ -185,10 +186,9 @@ export function registerConversationRoutes(app: FastifyInstance, config: Backend
   }, async (request) => {
     const { id } = request.params as { id: string };
     // P0-21: 先中止该对话仍在进行的生成，避免 SSE 续写已删除的 conversation
-    const controller = activeRequests.get(id);
-    if (controller) {
-      controller.abort();
-      activeRequests.delete(id);
+    const cancelledRunIds = runCancellationRegistry.cancelConversation(id);
+    if (cancelledRunIds.length > 0) {
+      console.log(`[Conversations] Cancelled ${cancelledRunIds.length} run(s) for conversation ${id} before deletion`);
     }
     // P0-21: 按 FK 依赖顺序级联删除全部关联行（tasks/events/activity_events/messages/runs → conversations），
     // 否则 sql.js 抛 FOREIGN KEY constraint failed
@@ -215,22 +215,22 @@ export function registerConversationRoutes(app: FastifyInstance, config: Backend
     },
   }, async (request) => {
     const { id } = request.params as { id: string };
-    const controller = activeRequests.get(id);
-    if (controller) {
-      controller.abort();
-      activeRequests.delete(id);
+    const cancelledRunIds = runCancellationRegistry.cancelConversation(id);
+    if (cancelledRunIds.length > 0) {
       // 统一协议：task.cancelled（落库，刷新后 Activity Stream 可见）
       try {
         const bus = createEventBus(db, undefined, () => saveDb(config));
-        bus.emit(id, 'task.cancelled', {
-          taskId: id,
-          agentId: 'main',
-          agentType: 'conversation',
-          status: 'cancelled',
-          content: '已取消',
-        });
+        for (const runId of cancelledRunIds) {
+          bus.emit(id, 'task.cancelled', {
+            taskId: runId,
+            agentId: 'main',
+            agentType: 'conversation',
+            status: 'cancelled',
+            content: '已取消',
+          });
+        }
       } catch { /* 忽略 cancel 事件落库失败 */ }
-      return { success: true, message: '已取消生成' };
+      return { success: true, message: `已取消 ${cancelledRunIds.length} 个生成任务`, cancelledRunIds };
     }
     return { success: false, message: '没有正在进行的生成' };
   });

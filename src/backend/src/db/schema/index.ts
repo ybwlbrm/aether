@@ -1,4 +1,4 @@
-import { sqliteTable, text, integer } from 'drizzle-orm/sqlite-core';
+import { sqliteTable, text, integer, real } from 'drizzle-orm/sqlite-core';
 
 /** AI Provider 配置表 */
 export const providers = sqliteTable('providers', {
@@ -66,13 +66,17 @@ export const versions = sqliteTable('versions', {
   createdAt: text('created_at').notNull(),
 });
 
-/** 记忆表 — P2-7: 此表当前未使用（记忆实际存储在 JSON 文件 memory.json 中），保留供未来迁移使用 */
+/** 记忆表 — 已在运行时作为唯一事实源（Wave0-MEM） */
 export const memories = sqliteTable('memories', {
   id: text('id').primaryKey(),
   type: text('type', { enum: ['short_term', 'project', 'long_term'] }).notNull(),
   key: text('key').notNull(),
   content: text('content').notNull(),
   tags: text('tags').default('[]'), // JSON array
+  scope: text('scope', { enum: ['user', 'agent', 'session', 'project', 'workspace'] }).default('user'),
+  importance: real('importance').default(0.5),
+  lastUsedAt: text('last_used_at'),
+  expiresAt: text('expires_at'),
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
 });
