@@ -107,6 +107,33 @@ function runNotFound(id: string): { code: string; message: string } {
 export function registerRunRoutes(app: FastifyInstance, config: BackendConfig): void {
   const db = getDb();
 
+  // POST /api/runs/recover — Crash Recovery（P1-16）
+  // 后端/Electron crash 后重新启动时，把遗留的 running/waiting Run 标记为 interrupted。
+  // 无活跃执行进程的 Run 不可能继续，必须进入终态而不是永久卡在 running。
+  app.post('/api/runs/recover', {
+    schema: {
+      description: 'Crash Recovery：把遗留 running/waiting 的 Run 标记为 interrupted',
+      tags: ['runs'],
+    },
+  }, async (_request, reply) => {
+    const stale = db
+      .select()
+      .from(runs)
+      .where(sql`${runs.status} IN ('running', 'waiting')`)
+      .all();
+    const now = new Date().toISOString();
+    let marked = 0;
+    for (const run of stale) {
+      db.update(runs)
+        .set({ status: 'interrupted', completedAt: now, endReason: 'crashed' })
+        .where(eq(runs.id, run.id))
+        .run();
+      marked += 1;
+    }
+    if (marked > 0) saveDb(config);
+    return { recovered: marked, message: marked > 0 ? `已标记 ${marked} 个崩溃遗留 Run 为 interrupted` : '无遗留 Run' };
+  });
+
   // POST /api/runs — 创建 Run（status=created，createdAt=now）
   app.post('/api/runs', {
     schema: {

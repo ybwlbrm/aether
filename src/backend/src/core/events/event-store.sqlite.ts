@@ -21,6 +21,7 @@ import type { EventStore } from './event-store.js';
 import { events } from '../../db/schema/index.js';
 import * as schema from '../../db/schema/index.js';
 import { unpackPackedPayload, type PackedChunk } from './chunk-packer.js';
+import { SEQ_CLAIM_EVENT_TYPE } from './sequence-allocator.db.js';
 
 /** Row shape inferred from the drizzle `events` table definition */
 type EventRow = typeof events.$inferSelect;
@@ -29,9 +30,6 @@ type EventRow = typeof events.$inferSelect;
 function isUniqueViolation(err: unknown): boolean {
   return err instanceof Error && /UNIQUE constraint failed/i.test(err.message);
 }
-
-/** Reserved event_type marker for allocator claim rows (see sequence-allocator.db.ts) */
-const SEQ_CLAIM_EVENT_TYPE = '__seq_claim';
 
 /** Serialize a v2 AgentEvent into the `payload` TEXT column (full envelope) */
 function serializePayload(event: AgentEvent): string {
@@ -172,18 +170,30 @@ export class SqliteEventStore implements EventStore {
     return this.#rowsToEvents(rows);
   }
 
-  /** List events for a runId with seq > afterSeq, optionally limited. */
+  /**
+   * List events for a runId with seq > afterSeq, optionally limited.
+   *
+   * P0-05: filtering happens on the LOGICAL event seq, not the physical row
+   * seq. Phase 1 fetches candidate rows by physical seq (a packed row keeps
+   * its LAST sub-event's seq, so a pack straddling `seq` still qualifies);
+   * phase 2 expands packed rows and filters by logical seq, so sub-events
+   * ≤ seq inside a straddling pack are excluded. The limit counts logical
+   * events and is therefore applied after expansion.
+   */
   async listAfter(runId: string, seq: number, limit?: number): Promise<AgentEvent[]> {
-    const baseQuery = this.db
+    const rows = this.db
       .select()
       .from(events)
       .where(and(eq(events.runId, runId), gt(events.seq, seq)))
-      .orderBy(asc(events.seq));
+      .orderBy(asc(events.seq))
+      .all();
+
+    const expanded = this.#rowsToEvents(rows).filter((e) => e.seq > seq);
 
     if (limit !== undefined && limit > 0) {
-      return this.#rowsToEvents(baseQuery.limit(limit).all());
+      return expanded.slice(0, limit);
     }
-    return this.#rowsToEvents(baseQuery.all());
+    return expanded;
   }
 
   /** Get a single event by runId + eventId. */
@@ -227,6 +237,10 @@ export class SqliteEventStore implements EventStore {
   #rowsToEvents(rows: EventRow[]): AgentEvent[] {
     const result: AgentEvent[] = [];
     for (const row of rows) {
+      // P0-06: skip allocator claim rows. A `__seq_claim` row only reserves
+      // (runId, seq); if a crash happened between allocate() and append, it
+      // has no real payload and must never surface as a ghost pseudo-event.
+      if (row.eventType === SEQ_CLAIM_EVENT_TYPE) continue;
       // Packed row: expand into the original sub-event stream (§16 replay guarantee)
       if (row.packed) {
         const chunks = unpackPackedPayload(row.packed, row.seq);
@@ -252,6 +266,10 @@ export class SqliteEventStore implements EventStore {
 
   /** Parse a single row's payload back into an AgentEvent, or skip on corrupt JSON. */
   #rowToEvent(row: EventRow): AgentEvent | undefined {
+    // P0-06: hide allocator claim rows from single-row readers (get/latest).
+    // A `__seq_claim` row carries payload '{}' — parsing it would fabricate a
+    // payload-less pseudo-event that leaks to the UI / breaks replay.
+    if (row.eventType === SEQ_CLAIM_EVENT_TYPE) return undefined;
     try {
       return JSON.parse(row.payload) as AgentEvent;
     } catch (err) {

@@ -19,11 +19,12 @@ import type { FastifyInstance } from 'fastify';
 import type { BackendConfig } from '../../config/index.js';
 import { getDb } from '../../db/client.js';
 import { events, runs } from '../../db/schema/index.js';
-import { and, eq, gt } from 'drizzle-orm';
+import { and, eq, gt, ne } from 'drizzle-orm';
 import * as schema from '../../db/schema/index.js';
 import type { SQLJsDatabase } from 'drizzle-orm/sql-js';
-import { formatSseEvent } from '../../core/events/index.js';
+import { formatSseEvent, unpackPackedPayload } from '../../core/events/index.js';
 import type { AgentEvent } from '@pacc/shared';
+import { SEQ_CLAIM_EVENT_TYPE } from '../../core/events/sequence-allocator.db.js';
 
 type Db = SQLJsDatabase<typeof schema>;
 
@@ -39,15 +40,54 @@ function toSeq(raw: string | undefined, fallback: number): number {
   return n;
 }
 
-/** Read events with seq > afterSeq (raw v2 payload JSONs) — exported for tests */
+/**
+ * Read events with seq > afterSeq (raw v2 payload JSONs) — exported for tests.
+ *
+ * P0-05: packed rows are expanded into their sub-events and the result is
+ * filtered by LOGICAL seq. Phase 1 fetches candidate rows by physical seq
+ * (a packed row's physical seq = its LAST sub-event seq, so a pack straddling
+ * afterSeq still qualifies); phase 2 keeps only sub-events > afterSeq.
+ */
 export function readEvents(db: Db, runId: string, afterSeq: number): Array<{ seq: number; type: string; payload: string }> {
   const rows = db
-    .select({ seq: events.seq, eventType: events.eventType, payload: events.payload })
+    .select({ seq: events.seq, eventType: events.eventType, payload: events.payload, packed: events.packed })
     .from(events)
-    .where(and(eq(events.runId, runId), gt(events.seq, afterSeq)))
+    .where(and(
+      eq(events.runId, runId),
+      gt(events.seq, afterSeq),
+      // P0-06: exclude allocator claim rows — a `__seq_claim` row is a
+      // placeholder with payload '{}'; it must never be pushed to clients.
+      ne(events.eventType, SEQ_CLAIM_EVENT_TYPE),
+    ))
     .orderBy(events.seq)
     .all();
-  return rows.map((r) => ({ seq: r.seq, type: r.eventType, payload: r.payload }));
+
+  const out: Array<{ seq: number; type: string; payload: string }> = [];
+  for (const row of rows) {
+    if (row.packed) {
+      const chunks = unpackPackedPayload(row.packed, row.seq);
+      for (const chunk of chunks) {
+        if (chunk.seq <= afterSeq) continue;
+        out.push({
+          seq: chunk.seq,
+          type: chunk.type,
+          payload: JSON.stringify({
+            eventId: chunk.eventId,
+            sessionId: runId,
+            runId,
+            timestamp: chunk.timestamp,
+            seq: chunk.seq,
+            type: chunk.type,
+            version: 2,
+            payload: { content: chunk.content ?? '' },
+          } as AgentEvent),
+        });
+      }
+      continue;
+    }
+    out.push({ seq: row.seq, type: row.eventType, payload: row.payload });
+  }
+  return out;
 }
 
 export function registerRunStreamRoutes(app: FastifyInstance, _config: BackendConfig): void {

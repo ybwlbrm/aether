@@ -10,11 +10,11 @@
 import type { FastifyInstance } from 'fastify';
 import type { BackendConfig } from '../../config/index.js';
 import { getDb } from '../../db/client.js';
-import { events, runs } from '../../db/schema/index.js';
-import { and, eq, gt } from 'drizzle-orm';
+import { runs } from '../../db/schema/index.js';
+import { eq } from 'drizzle-orm';
 import * as schema from '../../db/schema/index.js';
 import type { SQLJsDatabase } from 'drizzle-orm/sql-js';
-import { AppError } from '@pacc/shared';
+import { SqliteEventStore } from '../../core/events/index.js';
 
 type Db = SQLJsDatabase<typeof schema>;
 
@@ -53,34 +53,14 @@ export function registerRunEventsRoutes(app: FastifyInstance, _config: BackendCo
     const afterSeq = toBoundedInt(String(query.afterSeq ?? ''), 0, null);
     const limit = toBoundedInt(String(query.limit ?? ''), 1000, 5000);
 
-    const rows = db
-      .select({
-        id: events.id,
-        runId: events.runId,
-        seq: events.seq,
-        eventType: events.eventType,
-        eventVersion: events.eventVersion,
-        payload: events.payload,
-        metadata: events.metadata,
-        createdAt: events.createdAt,
-      })
-      .from(events)
-      .where(and(eq(events.runId, runId), gt(events.seq, afterSeq)))
-      .orderBy(events.seq)
-      .limit(limit)
-      .all();
+    // P0-05: route through the store so packed rows are expanded and the
+    // result is filtered by LOGICAL seq (sub-events ≤ afterSeq excluded).
+    const store = new SqliteEventStore(getDb());
+    const eventsList = await store.listAfter(runId, afterSeq, limit);
 
-    // payload 是完整 AgentEvent v2 的 JSON —— 直接透传事件对象
-    const parsedEvents = rows
-      .map((row) => {
-        try {
-          return JSON.parse(row.payload) as unknown;
-        } catch {
-          return null;
-        }
-      })
-      .filter((e): e is object => e !== null && typeof e === 'object');
-
-    return { events: parsedEvents, nextSeq: parsedEvents.length > 0 ? (parsedEvents.at(-1) as { seq?: number }).seq ?? afterSeq : afterSeq };
+    return {
+      events: eventsList,
+      nextSeq: eventsList.length > 0 ? (eventsList.at(-1)?.seq ?? afterSeq) : afterSeq,
+    };
   });
 }
