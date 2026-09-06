@@ -19,16 +19,20 @@ import {
 } from './model-runtime-bridge.js';
 import { ModelRegistry } from '../core/models/index.js';
 import { OpenAICompatibleAdapter } from '../core/models/index.js';
+import { encrypt, isEncrypted } from './crypto.js';
 
 let cfg: BackendConfig;
 let dir: string;
 
-function seedProvider(id: string, models: string[], capabilities: string[]): void {
+/** 测试用固定 encryptionKey（与 config 保持一致） */
+const TEST_ENC_KEY = 'test-encryption-key-0123456789abcdef';
+
+function seedProvider(id: string, models: string[], capabilities: string[], apiKey?: string): void {
   getDb().insert(providers).values({
     id,
     name: id,
     type: 'openai',
-    apiKey: 'sk-test',
+    apiKey: apiKey ?? 'sk-test',
     baseUrl: 'https://api.example.com/v1',
     models: JSON.stringify(models),
     capabilities: JSON.stringify(capabilities),
@@ -104,5 +108,24 @@ describe('lib/model-runtime-bridge', () => {
     // registry contains all models across providers
     const allModels = registry.list();
     assert.ok(allModels.some((m) => m.providerId === 'deepseek' && m.model.id === 'deepseek-v4'));
+  });
+
+  it('P0-13: buildRuntimeForProvider 解密加密的 API Key（密文不当明文用）', () => {
+    const plain = 'sk-secret-plain-123';
+    const enc = encrypt(plain, TEST_ENC_KEY);
+    assert.ok(isEncrypted(enc), 'encrypt 应产出密文格式');
+    seedProvider('enc-provider', ['m1'], ['text'], enc);
+    const built = buildRuntimeForProvider(getDb(), 'enc-provider', TEST_ENC_KEY);
+    assert.ok(built, 'provider runtime should resolve');
+    assert.equal(built!.config.apiKey, plain, 'bridge 必须把密文解密为明文 API Key');
+    assert.notEqual(built!.config.apiKey, enc, '绝不能用密文当 API Key');
+  });
+
+  it('P0-13: 不传 encryptionKey 时密文原样透传（兼容旧调用/测试）', () => {
+    const enc = encrypt('sk-old', TEST_ENC_KEY);
+    seedProvider('enc-no-key', ['m1'], ['text'], enc);
+    const built = buildRuntimeForProvider(getDb(), 'enc-no-key');
+    assert.ok(built);
+    assert.equal(built!.config.apiKey, enc, '无 key 时不解密（透传），调用方负责处理');
   });
 });

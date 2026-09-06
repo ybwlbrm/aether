@@ -1,7 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import type { BackendConfig } from '../../config/index.js';
 import { getDb, saveDb } from '../../db/client.js';
-import { providers, conversations, messages } from '../../db/schema/index.js';
+import { providers } from '../../db/schema/index.js';
 import { eq } from 'drizzle-orm';
 import { randomUUID } from 'node:crypto';
 import { CreateProviderSchema, UpdateProviderSchema, AppError } from '@pacc/shared';
@@ -138,10 +138,11 @@ export function registerProviderRoutes(app: FastifyInstance, config: BackendConf
     };
   });
 
-  // 删除 Provider（级联删除关联的对话和消息）
+  // 删除 Provider（P0-21: FK ON DELETE SET NULL 自动将 conversations.provider_id 置空，
+  // 会话与消息得以保留；删除不再需要手工级联清理）
   app.delete('/api/providers/:id', {
     schema: {
-      description: '删除 AI Provider（级联删除关联对话）',
+      description: '删除 AI Provider（关联会话将变为无 Provider，不会删除）',
       tags: ['AI Provider'],
       params: { type: 'object', properties: { id: { type: 'string' } } },
     },
@@ -150,12 +151,6 @@ export function registerProviderRoutes(app: FastifyInstance, config: BackendConf
     const existing = db.select().from(providers).where(eq(providers.id, id)).get();
     if (!existing) throw AppError.notFound('Provider', id);
     try {
-      // 级联删除关联的对话和消息（避免外键约束错误）
-      const convs = db.select().from(conversations).where(eq(conversations.providerId, id)).all();
-      for (const conv of convs) {
-        db.delete(messages).where(eq(messages.conversationId, conv.id)).run();
-        db.delete(conversations).where(eq(conversations.id, conv.id)).run();
-      }
       db.delete(providers).where(eq(providers.id, id)).run();
       try { saveDb(config); } catch (e: unknown) { console.error('[Providers] 保存失败:', (e instanceof Error ? e.message : String(e)) || e); }
       return { success: true };

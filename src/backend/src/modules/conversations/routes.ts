@@ -11,6 +11,7 @@ import { getSyncClient } from '../../lib/supabase-sync.js';
 import { pushDirective, drainDirectives } from '../../lib/inbox.js';
 import { handleSendMessage } from './chat-handler.js';
 import { activeRequests } from './state.js';
+import { deleteConversationCascade } from './delete-conversation.js';
 
 /**
  * 注册所有对话相关路由
@@ -183,8 +184,15 @@ export function registerConversationRoutes(app: FastifyInstance, config: Backend
     },
   }, async (request) => {
     const { id } = request.params as { id: string };
-    db.delete(messages).where(eq(messages.conversationId, id)).run();
-    db.delete(conversations).where(eq(conversations.id, id)).run();
+    // P0-21: 先中止该对话仍在进行的生成，避免 SSE 续写已删除的 conversation
+    const controller = activeRequests.get(id);
+    if (controller) {
+      controller.abort();
+      activeRequests.delete(id);
+    }
+    // P0-21: 按 FK 依赖顺序级联删除全部关联行（tasks/events/activity_events/messages/runs → conversations），
+    // 否则 sql.js 抛 FOREIGN KEY constraint failed
+    deleteConversationCascade(db, id);
     try { saveDb(config); } catch (e: unknown) { console.error('[Conversations] 删除持久化失败:', (e instanceof Error ? e.message : String(e)) || e); }
     // A4 修复：删除同步到 Supabase（手机端不再看到已删除的"幽灵对话"）
     try {

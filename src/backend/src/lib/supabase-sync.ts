@@ -19,6 +19,8 @@ interface SyncConfig {
   supabaseKey: string;
   deviceId: string;
   deviceName?: string;
+  /** 关联的 Supabase Auth 用户 id（可选）。填写后桌面端主动同步的数据对手机端登录用户可见（RLS 行级隔离）。 */
+  userId?: string;
 }
 
 let cachedSb: SupabaseClient | null = null;
@@ -56,6 +58,7 @@ export async function ensureDeviceRegistered(sb: SupabaseClient, cfg: SyncConfig
   try {
     await sb.from('devices').upsert({
       id: cfg.deviceId,
+      user_id: cfg.userId ?? null,
       name: cfg.deviceName || 'Aether 桌面端',
       type: 'desktop',
       last_seen_at: new Date().toISOString(),
@@ -80,6 +83,7 @@ export async function syncConversationToSupabase(convId: string, sbOverride?: Su
     await sb.from('conversations_sync').upsert({
       id: conv.id,
       device_id: cfg.deviceId,
+      user_id: cfg.userId ?? null,
       title: conv.title,
       model: conv.model,
       message_count: msgs.length,
@@ -92,6 +96,7 @@ export async function syncConversationToSupabase(convId: string, sbOverride?: Su
         id: m.id,
         conversation_id: m.conversationId,
         device_id: cfg.deviceId,
+        user_id: cfg.userId ?? null,
         role: m.role,
         content: m.content,
         tool_calls: m.toolCalls,
@@ -117,6 +122,7 @@ export async function syncMessageToSupabase(
       id: msg.id,
       conversation_id: convId,
       device_id: cfg.deviceId,
+      user_id: cfg.userId ?? null,
       role: msg.role,
       content: msg.content,
       tool_calls: msg.toolCalls || null,

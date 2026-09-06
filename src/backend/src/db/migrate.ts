@@ -46,6 +46,27 @@ function openDatabase(SQL: Awaited<ReturnType<typeof initSqlJs>>, dbPath: string
   }
 }
 
+/**
+ * P0-21: SQLite cannot alter a FK constraint in place, so the table must be
+ * rebuilt. Copies every existing column (projected by name, tolerant of older
+ * DBs missing columns), then swaps the new table in.
+ */
+function rebuildTable(db: any, table: string, createSql: string): void {
+  const colsResult = db.exec(`PRAGMA table_info(${table})`);
+  const existingColumns: string[] = colsResult.length > 0
+    ? (colsResult[0].values as unknown[][]).map((row: unknown[]) => String(row[1]))
+    : [];
+  const temp = `${table}__p021`;
+  db.run(`DROP TABLE IF EXISTS ${temp}`);
+  db.run(createSql.replace(`CREATE TABLE ${table}`, `CREATE TABLE ${temp}`));
+  if (existingColumns.length > 0) {
+    const cols = existingColumns.join(', ');
+    db.run(`INSERT INTO ${temp} (${cols}) SELECT ${cols} FROM ${table}`);
+  }
+  db.run(`DROP TABLE ${table}`);
+  db.run(`ALTER TABLE ${temp} RENAME TO ${table}`);
+}
+
 /** 创建所有表 */
 export async function runMigrations(config: BackendConfig): Promise<void> {
   const SQL = await initSqlJs();
@@ -311,6 +332,105 @@ export async function runMigrations(config: BackendConfig): Promise<void> {
     db.run(`CREATE INDEX IF NOT EXISTS idx_tasks_run_id ON tasks(run_id)`);
     db.run(`CREATE INDEX IF NOT EXISTS idx_tasks_parent ON tasks(parent_task_id)`);
     db.run(`INSERT INTO schema_version (version, applied_at) VALUES (12, ?)`, [new Date().toISOString()]);
+  }
+
+  // 版本 13 (P0-21): 为所有 FK 添加 ON DELETE 行为 — 修复删除 Conversation / Provider
+  // 时抛 "FOREIGN KEY constraint failed" 的问题。
+  // 策略：子记录随父删除级联（ON DELETE CASCADE）；providers 被删时
+  // conversations.provider_id 置 NULL（ON DELETE SET NULL，任务要求 —— 会话保留但不再绑定
+  // provider，故该列从 NOT NULL 变为可空）。
+  // SQLite 不支持直接修改 FK 约束，此处对全部 7 张含 FK 的表做重建（数据全量保留）。
+  if (currentVersion < 13) {
+    // 重建期间关闭 FK 校验：DROP 父级表时子级行可能仍引用它；结束前恢复原值。
+    const fkOn = (db.exec('PRAGMA foreign_keys')[0].values[0][0] as number) === 1;
+    db.run('PRAGMA foreign_keys = OFF');
+
+    // conversations: provider_id 可空 + ON DELETE SET NULL
+    rebuildTable(db, 'conversations', `CREATE TABLE conversations (
+      id TEXT PRIMARY KEY, title TEXT NOT NULL DEFAULT '新对话',
+      provider_id TEXT REFERENCES providers(id) ON DELETE SET NULL,
+      model TEXT NOT NULL,
+      generation_status TEXT NOT NULL DEFAULT 'idle',
+      generation_state TEXT,
+      token_total INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+    )`);
+
+    // messages: conversation_id ON DELETE CASCADE
+    rebuildTable(db, 'messages', `CREATE TABLE messages (
+      id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+      role TEXT NOT NULL, content TEXT NOT NULL,
+      tool_calls TEXT, tool_results TEXT, reasoning_content TEXT, created_at TEXT NOT NULL
+    )`);
+
+    // workflow_runs: workflow_id ON DELETE CASCADE
+    rebuildTable(db, 'workflow_runs', `CREATE TABLE workflow_runs (
+      id TEXT PRIMARY KEY, workflow_id TEXT NOT NULL REFERENCES workflows(id) ON DELETE CASCADE,
+      status TEXT NOT NULL DEFAULT 'pending', current_node_id TEXT,
+      results TEXT DEFAULT '{}', error TEXT,
+      started_at TEXT NOT NULL, completed_at TEXT
+    )`);
+
+    // activity_events: conversation_id ON DELETE CASCADE
+    rebuildTable(db, 'activity_events', `CREATE TABLE activity_events (
+      id TEXT PRIMARY KEY,
+      conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+      task_id TEXT NOT NULL,
+      agent_id TEXT NOT NULL DEFAULT 'main',
+      agent_type TEXT NOT NULL DEFAULT 'conversation',
+      event_type TEXT NOT NULL,
+      seq INTEGER NOT NULL,
+      status TEXT, content TEXT, tool TEXT,
+      parent_event_id TEXT, metadata TEXT,
+      created_at TEXT NOT NULL
+    )`);
+    db.run(`CREATE INDEX IF NOT EXISTS idx_activity_events_conv_seq ON activity_events(conversation_id, seq)`);
+
+    // runs: conversation_id（可空）ON DELETE CASCADE
+    rebuildTable(db, 'runs', `CREATE TABLE runs (
+      id TEXT PRIMARY KEY,
+      conversation_id TEXT REFERENCES conversations(id) ON DELETE CASCADE,
+      status TEXT NOT NULL DEFAULT 'created',
+      mode TEXT NOT NULL DEFAULT 'normal',
+      root_agent_id TEXT,
+      started_at TEXT, completed_at TEXT, end_reason TEXT,
+      input_tokens INTEGER NOT NULL DEFAULT 0,
+      output_tokens INTEGER NOT NULL DEFAULT 0,
+      total_tokens INTEGER NOT NULL DEFAULT 0,
+      error TEXT, metadata TEXT,
+      created_at TEXT NOT NULL
+    )`);
+
+    // tasks: run_id ON DELETE CASCADE
+    rebuildTable(db, 'tasks', `CREATE TABLE tasks (
+      id TEXT PRIMARY KEY,
+      run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+      parent_task_id TEXT,
+      agent_id TEXT NOT NULL DEFAULT 'main',
+      agent_type TEXT NOT NULL DEFAULT 'conversation',
+      status TEXT NOT NULL DEFAULT 'pending',
+      input TEXT, output TEXT, error TEXT,
+      started_at TEXT, completed_at TEXT,
+      metadata TEXT, created_at TEXT NOT NULL
+    )`);
+    db.run(`CREATE INDEX IF NOT EXISTS idx_tasks_run_id ON tasks(run_id)`);
+    db.run(`CREATE INDEX IF NOT EXISTS idx_tasks_parent ON tasks(parent_task_id)`);
+
+    // events: run_id ON DELETE CASCADE
+    rebuildTable(db, 'events', `CREATE TABLE events (
+      id TEXT PRIMARY KEY,
+      run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+      seq INTEGER NOT NULL,
+      event_type TEXT NOT NULL,
+      event_version INTEGER NOT NULL DEFAULT 1,
+      payload TEXT NOT NULL,
+      packed TEXT, metadata TEXT,
+      created_at TEXT NOT NULL
+    )`);
+    db.run(`CREATE UNIQUE INDEX IF NOT EXISTS idx_events_run_seq ON events(run_id, seq)`);
+
+    db.run(`PRAGMA foreign_keys = ${fkOn ? 'ON' : 'OFF'}`);
+    db.run(`INSERT INTO schema_version (version, applied_at) VALUES (13, ?)`, [new Date().toISOString()]);
   }
 
   // 保存到文件（原子写，防止强杀损坏主库）

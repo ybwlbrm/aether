@@ -21,11 +21,20 @@ import {
   type LegacyProviderConfig,
 } from '../core/models/index.js';
 import { ModelRegistry } from '../core/models/index.js';
+import { decrypt, isEncrypted } from './crypto.js';
 
 type Db = SQLJsDatabase<typeof schema>;
 
-/** Read a provider row and shape it into the LegacyProviderConfig the core factory expects */
-function rowToLegacyProvider(row: typeof schema.providers.$inferSelect): LegacyProviderConfig {
+/**
+ * Read a provider row and shape it into the LegacyProviderConfig the core factory expects.
+ * P0-13：数据库保存的是 AES-256-GCM 密文 —— 必须在 bridge 层解密后才能交给
+ * ModelRuntime 作为 Authorization Bearer；否则密文会被直接当作 API Key 发送（必然 401）。
+ * 传入 encryptionKey 时自动解密；不传（或值不是密文格式）则原样透传（兼容旧明文数据/测试）。
+ */
+function rowToLegacyProvider(
+  row: typeof schema.providers.$inferSelect,
+  encryptionKey?: string,
+): LegacyProviderConfig {
   let models: string[] = [];
   let capabilities: string[] = [];
   try {
@@ -40,11 +49,19 @@ function rowToLegacyProvider(row: typeof schema.providers.$inferSelect): LegacyP
   } catch {
     capabilities = ['text'];
   }
+  let apiKey = row.apiKey;
+  if (encryptionKey && isEncrypted(apiKey)) {
+    try {
+      apiKey = decrypt(apiKey, encryptionKey);
+    } catch {
+      // 解密失败时保留原值（上层会得到 401，可定位为密钥问题）
+    }
+  }
   return {
     id: row.id,
     name: row.name,
     type: row.type,
-    apiKey: row.apiKey,
+    apiKey,
     baseUrl: row.baseUrl ?? '',
     defaultModel: models[0] ?? '',
     models,
@@ -55,14 +72,16 @@ function rowToLegacyProvider(row: typeof schema.providers.$inferSelect): LegacyP
 /**
  * Build a ModelRuntime for the given provider id from the providers table.
  * Returns null when the provider does not exist.
+ * P0-13：需要 config.encryptionKey 才能正确解密 provider 的 API Key。
  */
 export function buildRuntimeForProvider(
   db: Db,
   providerId: string,
+  encryptionKey?: string,
 ): { runtime: ReturnType<typeof buildModelRuntime>; config: LegacyProviderConfig } | null {
   const row = db.select().from(schema.providers).where(eq(schema.providers.id, providerId)).get();
   if (!row) return null;
-  const config = rowToLegacyProvider(row);
+  const config = rowToLegacyProvider(row, encryptionKey);
   return { runtime: buildModelRuntime(config), config };
 }
 
@@ -74,8 +93,9 @@ export function buildRuntimeAndRegister(
   db: Db,
   registry: ModelRegistry,
   providerId: string,
+  encryptionKey?: string,
 ): ReturnType<typeof buildModelRuntime> | null {
-  const built = buildRuntimeForProvider(db, providerId);
+  const built = buildRuntimeForProvider(db, providerId, encryptionKey);
   if (!built) return null;
   registerProviderModels(registry, built.config);
   return built.runtime;
@@ -88,11 +108,12 @@ export function buildRuntimeAndRegister(
 export function buildAllRuntimes(
   db: Db,
   registry: ModelRegistry,
+  encryptionKey?: string,
 ): Map<string, ReturnType<typeof buildModelRuntime>> {
   const rows = db.select().from(schema.providers).all();
   const runtimes = new Map<string, ReturnType<typeof buildModelRuntime>>();
   for (const row of rows) {
-    const config = rowToLegacyProvider(row);
+    const config = rowToLegacyProvider(row, encryptionKey);
     const runtime = buildModelRuntime(config);
     registerProviderModels(registry, config);
     runtimes.set(row.id, runtime);

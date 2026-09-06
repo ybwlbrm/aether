@@ -1,6 +1,8 @@
 import type { WorkflowNode } from './types.js';
 import type { BackendConfig } from '../../config/index.js';
 import { getProviderById, getProviderByCapability } from '../../lib/provider.js';
+import { buildModelRuntime } from '../../core/models/index.js';
+import { ModelError } from '../../core/errors/index.js';
 import { getPptxgen, getDocx, extractJson } from '../documents/index.js';
 import { executeFileTool } from '../../lib/files.js';
 import { fetchWithRetry } from '../../lib/fetch-retry.js';
@@ -58,24 +60,24 @@ export async function executeNode(
       if (!provider.baseUrl || !isSafeFetchUrl(provider.baseUrl)) {
         return { output: '安全限制：Provider baseUrl 存在 SSRF 风险（链路本地/元数据地址或非 http(s) 协议）' };
       }
-      const baseUrl = provider.baseUrl.replace(/\/$/, '');
-      const res = await fetchWithRetry(`${baseUrl}/chat/completions`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${provider.apiKey}` },
-        body: JSON.stringify({
+      try {
+        // P0-12（§六十四）：业务层经 ModelRuntime → ProviderAdapter → HTTP，
+        // 不再直接 fetch /chat/completions。buildModelRuntime 用解密后的 apiKey
+        // 构造 OpenAICompatibleAdapter（allowHttpTransport: true，SSRF 校验已在上方保留）。
+        const runtime = buildModelRuntime(provider);
+        const response = await runtime.complete({
+          provider: provider.id,
           model: model || provider.defaultModel,
           messages: [{ role: 'user', content: prompt }],
-          max_tokens: Number(cfg.maxTokens || 2048),
-          stream: false,
-        }),
-      });
-      if (!res.ok) {
-        const errText = await res.text().catch(() => '');
-        return { output: `AI 调用失败 (${res.status}): ${errText.slice(0, 300)}` };
+          maxTokens: Number(cfg.maxTokens || 2048),
+        });
+        const text = response.content.trim();
+        return { output: text || '(空回复)' };
+      } catch (e: unknown) {
+        const status = e instanceof ModelError && e.statusCode !== undefined ? ` (${e.statusCode})` : '';
+        const message = e instanceof Error ? e.message : String(e);
+        return { output: `AI 调用失败${status}: ${message.slice(0, 300)}` };
       }
-      const data = await res.json() as any;
-      const text = (data.choices?.[0]?.message?.content || '').trim();
-      return { output: text || '(空回复)' };
     }
     case 'media': {
       // 媒体节点：调用 AI 生成 API
@@ -94,6 +96,11 @@ export async function executeNode(
           model: String(cfg.model || provider.defaultModel || 'dall-e-3'),
           prompt, n: 1, size: String(cfg.size || '1024x1024'),
         };
+        // P0-12（§六十四）说明：Media 节点的端点是 OpenAI 专有的
+        // /images/generations 与 /videos，而 ProviderAdapter 只实现
+        // /chat/completions 一个运维原语，无法经 ModelRuntime 转发媒体端点。
+        // 因此此节点保留 fetchWithRetry + 上方 SSRF 校验（isSafeFetchUrl），
+        // 不做无意义的 adapter 扩展——媒体端点不属于 chat 完成语义。
         const endpoint = mediaType === 'video' ? '/videos' : '/images/generations';
         const res = await fetchWithRetry(`${baseUrl}${endpoint}`, {
           method: 'POST',
@@ -127,18 +134,23 @@ export async function executeNode(
         const systemPrompt = kind === 'ppt'
           ? '你是专业的演示文稿内容策划。根据标题生成 PPT 幻灯片大纲，返回 JSON 格式：{"slides":[{"title":"...","content":"..."}]}，用简体中文。'
           : '你是专业的文档撰写助手。根据标题生成文章大纲，返回 JSON 格式：{"sections":[{"heading":"...","body":"..."}]}，用简体中文。';
-        const res = await fetchWithRetry(`${provider.baseUrl.replace(/\/$/, '')}/chat/completions`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${provider.apiKey}` },
-          body: JSON.stringify({
+        // P0-12（§六十四）：业务层经 ModelRuntime → ProviderAdapter → HTTP，
+        // 不再直接 fetch /chat/completions（systemPrompt 由 ModelRequest 携带）。
+        let text: string;
+        try {
+          const runtime = buildModelRuntime(provider);
+          const response = await runtime.complete({
+            provider: provider.id,
             model,
-            messages: [{ role: 'system', content: systemPrompt }, { role: 'user', content: `文档标题: ${title}` }],
-            max_tokens: 2048, stream: false,
-          }),
-        });
-        if (!res.ok) return { output: `文档生成失败 (${res.status})` };
-        const data = await res.json() as any;
-        const text = (data.choices?.[0]?.message?.content || '').trim();
+            systemPrompt,
+            messages: [{ role: 'user', content: `文档标题: ${title}` }],
+            maxTokens: 2048,
+          });
+          text = response.content.trim();
+        } catch (aiErr: unknown) {
+          const status = aiErr instanceof ModelError && aiErr.statusCode !== undefined ? ` (${aiErr.statusCode})` : '';
+          return { output: `文档生成失败${status}` };
+        }
         // 解析 AI 输出并创建实际文件
         const docDir = resolve(config.dataDir, 'documents');
         if (!existsSync(docDir)) mkdirSync(docDir, { recursive: true });

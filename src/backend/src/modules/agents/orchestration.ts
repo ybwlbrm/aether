@@ -107,8 +107,9 @@ export async function handleOrchestrate(
   // core ModelRegistry + ModelRuntime instances each orchestration. Zero
   // behavior change to the legacy fetch path — this makes the bridge a real
   // production call site (it existed only in tests before).
+  // P0-13：必须传 config.encryptionKey —— bridge 内部解密 providers 表的密文 Key。
   try {
-    buildAllRuntimes(db, modelRuntimeRegistry);
+    buildAllRuntimes(db, modelRuntimeRegistry, config.encryptionKey);
   } catch (err) {
     console.warn('[Orchestration] ModelRuntime bridge warm failed:', err instanceof Error ? err.message : String(err));
   }

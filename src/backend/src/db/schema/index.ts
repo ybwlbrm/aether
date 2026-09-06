@@ -18,7 +18,8 @@ export const providers = sqliteTable('providers', {
 export const conversations = sqliteTable('conversations', {
   id: text('id').primaryKey(),
   title: text('title').notNull().default('新对话'),
-  providerId: text('provider_id').notNull().references(() => providers.id),
+  // P0-21: provider deletion keeps the conversation but clears the reference (hence nullable)
+  providerId: text('provider_id').references(() => providers.id, { onDelete: 'set null' }),
   model: text('model').notNull(),
   generationStatus: text('generation_status', { enum: ['idle', 'generating', 'interrupted'] }).default('idle'),
   generationState: text('generation_state'), // JSON: stores orchestration state for session persistence
@@ -30,7 +31,7 @@ export const conversations = sqliteTable('conversations', {
 /** 消息表 */
 export const messages = sqliteTable('messages', {
   id: text('id').primaryKey(),
-  conversationId: text('conversation_id').notNull().references(() => conversations.id),
+  conversationId: text('conversation_id').notNull().references(() => conversations.id, { onDelete: 'cascade' }),
   role: text('role', { enum: ['user', 'assistant', 'system', 'tool'] }).notNull(),
   content: text('content').notNull(),
   toolCalls: text('tool_calls'), // JSON
@@ -167,7 +168,7 @@ export const workflows = sqliteTable('workflows', {
 /** 工作流运行记录表 — 每次执行的状态与结果 */
 export const workflowRuns = sqliteTable('workflow_runs', {
   id: text('id').primaryKey(),
-  workflowId: text('workflow_id').notNull().references(() => workflows.id),
+  workflowId: text('workflow_id').notNull().references(() => workflows.id, { onDelete: 'cascade' }),
   status: text('status', { enum: ['pending', 'running', 'completed', 'failed'] }).notNull().default('pending'),
   currentNodeId: text('current_node_id'),
   results: text('results').default('{}'), // JSON object: nodeId -> output
@@ -184,7 +185,7 @@ export const workflowRuns = sqliteTable('workflow_runs', {
  */
 export const activityEvents = sqliteTable('activity_events', {
   id: text('id').primaryKey(), // eventId (uuid)
-  conversationId: text('conversation_id').notNull().references(() => conversations.id),
+  conversationId: text('conversation_id').notNull().references(() => conversations.id, { onDelete: 'cascade' }),
   taskId: text('task_id').notNull(), // 本次运行/任务 id
   agentId: text('agent_id').notNull().default('main'),
   agentType: text('agent_type').notNull().default('conversation'),
@@ -208,7 +209,7 @@ export const activityEvents = sqliteTable('activity_events', {
  */
 export const runs = sqliteTable('runs', {
   id: text('id').primaryKey(),
-  conversationId: text('conversation_id').references(() => conversations.id),
+  conversationId: text('conversation_id').references(() => conversations.id, { onDelete: 'cascade' }),
   status: text('status', {
     enum: ['created', 'running', 'waiting', 'completed', 'failed', 'cancelled', 'interrupted'],
   }).notNull().default('created'),
@@ -231,7 +232,7 @@ export const runs = sqliteTable('runs', {
  */
 export const tasks = sqliteTable('tasks', {
   id: text('id').primaryKey(),
-  runId: text('run_id').notNull().references(() => runs.id),
+  runId: text('run_id').notNull().references(() => runs.id, { onDelete: 'cascade' }),
   parentTaskId: text('parent_task_id'),
   agentId: text('agent_id').notNull().default('main'),
   agentType: text('agent_type').notNull().default('conversation'),
@@ -255,7 +256,7 @@ export const tasks = sqliteTable('tasks', {
  */
 export const events = sqliteTable('events', {
   id: text('id').primaryKey(), // eventId (uuid)
-  runId: text('run_id').notNull().references(() => runs.id),
+  runId: text('run_id').notNull().references(() => runs.id, { onDelete: 'cascade' }),
   seq: integer('seq').notNull(),
   eventType: text('event_type').notNull(),
   /** 协议版本（当前 = 1），未来升级时用于解码分发 */

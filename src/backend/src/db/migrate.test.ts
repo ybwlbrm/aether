@@ -223,7 +223,7 @@ describe('runMigrations — v10/v11/v12 (Aether 2.0 Runtime tables)', () => {
       const db = openDb(dbPath);
       // schema_version 最大值应为 12
       const ver = db.exec('SELECT MAX(version) FROM schema_version');
-      assert.equal(ver[0].values[0][0], 12, 'schema_version should be 12');
+      assert.equal(ver[0].values[0][0], 13, 'schema_version should be 13');
 
       // 三张新表存在
       const tables = db.exec("SELECT name FROM sqlite_master WHERE type='table' AND name IN ('runs','tasks','events')");
@@ -295,7 +295,7 @@ describe('runMigrations — v10/v11/v12 (Aether 2.0 Runtime tables)', () => {
       // 验证：schema_version 达到 12
       const db2 = openDb(dbPath);
       const ver = db2.exec('SELECT MAX(version) FROM schema_version');
-      assert.equal(ver[0].values[0][0], 12, 'schema_version should be 12 after upgrade');
+      assert.equal(ver[0].values[0][0], 13, 'schema_version should be 13 after upgrade');
 
       // 预存数据完好
       const prov = db2.exec("SELECT id, name FROM providers WHERE id = 'prov-1'");
@@ -359,7 +359,50 @@ describe('runMigrations — v10/v11/v12 (Aether 2.0 Runtime tables)', () => {
 
       const db = openDb(dbPath);
       const ver = db.exec('SELECT MAX(version) FROM schema_version');
-      assert.equal(ver[0].values[0][0], 12, 'schema_version should still be 12 after second run');
+      assert.equal(ver[0].values[0][0], 13, 'schema_version should still be 13 after second run');
+      db.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('P0-21: FK ON DELETE — conversation delete cascades children, provider delete SET NULLs provider_id', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'pacc-migrate-p021-'));
+    const dbPath = join(dir, 'pacc.db');
+    try {
+      await runMigrationsReal(makeConfig(dbPath, dir));
+      const db = openDb(dbPath);
+      db.run('PRAGMA foreign_keys = ON');
+
+      // Seed one provider + conversation with every FK-dependent child present.
+      db.run("INSERT INTO providers (id, name, type, api_key, models, created_at, updated_at) VALUES ('prov-1', 'P', 'openai', 'sk', '[]', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')");
+      db.run("INSERT INTO conversations (id, title, provider_id, model, created_at, updated_at) VALUES ('conv-cascade', 'C', 'prov-1', 'gpt-4', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')");
+      db.run("INSERT INTO messages (id, conversation_id, role, content, created_at) VALUES ('msg-cascade', 'conv-cascade', 'user', 'hi', '2026-01-01T00:00:00Z')");
+      db.run("INSERT INTO runs (id, conversation_id, status, mode, created_at) VALUES ('run-cascade', 'conv-cascade', 'created', 'normal', '2026-01-01T00:00:00Z')");
+      db.run("INSERT INTO tasks (id, run_id, status, created_at) VALUES ('task-cascade', 'run-cascade', 'pending', '2026-01-01T00:00:00Z')");
+      db.run("INSERT INTO events (id, run_id, seq, event_type, payload, created_at) VALUES ('evt-cascade', 'run-cascade', 1, 'agent_start', '{}', '2026-01-01T00:00:00Z')");
+      db.run("INSERT INTO activity_events (id, conversation_id, task_id, event_type, seq, created_at) VALUES ('aev-cascade', 'conv-cascade', 'task-cascade', 'message', 1, '2026-01-01T00:00:00Z')");
+
+      // Deleting the conversation must cascade to every child (bare DELETE, no manual cascading).
+      db.run("DELETE FROM conversations WHERE id = 'conv-cascade'");
+
+      const count = (sql: string): number => {
+        const res = db.exec(sql);
+        return res.length > 0 ? res[0].values.length : 0;
+      };
+      assert.equal(count("SELECT id FROM messages WHERE id = 'msg-cascade'"), 0, 'messages should cascade');
+      assert.equal(count("SELECT id FROM runs WHERE id = 'run-cascade'"), 0, 'runs should cascade');
+      assert.equal(count("SELECT id FROM tasks WHERE id = 'task-cascade'"), 0, 'tasks should cascade via runs');
+      assert.equal(count("SELECT id FROM events WHERE id = 'evt-cascade'"), 0, 'events should cascade via runs');
+      assert.equal(count("SELECT id FROM activity_events WHERE id = 'aev-cascade'"), 0, 'activity_events should cascade');
+
+      // Deleting the provider must keep the conversation but clear provider_id (SET NULL, nullable column).
+      db.run("INSERT INTO conversations (id, title, provider_id, model, created_at, updated_at) VALUES ('conv-keep', 'Keep', 'prov-1', 'gpt-4', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')");
+      db.run("DELETE FROM providers WHERE id = 'prov-1'");
+      const kept = db.exec("SELECT provider_id FROM conversations WHERE id = 'conv-keep'");
+      assert.equal(kept[0].values[0][0], null, 'provider_id should be NULL after provider delete (SET NULL)');
+      assert.equal(count("SELECT id FROM conversations WHERE id = 'conv-keep'"), 1, 'conversation should survive provider delete');
+
       db.close();
     } finally {
       rmSync(dir, { recursive: true, force: true });
