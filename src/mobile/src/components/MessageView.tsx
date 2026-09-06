@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { getMessages, sendCommand, subscribeMessages } from '../api/supabase';
+import { getMessages, sendCommand, subscribeMessages, getSyncState, onSyncStateChange, type SyncStatus } from '../api/supabase';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 
@@ -100,6 +100,8 @@ export default function MessageView({ conversationId, conversationTitle, onBack 
   const [templateOpen, setTemplateOpen] = useState(false);
   // 手机端思考过程横条
   const [liveReasoning, setLiveReasoning] = useState<string>('');
+  // P0-A08：Realtime 连接状态（realtime 正常时不轮询，断开时降级轮询）
+  const [syncStatus, setSyncStatus] = useState<SyncStatus>(() => getSyncState().status);
   const reasoningBarRef = useRef<HTMLDivElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -160,9 +162,16 @@ export default function MessageView({ conversationId, conversationTitle, onBack 
     return unsub;
   }, [conversationId, loadMessages]);
 
-  // 轮询兜底：Realtime 断连时仍能收到新消息（每 2 秒拉取一次）
+  // 轮询兜底（P0-A08）：Realtime 连接正常时不轮询；
+  // realtime 断线时降级为每 2 秒轮询；恢复连接后 effect 重评估自动停止轮询。
+  // 连接状态由模块级 syncStatus（channel SUBSCRIBED/CLOSED 驱动）同步到本地 state。
+  useEffect(() => {
+    return onSyncStateChange((s) => setSyncStatus(s.status));
+  }, []);
+
   useEffect(() => {
     if (!conversationId) return;
+    if (syncStatus === 'connected') return; // Realtime 正常 → 不启动轮询
     let cancelled = false;
     const interval = setInterval(async () => {
       if (cancelled) return;
@@ -195,7 +204,7 @@ export default function MessageView({ conversationId, conversationTitle, onBack 
       } catch { /* 忽略网络错误 */ }
     }, 2000);
     return () => { cancelled = true; clearInterval(interval); };
-  }, [conversationId]);
+  }, [conversationId, syncStatus]);
 
   // 自动滚动到底部
   useEffect(() => {

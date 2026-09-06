@@ -181,9 +181,8 @@ export function useStreamSend(options: StreamSendOptions): UseStreamSendReturn {
         const imageAttachments = currentAttachments.filter(a => a.dataUrl.startsWith('data:image/'));
         const fileAttachments = currentAttachments.filter(a => !a.dataUrl.startsWith('data:image/'));
 
-        // Clear old events for this conversation
-        useActivityStore.getState().clearConv(sendConvId);
-
+        // P1-13：不再清空整个 conversation 的历史 Activity —— Conversation 是历史容器，
+        // 支持 Run1/Run2/Run3 并存。新 Run 的事件由 appendEvent 追加（按 runId 隔离去重）。
         await streamOrchestrate(
           {
             prompt: content,
@@ -286,8 +285,7 @@ export function useStreamSend(options: StreamSendOptions): UseStreamSendReturn {
         const imageAttachments = currentAttachments.filter(a => a.dataUrl.startsWith('data:image/'));
         const fileAttachments = currentAttachments.filter(a => !a.dataUrl.startsWith('data:image/'));
 
-        useActivityStore.getState().clearConv(sendConvId);
-
+        // P1-13：不再 clearConv —— 保留历史 Run 的 Activity，新事件追加
         await streamConversation(
           sendConvId,
           content,

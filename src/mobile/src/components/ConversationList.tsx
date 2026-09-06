@@ -35,7 +35,17 @@ export default function ConversationList({ onSelect, onNewCommand }: Props) {
 
   useEffect(() => {
     load();
-    const unsub = subscribeConversations(() => {
+    // P0-A06/A21：回调接收完整 payload。
+    // DELETE 事件（桌面端删除对话 → 级联删除）→ 本地立即移除，避免重新拉取仍缓存旧行；
+    // 其余事件（INSERT/UPDATE）→ 重新加载列表。
+    const unsub = subscribeConversations((payload: any) => {
+      if (payload?.eventType === 'DELETE') {
+        const deletedId = payload.old?.id;
+        if (deletedId) {
+          setConversations(prev => prev.filter(c => c.id !== deletedId));
+        }
+        return;
+      }
       load();
     });
     return unsub;

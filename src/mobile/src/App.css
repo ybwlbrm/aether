@@ -274,6 +274,13 @@ body {
 }
 .config-form input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-glow); }
 .config-form input::placeholder { color: rgba(255,255,255,0.2); }
+.status-msg {
+  font-size: 13px;
+  text-align: center;
+  line-height: 1.5;
+  padding: 4px 8px;
+  animation: fadeInUp 0.3s ease-out;
+}
 
 /* === 主布局 === */
 .app-layout {

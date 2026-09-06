@@ -84,8 +84,13 @@ export const useActivityStore = create<ActivityState>((set, get) => ({
 
   appendEvent: (convId, event) => {
     const list = get().eventsByConv[convId] ?? [];
-    // 按 seq 去重（SSE 顺序漂移/重放重复都安全）
-    if (list.some(e => e.seq === event.seq)) return;
+    // P0-08：去重键 = eventId 优先，回退 sessionId+taskId+seq（仅 seq 会跨 Run 误判）
+    //   v1 envelope 用 sessionId/taskId 标识运行；Run A seq=1 与 Run B seq=1 是不同事件。
+    const isDup = list.some(e =>
+      e.eventId === event.eventId ||
+      (e.sessionId === event.sessionId && e.taskId === event.taskId && e.seq === event.seq),
+    );
+    if (isDup) return;
     list.push(event);
     const sorted = sortBySeq(list);
     set(s => ({
@@ -98,10 +103,11 @@ export const useActivityStore = create<ActivityState>((set, get) => ({
   appendEvents: (convId, events) => {
     if (events.length === 0) return;
     const list = get().eventsByConv[convId] ?? [];
-    const known = new Set(list.map(e => e.seq));
+    const known = new Set(list.map(e => `${e.eventId}::${e.sessionId}::${e.taskId}::${e.seq}`));
     for (const ev of events) {
-      if (known.has(ev.seq)) continue;
-      known.add(ev.seq);
+      const key = `${ev.eventId}::${ev.sessionId}::${ev.taskId}::${ev.seq}`;
+      if (known.has(key)) continue;
+      known.add(key);
       list.push(ev);
     }
     const sorted = sortBySeq(list);
@@ -142,46 +148,7 @@ export const useActivityStore = create<ActivityState>((set, get) => ({
   },
 
   projectTaskProgress: (convId) => {
-    const events = get().eventsByConv[convId] ?? [];
-    if (events.length === 0) return null;
-    // 找最近一次 task.started 定位当前任务
-    let startedIdx = -1;
-    for (let i = events.length - 1; i >= 0; i--) {
-      if (events[i].eventType === 'task.started') { startedIdx = i; break; }
-    }
-    if (startedIdx === -1) return null;
-    const active = events.slice(startedIdx);
-    const steps: string[] = [];
-    let status: TaskProgressState['status'] = 'running';
-    let completedAt: string | undefined;
-    let startedAt: string | undefined;
-    let currentStep: string | undefined;
-    for (const ev of active) {
-      if (ev.eventType === 'task.completed' || ev.eventType === 'agent.completed') {
-        status = 'completed'; completedAt = ev.timestamp; if (startedAt === undefined) startedAt = ev.timestamp;
-        continue;
-      }
-      if (ev.eventType === 'task.cancelled') { status = 'cancelled'; completedAt = ev.timestamp; continue; }
-      if (ev.eventType === 'task.failed' || ev.eventType === 'agent.error') { status = 'failed'; completedAt = ev.timestamp; continue; }
-      // 步骤：工具完成 / 状态事件
-      if (ev.eventType === 'tool.completed' && ev.tool) {
-        const label = `${ev.tool.toolName}${ev.tool.toolInput ? ` ${ev.tool.toolInput}` : ''}`;
-        if (!steps.includes(label)) steps.push(label);
-        currentStep = label;
-      } else if (ev.eventType === 'agent.status' && ev.content && !ev.content.includes('正在分析任务')) {
-        currentStep = ev.content;
-      } else if (ev.eventType === 'task.started') {
-        startedAt = ev.timestamp;
-      }
-    }
-    return {
-      taskId: active[0].taskId,
-      status,
-      currentStep,
-      steps: steps.slice(-12),
-      startedAt,
-      completedAt,
-    };
+    return projectTaskProgress(get().eventsByConv[convId] ?? []);
   },
 
   projectReplies: (convId) => {
@@ -234,6 +201,8 @@ export const useActivityStore = create<ActivityState>((set, get) => ({
     let lastAgentId = '';
     let agentOutputs = new Map<string, string>();
     let plan: string | undefined;
+    // P1-02：按 agent 隔离的 reasoning 流（增量恢复时需要重建）
+    let reasoningByAgent = new Map<string, string>();
 
     let processFromIdx: number;
 
@@ -254,6 +223,13 @@ export const useActivityStore = create<ActivityState>((set, get) => ({
         activeReasoning = cache.card.activeReasoning;
         agentOutputs = new Map(cache.card.agentOutputs);
         plan = cache.card.plan;
+        // 增量路径：从 events 中重建每个 agent 的 reasoning 历史（幂等重建）
+        for (const e of events.slice(0, processFromIdx)) {
+          if (e.eventType === 'agent.reasoning.delta' && e.content) {
+            const prev = reasoningByAgent.get(e.agentId) ?? '';
+            reasoningByAgent.set(e.agentId, (prev ? prev + '\n' : '') + e.content);
+          }
+        }
       }
     }
 
@@ -311,8 +287,13 @@ export const useActivityStore = create<ActivityState>((set, get) => ({
         continue;
       }
       if (ev.eventType === 'agent.reasoning.delta' && ev.content) {
-        activeReasoning += ev.content;
-        if (activeReasoning.length > 400) activeReasoning = activeReasoning.slice(-400);
+        // P1-02：reasoning 必须按 agent 隔离 —— 每个 agent 自己的推理流互不污染
+        const prev = reasoningByAgent.get(ev.agentId) ?? '';
+        const next = (prev ? prev + '\n' : '') + ev.content;
+        reasoningByAgent.set(ev.agentId, next.length > 400 ? next.slice(-400) : next);
+        // 当前活跃 agent 的 reasoning 才作为卡片活动区显示
+        activeReasoning = reasoningByAgent.get(ev.agentId) ?? '';
+        lastAgentId = ev.agentId;
         continue;
       }
       if (ev.eventType === 'agent.message.delta' && ev.content) {
@@ -479,4 +460,52 @@ export function projectToRecords(events: AgentEventEnvelope[]): ActivityRecord[]
     }
   }
   return records;
+}
+
+/**
+ * 投影：任务进度（供 ActivityStream 摘要卡使用）
+ * P0-18：只有 task.completed / task.cancelled / task.failed 才能结束任务；
+ * agent.completed 只是子 Agent 完成，绝不等于 Task 完成。
+ */
+export function projectTaskProgress(events: AgentEventEnvelope[]): TaskProgressState | null {
+  if (events.length === 0) return null;
+  // 找最近一次 task.started 定位当前任务
+  let startedIdx = -1;
+  for (let i = events.length - 1; i >= 0; i--) {
+    if (events[i].eventType === 'task.started') { startedIdx = i; break; }
+  }
+  if (startedIdx === -1) return null;
+  const active = events.slice(startedIdx);
+  const steps: string[] = [];
+  let status: TaskProgressState['status'] = 'running';
+  let completedAt: string | undefined;
+  let startedAt: string | undefined;
+  let currentStep: string | undefined;
+  for (const ev of active) {
+    // P0-18：仅 task 生命周期事件可终结任务（agent.completed/agent.error 不终结）
+    if (ev.eventType === 'task.completed') {
+      status = 'completed'; completedAt = ev.timestamp; if (startedAt === undefined) startedAt = ev.timestamp;
+      continue;
+    }
+    if (ev.eventType === 'task.cancelled') { status = 'cancelled'; completedAt = ev.timestamp; continue; }
+    if (ev.eventType === 'task.failed') { status = 'failed'; completedAt = ev.timestamp; continue; }
+    // 步骤：工具完成 / 状态事件
+    if (ev.eventType === 'tool.completed' && ev.tool) {
+      const label = `${ev.tool.toolName}${ev.tool.toolInput ? ` ${ev.tool.toolInput}` : ''}`;
+      if (!steps.includes(label)) steps.push(label);
+      currentStep = label;
+    } else if (ev.eventType === 'agent.status' && ev.content && !ev.content.includes('正在分析任务')) {
+      currentStep = ev.content;
+    } else if (ev.eventType === 'task.started') {
+      startedAt = ev.timestamp;
+    }
+  }
+  return {
+    taskId: active[0].taskId,
+    status,
+    currentStep,
+    steps: steps.slice(-12),
+    startedAt,
+    completedAt,
+  };
 }

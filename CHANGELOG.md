@@ -38,6 +38,11 @@
 - Android APK 3.22MB（Aether-Mobile.apk，11:07 重打）
 - 验证：Build/Typecheck/Test 全部 PASS（backend 116 pass / frontend 37 pass，零回归）
 
+**Setup 版外部工具 asarUnpack 修复**
+- `electron-builder.yml`：ffmpeg/ffprobe/yt-dlp 加入 `asarUnpack` 解包为真实文件
+  （asar 归档内的 exe 无法被 spawn 执行——工具检测能通过但真实运行失败；
+  实测解包后 `ffmpeg -version` 在 Setup 场景执行成功，11:44 重打 Setup 217.9MB）
+
 ### 2026-08-11 — Baseline & WeChat 修复增强
 
 - **T0**: 初始化仓库基线（git 不可用，改用 CHANGELOG.md）

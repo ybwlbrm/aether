@@ -1,6 +1,6 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeEach } from 'vitest';
 import type { AgentEventEnvelope } from '@pacc/shared';
-import { projectToRecords, type ActivityRecord } from './activityStore';
+import { projectToRecords, type ActivityRecord, useActivityStore, projectTaskProgress } from './activityStore';
 import { parseSseFrame } from '../api/streamClient';
 
 function env(partial: Partial<AgentEventEnvelope> & { eventType: AgentEventEnvelope['eventType'] }): AgentEventEnvelope {
@@ -86,5 +86,37 @@ describe('parseSseFrame（streamClient 统一帧解析）', () => {
     const { eventName, dataLine } = parseSseFrame('event: agent.status\r\ndata: {"content":"line1\r\ndata: ","more":"x"}\r\n');
     expect(eventName).toBe('agent.status');
     expect(dataLine).toContain('line1');
+  });
+});
+
+describe('activityStore — 跨 Run 去重与隔离（P0-08/P1-12）', () => {
+  beforeEach(() => {
+    useActivityStore.setState({ eventsByConv: {}, cursorByConv: {}, taskCardCache: {} });
+  });
+
+  it('两个不同 Run 的相同 seq 事件不得互相去重（去重键 = eventId 或 sessionId+taskId+seq）', () => {
+    const store = useActivityStore.getState();
+    store.appendEvent('conv1', env({ eventType: 'task.started', seq: 1, taskId: 'run-A' }));
+    store.appendEvent('conv1', env({ eventType: 'task.started', seq: 1, taskId: 'run-B', eventId: 'runB-e1' }));
+    const events = useActivityStore.getState().getEvents('conv1');
+    // 当前实现按 seq 去重 → 只保留 1 条 = RED；正确应保留 2 条（不同 run）
+    expect(events).toHaveLength(2);
+  });
+
+  it('同一 Run 相同 eventId 重复推送（SSE 重放）被去重', () => {
+    const store = useActivityStore.getState();
+    store.appendEvent('conv1', env({ eventType: 'task.started', seq: 1, taskId: 'run-A', eventId: 'e-same' }));
+    store.appendEvent('conv1', env({ eventType: 'task.started', seq: 1, taskId: 'run-A', eventId: 'e-same' }));
+    expect(useActivityStore.getState().getEvents('conv1')).toHaveLength(1);
+  });
+
+  it('projectTaskProgress：agent.completed 不得把 task 标记为完成（P0-18）', () => {
+    const events: AgentEventEnvelope[] = [
+      env({ eventType: 'task.started', seq: 1, taskId: 't-1' }),
+      env({ eventType: 'agent.completed', seq: 2, taskId: 't-1', agentId: 'sisyphus', content: 'done' }),
+    ];
+    const progress = projectTaskProgress(events);
+    // agent.completed ≠ task.completed：任务仍应 running（当前实现误判 completed = RED）
+    expect(progress?.status).toBe('running');
   });
 });

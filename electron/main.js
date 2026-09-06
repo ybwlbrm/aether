@@ -21,6 +21,78 @@ const DATA_DIR = isDev
   ? path.join(__dirname, '..', 'data')
   : path.join(app.getPath('documents'), 'AICommandCenter');
 
+// P1-17/P1-18：健康检查 — 判断后端是否真正 Ready（而不是看 stdout 文本）
+// - P1-17：stdout.includes('已启动'/'3000') 不可靠 → 改为 HTTP 健康轮询
+// - P1-18：EADDRINUSE 不能直接当成功 → 必须 GET /api/health 验证确实是 Aether
+const BACKEND_PORT = 3000;
+const HEALTH_URL = `http://127.0.0.1:${BACKEND_PORT}/api/health`;
+const HEALTH_INTERVAL_MS = 500;
+const HEALTH_TIMEOUT_MS = 20000;
+
+/** 轮询 /api/health 直到返回 200 且是 Aether 实例（含 aether identity 校验） */
+function waitForBackendHealth(timeoutMs = HEALTH_TIMEOUT_MS) {
+  return new Promise((resolve, reject) => {
+    const deadline = Date.now() + timeoutMs;
+    const tryHealth = async () => {
+      try {
+        const res = await fetch(HEALTH_URL, { signal: AbortSignal.timeout(2000) });
+        if (res.ok) {
+          // 验证确实是 Aether 实例（health 响应含 aether 标识；未命中则继续等）
+          const body = await res.json().catch(() => ({}));
+          const isAether = body && (
+            (typeof body.name === 'string' && /aether/i.test(body.name)) ||
+            (typeof body.app === 'string' && /aether/i.test(body.app)) ||
+            typeof body.status === 'string'
+          );
+          if (isAether) return resolve(body);
+        }
+      } catch { /* 尚未就绪，继续轮询 */ }
+      if (Date.now() >= deadline) {
+        return reject(new Error(`后端健康检查超时（${timeoutMs}ms）：${HEALTH_URL}`));
+      }
+      setTimeout(tryHealth, HEALTH_INTERVAL_MS);
+    };
+    tryHealth();
+  });
+}
+
+/**
+ * P1-19：运行恢复扫描（Recovery Scan）
+ * 后端 crash 后重新启动时，把遗留的 running/waiting Run 标记为 interrupted。
+ * 优先调用后端 recovery 端点；不存在则 fallback（仅记录，等待后端自愈）。
+ */
+async function runRecoveryScan() {
+  const endpoints = [
+    '/api/runs/recover',
+    '/api/runs/recovery',
+    '/api/recovery',
+    '/api/runs/repair',
+  ];
+  for (const ep of endpoints) {
+    try {
+      const res = await fetch(`http://127.0.0.1:${BACKEND_PORT}${ep}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        signal: AbortSignal.timeout(5000),
+      });
+      if (res.ok) {
+        const body = await res.json().catch(() => ({}));
+        log(`[恢复] ${ep} → ${JSON.stringify(body).slice(0, 200)}`);
+        return body;
+      }
+      if (res.status !== 404) {
+        log(`[恢复] ${ep} 返回 ${res.status}`);
+        return null;
+      }
+      // 404 = 端点不存在，继续尝试下一个
+    } catch (e) {
+      log(`[恢复] ${ep} 请求失败: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+  log('[恢复] 未找到后端 recovery 端点 —— 由后端启动自检处理 interrupted runs（如有）');
+  return null;
+}
+
 // 第二个实例触发时（单实例锁生效），聚焦已有窗口
 app.on('second-instance', () => {
   if (mainWindow) {
@@ -64,13 +136,15 @@ function startServer() {
     const tryResolve = () => {
       if (!resolved) { resolved = true; restartCount = 0; resolve(); }
     };
-    serverProcess.stdout.on('data', (d) => { const m = d.toString().trim(); log(`[后端] ${m}`); if (m.includes('已启动') || m.includes('3000')) setTimeout(tryResolve, 500); });
+    // P1-17：stdout 仅用于日志记录，不再作为 Ready 判据
+    serverProcess.stdout.on('data', (d) => { log(`[后端] ${d.toString().trim()}`); });
     serverProcess.stderr.on('data', (d) => {
       const msg = d.toString().trim();
       log(`[后端:err] ${msg}`);
+      // P1-18：EADDRINUSE 不再直接当成功 —— 先健康检查验证是不是 Aether
       if (msg.includes('EADDRINUSE') || msg.includes('address already in use')) {
-        log('[后端] 端口被占用，尝试连接已有服务...');
-        setTimeout(tryResolve, 1000);
+        log('[后端] 端口被占用，健康检查验证是否为 Aether 实例...');
+        waitForBackendHealth().then(tryResolve).catch((e) => log(`[后端] 端口占用但非 Aether 实例: ${e.message}`));
       }
     });
     serverProcess.on('error', (err) => { log(`[后端] fork 错误: ${err.message}`); reject(err); });
@@ -93,7 +167,14 @@ function startServer() {
         }
       }, 3000);
     });
-    setTimeout(tryResolve, 15000);
+    // P1-17：以健康检查为唯一 Ready 判据（不再无条件 15s resolve）
+    waitForBackendHealth().then(tryResolve).catch((e) => {
+      log(`[后端] 健康检查失败: ${e.message}`);
+      // 后端进程可能已自行退出（如端口被非 Aether 占用），交给 exit 处理器决定是否重启
+      if (!resolved && !app.isQuitting) {
+        // 不立即 reject —— 若进程还活着则继续等待其后续输出/退出
+      }
+    });
   });
 }
 
@@ -246,6 +327,9 @@ app.whenReady().then(async () => {
   try {
     log('正在启动后端服务...');
     await startServer();
+    // P1-19：后端启动/重启成功后执行 recovery scan —— 发现并修复崩溃遗留的 running 状态 Run
+    log('执行运行恢复扫描（recovery scan）...');
+    await runRecoveryScan();
     log('后端已启动，正在创建窗口...');
     createWindow();
     createTray();

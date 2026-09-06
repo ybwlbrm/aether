@@ -1,86 +1,43 @@
-# ============ 依赖 ============
 node_modules/
-
-# ============ 构建产物 ============
 dist/
+.env
+*.db
+*.sqlite
+.DS_Store
+Thumbs.db
+tsconfig.tsbuildinfo
+__pycache__/
+
+# P2-1 修复：数据目录包含加密密钥、settings.json（3MB base64 背景图）、数据库等敏感数据
+data/
+*.log
+workspace/
+
+# 构建产物与运行时日志（Wave5 补全）
 dist_electron/
 dist_exe/
 dist_exe_old_*/
-**/dist/
+server_stdout.txt
+server_stderr.txt
+android/**/build/
+android/app/build/
+android/capacitor-cordova-android-plugins/build/
 build/backend-bundle.js
 build/sql-wasm.js
 build/sql-wasm.wasm
 build/sqljs_dist/
-build/lib/
-build/worker.js
-build/static/
-*.tsbuildinfo
-tsconfig.tsbuildinfo
 
-# ============ 本地数据（绝不提交） ============
-data/
-**/data/
-*.db
-*.sqlite
-*.sqlite3
-*.db-journal
-chat_history.json
-memory.json
-projects.json
-settings.json
-workspace/
-
-# ============ 敏感凭证 ============
-.env
-.env.*
-!.env.example
-*.pem
-*.key
-*.keystore
-*.jks
-keystore.properties
-.encryption_key*
-supabase-fix-rls.sql
-supabase-schema.sql
-
-# ============ 日志 ============
-*.log
-server_stdout.txt
-server_stderr.txt
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-
-# ============ Android 构建 ============
-android/**/build/
-android/app/build/
-android/.gradle/
-android/capacitor-cordova-android-plugins/build/
-android/local.properties
-android/app/src/main/assets/public/
-
-# ============ 系统文件 ============
-.DS_Store
-Thumbs.db
-*.swp
-.idea/
-.vscode/
-*.suo
-*.user
-
-# ============ 其他 ============
-__pycache__/
-*.pyc
-.omo/
-qa/
+# Android 签名密钥（本地生成，不提交）
+android/keystore.properties
+android/*.jks
 
 # 外部工具二进制（按需下载，不入库）
 build/ffmpeg.exe
 build/ffprobe.exe
 build/yt-dlp.exe
 
-# 恢复后端源码中的 data 业务模块
-# （上面 **/data/ 规则会把 src/backend/src/modules/data 源码目录也排除掉，
-#   这里显式恢复——modules/data 是后端路由模块代码，不是本地数据）
-!src/backend/src/modules/data/
-!src/backend/src/modules/data/**
+# Aether 2.0 build artifacts (from bundle build)
+build/lib/
+build/static/
+build/worker.js
+.idea/

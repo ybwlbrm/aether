@@ -64,8 +64,15 @@ function isEnvelopePayload(payload: any): payload is AgentEventEnvelope {
 /**
  * 统一 SSE 流解析器 — 全事件转 StreamEvent 判别联合。
  * 后端双轨（新协议 envelope 事件名 + 旧事件名）在此单点归一，页面只消费联合。
+ *
+ * P0-14/P0-15：返回 Promise<void> — 只有流**完整结束**（或业务终结事件已收到）
+ * 才 resolve；网络错误 / 解析错误 / 意外 EOF 一律 reject，让调用方（useStreamSend）
+ * 能正确进入 error 分支。onStreamError 回调保留为双保险（兼容层）。
  */
-function parseSSEStream(reader: ReadableStreamDefaultReader<Uint8Array>, callbacks: StreamCallbacks): void {
+function parseSSEStream(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  callbacks: StreamCallbacks,
+): Promise<void> {
   const decoder = new TextDecoder();
   let buffer = '';
   let sawTerminal = false; // task.completed / task.failed / agent.output.completed
@@ -133,7 +140,7 @@ function parseSSEStream(reader: ReadableStreamDefaultReader<Uint8Array>, callbac
     }
   };
 
-  const process = async () => {
+  const process = async (): Promise<void> => {
     let eof = false;
     while (true) {
       const { done, value } = await reader.read();
@@ -160,7 +167,11 @@ function parseSSEStream(reader: ReadableStreamDefaultReader<Uint8Array>, callbac
     }
   };
 
-  void process().catch((e) => { callbacks.onStreamError?.(e); });
+  // P0-14/P0-15：process 的异常必须向外 reject；同时保留 onStreamError 双保险。
+  return process().catch((e: unknown) => {
+    callbacks.onStreamError?.(e);
+    throw e;
+  });
 }
 
 /**
@@ -193,7 +204,8 @@ export async function streamConversation(
     throw new Error(err.error?.message || `请求失败: ${res.status}`);
   }
   if (!res.body) throw new Error('浏览器不支持流式响应');
-  parseSSEStream(res.body.getReader(), callbacks);
+  // P0-14：await 整个 SSE 流 —— 完整结束 / 业务终态 / 错误 / abort 后才返回
+  await parseSSEStream(res.body.getReader(), callbacks);
 }
 
 /**
@@ -215,7 +227,8 @@ export async function streamOrchestrate(
     throw new Error(err.error?.message || `请求失败: ${res.status}`);
   }
   if (!res.body) throw new Error('浏览器不支持流式响应');
-  parseSSEStream(res.body.getReader(), callbacks);
+  // P0-14：await 整个 SSE 流 —— 完整结束 / 业务终态 / 错误 / abort 后才返回
+  await parseSSEStream(res.body.getReader(), callbacks);
 }
 
 /**

@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
-import { sendCommand, getClient, getConversations } from '../api/supabase';
+import { sendCommand, getClient, getConversations, getMessages, subscribeMessages, getSyncState, onSyncStateChange, type SyncStatus } from '../api/supabase';
 
 interface Message {
   id: string;
@@ -97,14 +97,15 @@ export default function NewCommand({ onBack }: Props) {
   const [permissionLevel, setPermissionLevel] = useState(2);
   const [imageAttachments, setImageAttachments] = useState<string[]>([]);
   const [fileAttachments, setFileAttachments] = useState<{ name: string; dataUrl: string }[]>([]);
-  const listRef = useRef<HTMLDivElement>(null);
-  const channelRef = useRef<any>(null);
-  const sbRef = useRef<any>(null);
+const listRef = useRef<HTMLDivElement>(null);
+  const unsubRealtimeRef = useRef<(() => void) | null>(null);
   const remoteConvIdRef = useRef<string>(generateConvId());
   const seenMsgIdsRef = useRef<Set<string>>(new Set());
-const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-const assistantReceivedRef = useRef(false);
-const fileInputRef = useRef<HTMLInputElement>(null);
+  // P0-A08：Realtime 连接状态（connected 时不轮询，断开时降级轮询）
+  const [syncStatus, setSyncStatus] = useState<SyncStatus>(() => getSyncState().status);
+  const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const assistantReceivedRef = useRef(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   // 自动滚动
   useEffect(() => {
@@ -116,8 +117,9 @@ const fileInputRef = useRef<HTMLInputElement>(null);
   // 清理订阅 + 定时器
   useEffect(() => {
     return () => {
-      if (channelRef.current && sbRef.current) {
-        sbRef.current.removeChannel(channelRef.current).catch(() => {});
+      if (unsubRealtimeRef.current) {
+        unsubRealtimeRef.current();
+        unsubRealtimeRef.current = null;
       }
       if (timeoutRef.current) { clearTimeout(timeoutRef.current); timeoutRef.current = null; }
     };
@@ -151,23 +153,22 @@ const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => { loadRemoteHistory(); }, [loadRemoteHistory]);
 
-  // Q4 优化：Realtime 轮询兜底 — 网络波动或 Realtime 心跳延迟时，
-  // 每 2s 拉取一次最新消息保证回复不"卡死"（与 Realtime 推送互补，不重复显示）
+  // P0-A08：订阅 Realtime 连接状态 —— connected 时不轮询，断开时降级轮询
   useEffect(() => {
+    return onSyncStateChange((s) => setSyncStatus(s.status));
+  }, []);
+
+  // P0-A08：Realtime 断线兜底 — 网络波动或 Realtime 连接丢失时，
+  // 每 2s 拉取一次最新消息保证回复不"卡死"；恢复连接后自动停止。
+  useEffect(() => {
+    if (syncStatus === 'connected') return; // Realtime 正常 → 不启动轮询
     let cancelled = false;
     const interval = setInterval(async () => {
       if (cancelled) return;
       // 仅在发送中或已有消息时轮询（空对话页无谓轮询无意义）
       try {
-        const sb = getClient();
-        if (!sb) return;
-        const { data } = await sb
-          .from('messages_sync')
-          .select('*')
-          .eq('conversation_id', remoteConvIdRef.current)
-          .order('created_at', { ascending: true })
-          .limit(50);
-        if (!data) return;
+        const data = await getMessages(remoteConvIdRef.current);
+        if (cancelled || !data) return;
         const msgs = data.filter((m: any) => m.role === 'user' || m.role === 'assistant');
         for (const m of msgs) {
           if (seenMsgIdsRef.current.has(m.id)) continue;
@@ -197,43 +198,18 @@ const fileInputRef = useRef<HTMLInputElement>(null);
       cancelled = true;
       clearInterval(interval);
     };
-  }, []);
-
-  // 建立 Realtime 订阅，监听所有新消息
+  }, [syncStatus]);
+  // 建立 Realtime 订阅，监听所有新消息（P0-A07：复用 channel registry，
+  // 引用计数由 subscribeMessages 管理，卸载自动释放）
   const setupRealtime = () => {
-    const sb = getClient();
-    if (!sb) return;
-    sbRef.current = sb;
-
-    if (channelRef.current) {
-      sb.removeChannel(channelRef.current).catch(() => {});
-    }
-
-    channelRef.current = sb.channel('new-command-messages')
-      .on('postgres_changes',
-        {
-          event: 'INSERT',
-          schema: 'public',
-          table: 'messages_sync',
-          filter: `conversation_id=eq.${remoteConvIdRef.current}`,
-        },
-        handleMessage,
-      )
-      .on('postgres_changes',
-        {
-          event: 'UPDATE',
-          schema: 'public',
-          table: 'messages_sync',
-          filter: `conversation_id=eq.${remoteConvIdRef.current}`,
-        },
-        handleMessage,
-      )
-      .subscribe();
+    if (unsubRealtimeRef.current) return; // 已订阅，避免重复建 channel
+    unsubRealtimeRef.current = subscribeMessages(remoteConvIdRef.current, (newMsg) => {
+      handleMessage(newMsg as Message);
+    });
   };
 
   // 统一处理 INSERT 和 UPDATE（流式逐字更新）
-  const handleMessage = (payload: any) => {
-    const newMsg = payload.new as Message;
+  const handleMessage = (newMsg: Message) => {
     // 从 tool_results 提取 reasoning 更新思考横条（与桌面端一致）
     if (newMsg.tool_results) {
       try {

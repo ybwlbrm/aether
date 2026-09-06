@@ -1,22 +1,23 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import {
-  isConfigured,
-  saveConfig,
-  loadConfig,
-  registerDevice,
-  disconnect,
-  getClient,
   getStoredUrl,
+  getStoredAnonKey,
+  signOut,
+  getSession,
+  onAuthStateChange,
+  registerDevice,
+  cleanup,
 } from './api/supabase';
 import ConversationList from './components/ConversationList';
 import MessageView from './components/MessageView';
 import NewCommand from './components/NewCommand';
 import AppearanceSettings from './components/AppearanceSettings';
+import LoginPage from './components/LoginPage';
 import { LiquidGlassFilter } from './components/LiquidGlassFilter';
 import './App.css';
 
 // 页面类型
-type Page = 'config' | 'list' | 'chat' | 'new-command' | 'appearance';
+type Page = 'auth' | 'list' | 'chat' | 'new-command' | 'appearance';
 
 interface Conversation {
   id: string;
@@ -28,28 +29,11 @@ interface Conversation {
 }
 
 export default function App() {
-  const [page, setPage] = useState<Page>('config');
+  const [page, setPage] = useState<Page>('auth');
+  const [booting, setBooting] = useState(true);
   const [selectedConv, setSelectedConv] = useState<Conversation | null>(null);
-  const [url, setUrl] = useState('');
-  const [key, setKey] = useState('');
   const [statusMsg, setStatusMsg] = useState('');
-  const [connecting, setConnecting] = useState(false);
-  const [connected, setConnected] = useState(false);
-
-  useEffect(() => {
-    if (isConfigured()) {
-      setConnected(true);
-      setPage('list');
-      registerDevice().catch(() => {});
-    } else {
-      // 密钥不再持久化：重启后预填 URL，要求重新输入 Key
-      const storedUrl = getStoredUrl();
-      if (storedUrl) {
-        setUrl(storedUrl);
-        setStatusMsg('出于安全，密钥不再持久保存，请重新输入 Key');
-      }
-    }
-  }, []);
+  const authUnsubRef = useRef<(() => void) | null>(null);
 
   // 全局恢复：应用启动时从 localStorage 恢复自定义背景
   useEffect(() => {
@@ -72,45 +56,67 @@ export default function App() {
     } catch { /* ignore */ }
   }, []);
 
+  // 注册认证状态监听（单一订阅，client 重建后可重入）
+  const subscribeAuth = useCallback(() => {
+    if (authUnsubRef.current) {
+      authUnsubRef.current();
+      authUnsubRef.current = null;
+    }
+    authUnsubRef.current = onAuthStateChange((event, session) => {
+      // 初始事件（读取持久化 session）不处理，由启动流程决定页面
+      if (event === 'INITIAL_SESSION') return;
+      // 登出 / session 失效 → 回到登录页
+      if (!session || event === 'SIGNED_OUT') {
+        setPage('auth');
+        setSelectedConv(null);
+        setStatusMsg('已退出登录');
+      }
+    });
+  }, []);
+
+  // 启动流（任务 §21）：load auth session → validate → device registration → 主界面
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const session = await getSession();
+      if (cancelled) return;
+      subscribeAuth();
+
+      if (session) {
+        // 已登录：注册设备后进入主界面（注册失败不阻断，记录警告）
+        const registered = await registerDevice();
+        if (cancelled) return;
+        if (!registered) {
+          setStatusMsg('⚠️ 设备注册失败，远程命令可能无法下发');
+        }
+        setPage('list');
+      }
+      setBooting(false);
+    })();
+    return () => { cancelled = true; };
+  }, [subscribeAuth]);
+
   // 全局挂载 Liquid Glass SVG 滤镜（供 backdrop-filter: url(#liquid-lens) 引用）
   const glassFilter = <LiquidGlassFilter />;
 
-  const handleConnect = async () => {
-    if (!url.trim() || !key.trim()) {
-      setStatusMsg('请输入 Supabase URL 和 Key');
-      return;
-    }
-    setConnecting(true);
-    setStatusMsg('连接中...');
+  const handleAuthenticated = useCallback(() => {
+    // 认证成功后确保 auth 监听已挂载（client 此时已创建）
+    subscribeAuth();
+    setPage('list');
+    setTimeout(() => setStatusMsg(''), 1200);
+  }, [subscribeAuth]);
 
+  const handleSignOut = async () => {
     try {
-      saveConfig(url.trim(), key.trim());
-      const registered = await registerDevice();
-      if (registered) {
-        setConnected(true);
-        setStatusMsg('✅ 连接成功');
-        setTimeout(() => {
-          setPage('list');
-          setStatusMsg('');
-        }, 500);
-      } else {
-        setStatusMsg('❌ 设备注册失败，请检查配置');
-      }
+      await signOut();
     } catch (e: unknown) {
-      setStatusMsg(`❌ 连接失败: ${e instanceof Error ? e.message : String(e)}`);
+      console.warn('登出失败:', e instanceof Error ? e.message : e);
     } finally {
-      setConnecting(false);
+      cleanup();
+      setPage('auth');
+      setSelectedConv(null);
+      setStatusMsg('已退出登录');
     }
-  };
-
-  const handleDisconnect = () => {
-    disconnect();
-    setConnected(false);
-    setPage('config');
-    setSelectedConv(null);
-    setUrl('');
-    setKey('');
-    setStatusMsg('已断开连接');
   };
 
   const handleSelectConv = (conv: Conversation) => {
@@ -123,46 +129,32 @@ export default function App() {
     setPage('list');
   };
 
-  // 配置页面
-  if (page === 'config') {
+  // 启动中：显示加载页
+  if (booting) {
     return (
       <>
         {glassFilter}
         <div className="config-page">
-        <h1>Aether</h1>
-        <p>连接你的 Supabase 项目<br />以远程控制桌面端 Aether</p>
-        <div className="config-form">
-          <div>
-            <label>Supabase URL</label>
-            <input
-              value={url}
-              onChange={(e) => setUrl(e.target.value)}
-              placeholder="https://xxx.supabase.co"
-              autoCapitalize="none"
-              autoCorrect="off"
-            />
+          <h1>Aether</h1>
+          <div className="loading">
+            <div className="spinner" />
+            正在恢复会话...
           </div>
-          <div>
-            <label>Supabase Service Role Key（非 anon key）</label>
-            <input
-              type="password"
-              value={key}
-              onChange={(e) => setKey(e.target.value)}
-              placeholder="eyJhbGciOiJIUzI1NiIs..."
-              autoCapitalize="none"
-              autoCorrect="off"
-            />
-            <p style={{ fontSize: 11, marginTop: 4, color: 'var(--text-tertiary)' }}>
-              安全提示：Key 仅保存在内存中，不会写入设备存储，重启 App 需重新输入。
-              请在 Supabase 控制台 → Settings → API 中复制 Service Role Key。
-            </p>
-          </div>
-          <button className="btn-primary" onClick={handleConnect} disabled={connecting || !url.trim() || !key.trim()}>
-            {connecting ? '连接中...' : '连接'}
-          </button>
-          {statusMsg && <div className="status-msg" style={{ color: statusMsg.includes('✅') ? 'var(--success)' : statusMsg.includes('❌') ? 'var(--danger)' : 'var(--text-secondary)' }}>{statusMsg}</div>}
         </div>
-        </div>
+      </>
+    );
+  }
+
+  // 登录 / 注册页面（P0-A01/A02：不再手填 Service Role Key）
+  if (page === 'auth') {
+    return (
+      <>
+        {glassFilter}
+        <LoginPage
+          initialUrl={getStoredUrl() ?? undefined}
+          initialAnonKey={getStoredAnonKey() ?? undefined}
+          onAuthenticated={handleAuthenticated}
+        />
       </>
     );
   }
@@ -223,11 +215,16 @@ export default function App() {
           <span className="nav-icon">🎨</span>
           外观
         </button>
-        <button onClick={handleDisconnect}>
-          <span className="nav-icon">⚙️</span>
-          断开
+        <button onClick={handleSignOut}>
+          <span className="nav-icon">🚪</span>
+          登出
         </button>
       </div>
+      {statusMsg && (
+        <div className="status-msg" style={{ position: 'fixed', bottom: 72, left: 16, right: 16, textAlign: 'center', color: statusMsg.includes('⚠️') ? 'var(--warning, #f59e0b)' : 'var(--text-secondary)' }}>
+          {statusMsg}
+        </div>
+      )}
     </>
   );
 }
