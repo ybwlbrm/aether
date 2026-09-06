@@ -17,6 +17,8 @@ export interface SyncConfig {
   deviceId: string;
   deviceName?: string;
   deviceType?: 'desktop' | 'mobile';
+  /** 关联的 Supabase Auth 用户 id（可选）。填写后桌面端主动同步的数据对手机端登录用户可见（RLS 行级隔离）。 */
+  userId?: string;
 }
 
 const SYNC_CONFIG_FILE = 'sync-config.json';
@@ -97,6 +99,7 @@ export async function registerDevice(sb: SupabaseClient, cfg: SyncConfig): Promi
   // 直接 upsert，确保 desktop 设备一定存在于 devices 表（conversations_sync/messages_sync 的 FK 依赖它）。
   const { error } = await sb.from('devices').upsert({
     id: cfg.deviceId,
+    user_id: cfg.userId ?? null,
     name: cfg.deviceName || 'Aether 桌面端',
     type: 'desktop',
     last_seen_at: new Date().toISOString(),
@@ -127,6 +130,7 @@ export async function syncConversationsToSupabase(sb: SupabaseClient, cfg: SyncC
       const { error: convErr } = await sb.from('conversations_sync').upsert({
         id: conv.id,
         device_id: cfg.deviceId,
+        user_id: cfg.userId ?? null,
         title: conv.title,
         model: conv.model,
         message_count: msgs.length,
@@ -141,6 +145,7 @@ export async function syncConversationsToSupabase(sb: SupabaseClient, cfg: SyncC
           id: msg.id,
           conversation_id: msg.conversationId,
           device_id: cfg.deviceId,
+          user_id: cfg.userId ?? null,
           role: msg.role,
           content: msg.content,
           tool_calls: msg.toolCalls,
@@ -197,6 +202,8 @@ export function registerSyncConfigRoutes(app: FastifyInstance, config: BackendCo
       deviceId: body.deviceId || `desktop-${Date.now()}`,
       deviceName: body.deviceName || 'Aether 桌面端',
       deviceType: 'desktop',
+      // 可选：Supabase Auth 用户 id，用于 RLS 行级隔离（桌面端主动同步数据对手机端登录用户可见）
+      userId: body.userId ? String(body.userId) : undefined,
     };
 
     // 断开旧连接
@@ -274,6 +281,7 @@ export function registerSyncConfigRoutes(app: FastifyInstance, config: BackendCo
     if (data.knowledge) {
       const { error } = await sb.from('knowledge').upsert({
         device_id: deviceId,
+        user_id: syncConfig.userId ?? null,
         data: data.knowledge,
         updated_at: now,
       }, { onConflict: 'device_id' });
@@ -284,6 +292,7 @@ export function registerSyncConfigRoutes(app: FastifyInstance, config: BackendCo
     if (data.settings) {
       const { error } = await sb.from('settings').upsert({
         device_id: deviceId,
+        user_id: syncConfig.userId ?? null,
         data: data.settings,
         updated_at: now,
       }, { onConflict: 'device_id' });
@@ -297,6 +306,7 @@ export function registerSyncConfigRoutes(app: FastifyInstance, config: BackendCo
     // 记录同步日志
     await sb.from('sync_log').insert({
       device_id: deviceId,
+      user_id: syncConfig.userId ?? null,
       action: 'upload',
       status: 'success',
       created_at: now,

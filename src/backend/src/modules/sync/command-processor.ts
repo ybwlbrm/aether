@@ -71,6 +71,34 @@ export async function processRemoteCommand(
     // 标记为 processing
     await sb.from('remote_commands').update({ status: 'processing' }).eq('id', commandId);
 
+    // P0-A17: 幂等键去重 —— 移动端断网离线队列恢复后可能重复投递同一逻辑命令
+    //（不同 remote_commands.id，但携带相同 client_command_id）。
+    // 若该 client_command_id 已有非 pending/non-failed 的行，说明已处理/处理中，跳过并复制结果。
+    const clientCommandId = command.client_command_id;
+    if (clientCommandId) {
+      try {
+        const { data: dup } = await sb.from('remote_commands')
+          .select('id, status, conversation_id')
+          .eq('client_command_id', clientCommandId)
+          .neq('id', commandId)
+          .in('status', ['processing', 'completed'])
+          .limit(1);
+        if (dup && dup.length > 0) {
+          console.log(`[Sync] 命令 ${commandId} 为重复投递（client_command_id=${clientCommandId}），跳过处理并复制上游结果`);
+          try {
+            await sb.from('remote_commands').update({
+              status: dup[0].status,
+              conversation_id: dup[0].conversation_id,
+              processed_at: new Date().toISOString(),
+            }).eq('id', commandId);
+          } catch { /* 重复行结果复制失败不阻塞 */ }
+          return;
+        }
+      } catch (e: unknown) {
+        console.warn('[Sync] 幂等键去重查询失败（继续处理）:', e instanceof Error ? e.message : e);
+      }
+    }
+
     // 获取 AI Provider（text 能力）
     const provider = getProviderByCapability('text', backendConfig.encryptionKey);
 
@@ -206,6 +234,7 @@ export async function processRemoteCommand(
         const { error: convErr } = await sb.from('conversations_sync').upsert({
           id: effectiveConvId,
           device_id: cfg.deviceId,
+          user_id: command.user_id ?? null, // 继承命令发起者身份，手机端 RLS 才可见
           title: convTitle,
           model: provider?.defaultModel || 'gpt-4o',
           message_count: db.select().from(messages).where(eq(messages.conversationId, effectiveConvId)).all().length,
@@ -219,6 +248,7 @@ export async function processRemoteCommand(
           id: effectiveUserMsgId,
           conversation_id: effectiveConvId,
           device_id: cfg.deviceId,
+          user_id: command.user_id ?? null,
           role: 'user',
           content,
           created_at: now,
@@ -243,6 +273,7 @@ export async function processRemoteCommand(
               id: hm.id,
               conversation_id: hm.conversationId,
               device_id: cfg.deviceId,
+              user_id: command.user_id ?? null,
               role: hm.role,
               content: hm.content,
               tool_calls: hm.toolCalls,
@@ -289,7 +320,7 @@ export async function processRemoteCommand(
     // 无 Provider：同步错误消息后结束
     if (!provider) {
       const errMsg = '未配置 AI Provider，请在 Aether 桌面端添加 AI Provider';
-      await syncAssistantError(sb, cfg, convId, commandId, content, errMsg, now, backendConfig);
+      await syncAssistantError(sb, cfg, convId, commandId, command.user_id, content, errMsg, now, backendConfig);
       return;
     }
 
@@ -407,6 +438,14 @@ export async function processRemoteCommand(
     // 创建 EventBus 用于发射活动事件（桌面端 ActivityStream 消费）
     const eventBus = createEventBus(getDb(), undefined, () => saveDb(backendConfig));
     const runTaskId = randomUUID();
+    // P0-A16: 回填 run_id/task_id 到 remote_commands（移动端 SyncState 可追踪本次执行）
+    void sb.from('remote_commands').update({
+      run_id: runTaskId,
+      task_id: runTaskId,
+    }).eq('id', commandId).then(
+      () => { /* 回填成功 */ },
+      (e: unknown) => console.warn('[Sync] run_id 回填失败（不阻塞）:', e instanceof Error ? e.message : e),
+    );
     eventBus.emit(convId, 'task.started', {
       taskId: runTaskId, agentId: 'main', agentType: 'conversation',
       content: content.slice(0, 200),
@@ -446,7 +485,7 @@ export async function processRemoteCommand(
             const errText = (await resp.text().catch(() => '')).slice(0, 200);
             lastErr = `AI API 请求失败 (${resp.status}): ${errText}`;
             if (resp.status === 429) {
-              await syncAssistantError(sb, cfg, convId, commandId, content, `❌ AI 服务被限流（429）。请稍后再试或更换 API Key。${errText}`, now, backendConfig);
+              await syncAssistantError(sb, cfg, convId, commandId, command.user_id, content, `❌ AI 服务被限流（429）。请稍后再试或更换 API Key。${errText}`, now, backendConfig);
               return;
             }
             throw new Error(lastErr);
@@ -460,7 +499,7 @@ export async function processRemoteCommand(
             lastErr = e instanceof Error ? e.message : String(e);
           }
           if (attempt >= 3) {
-            await syncAssistantError(sb, cfg, convId, commandId, content, `❌ ${lastErr}`, now, backendConfig);
+            await syncAssistantError(sb, cfg, convId, commandId, command.user_id, content, `❌ ${lastErr}`, now, backendConfig);
             return;
           }
           const delay = 2000 * Math.pow(2, attempt);
@@ -470,7 +509,7 @@ export async function processRemoteCommand(
       }
 
       if (!aiResponse) {
-        await syncAssistantError(sb, cfg, convId, commandId, content, `❌ AI 调用失败: ${lastErr || '未知错误'}`, now, backendConfig);
+        await syncAssistantError(sb, cfg, convId, commandId, command.user_id, content, `❌ AI 调用失败: ${lastErr || '未知错误'}`, now, backendConfig);
         return;
       }
 
@@ -523,6 +562,7 @@ export async function processRemoteCommand(
                 id: streamMsgId,
                 conversation_id: convId,
                 device_id: cfg.deviceId,
+                user_id: command.user_id ?? null,
                 role: 'assistant',
                 content: c || '...',
                 tool_results: r ? JSON.stringify({ reasoning: r }) : null,
@@ -627,6 +667,7 @@ export async function processRemoteCommand(
             id: toolCallMsgId,
             conversation_id: convId,
             device_id: cfg.deviceId,
+            user_id: command.user_id ?? null,
             role: 'assistant',
             content: accumulatedContent || JSON.stringify(currentToolCalls.map(tc => tc.function?.name)),
             tool_calls: JSON.stringify(currentToolCalls.map(tc => ({
@@ -698,6 +739,7 @@ export async function processRemoteCommand(
               id: toolMsgId,
               conversation_id: convId,
               device_id: cfg.deviceId,
+              user_id: command.user_id ?? null,
               role: 'tool',
               content: result.slice(0, 3000), // 完整同步到手机端，可展开查看
               tool_calls: JSON.stringify({ id: tc.id, type: 'function', function: { name: funcName, arguments: args } }),
@@ -780,6 +822,7 @@ export async function processRemoteCommand(
       id: finalMsgId,
       conversation_id: convId,
       device_id: cfg.deviceId,
+      user_id: command.user_id ?? null,
       role: 'assistant',
       content: aiContentFinal,
       tool_results: JSON.stringify(usageTotal.total_tokens > 0 ? usageTotal : { total_tokens: Math.max(1, Math.round(aiContentFinal.length / 4)) }),
@@ -790,6 +833,7 @@ export async function processRemoteCommand(
     await sb.from('conversations_sync').upsert({
       id: convId,
       device_id: cfg.deviceId,
+      user_id: command.user_id ?? null,
       title: convTitle,
       model: provider.defaultModel,
       message_count: db.select().from(messages).where(eq(messages.conversationId, convId)).all().length,
@@ -808,6 +852,7 @@ export async function processRemoteCommand(
     // 记录同步日志
     await sb.from('sync_log').insert({
       device_id: cfg.deviceId,
+      user_id: command.user_id ?? null,
       action: 'remote_command',
       status: 'success',
       details: `命令已处理: ${content.slice(0, 100)}`,
@@ -845,6 +890,7 @@ export async function syncAssistantError(
   cfg: SyncConfig,
   convId: string,
   commandId: string,
+  userId: string | null | undefined,
   userContent: string,
   errMsg: string,
   now: string,
@@ -868,6 +914,7 @@ export async function syncAssistantError(
       id: errMsgId,
       conversation_id: convId,
       device_id: cfg.deviceId,
+      user_id: userId ?? null,
       role: 'assistant',
       content: errMsg,
       created_at: new Date().toISOString(),
@@ -877,6 +924,7 @@ export async function syncAssistantError(
     await sb.from('conversations_sync').upsert({
       id: convId,
       device_id: cfg.deviceId,
+      user_id: userId ?? null,
       title: (db.select().from(conversations).where(eq(conversations.id, convId)).get())?.title || '远程命令',
       model: 'unknown',
       message_count: db.select().from(messages).where(eq(messages.conversationId, convId)).all().length,
@@ -895,6 +943,7 @@ export async function syncAssistantError(
 
     await sb.from('sync_log').insert({
       device_id: cfg.deviceId,
+      user_id: userId ?? null,
       action: 'remote_command',
       status: 'failed',
       details: `命令处理失败: ${errMsg.slice(0, 100)}`,

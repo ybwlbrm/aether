@@ -1,11 +1,12 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type { BackendConfig } from '../../config/index.js';
 import { getDb, saveDb } from '../../db/client.js';
-import { conversations, messages } from '../../db/schema/index.js';
+import { conversations } from '../../db/schema/index.js';
 import { eq } from 'drizzle-orm';
 import { getSyncConfig, getSupabaseClient, getRealtimeChannel, setRealtimeChannel, getDeviceRegistered, setDeviceRegistered } from './sync-config.js';
 import { processRemoteCommand } from './command-processor.js';
 import { startPollingFallback, type PollingFallbackHandle } from './polling-fallback.js';
+import { deleteConversationCascade } from '../conversations/delete-conversation.js';
 import type { SyncConfig } from './sync-config.js';
 
 // ============================================================
@@ -79,8 +80,8 @@ export async function setupRealtimeListener(
           try {
             const existing = db.select().from(conversations).where(eq(conversations.id, deletedId)).get();
             if (existing) {
-              db.delete(messages).where(eq(messages.conversationId, deletedId)).run();
-              db.delete(conversations).where(eq(conversations.id, deletedId)).run();
+              // P0-21: 按 FK 依赖顺序级联删除全部关联行（显式删除，兼容未迁移 v13 的旧库）
+              deleteConversationCascade(db, deletedId);
               saveDb(backendConfig);
               console.log('[Sync] 已同步删除本地对话:', deletedId);
             }
