@@ -1,6 +1,8 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { homedir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, symlinkSync } from 'node:fs';
+import { join } from 'node:path';
 import { checkPathSafe, isPathSafe, isPathInAllowedDirs, isPathAllowed } from './path-guard.js';
 
 describe('path-guard — allowedDirs 包含性', () => {
@@ -76,5 +78,57 @@ describe('path-guard — isPathInAllowedDirs（data 模块语义）', () => {
 
   it('空路径返回 false', () => {
     assert.equal(isPathInAllowedDirs('', ['C:/workspace']), false);
+  });
+});
+
+describe('path-guard ・ Level 3 敏感路径防护 (SEC-004)', () => {
+  it('Level 3 仍拒绝 system32 敏感路径段', () => {
+    assert.equal(isPathSafe('C:/Windows/System32/cmd.exe', ['C:/'], 3), false);
+  });
+
+  it('Level 3 仍拒绝 .git 目录', () => {
+    assert.equal(isPathSafe('C:/repo/.git/config', ['C:/repo'], 3), false);
+  });
+
+  it('Level 3 仍拒绝用户 .config 配置目录', () => {
+    const home = homedir().replace(/\\/g, '/');
+    assert.equal(isPathSafe(`${home}/.config/app/settings.json`, ['/'], 3), false);
+  });
+
+  it('Level 3 非敏感路径保持全局可写（主语义不变）', () => {
+    assert.equal(isPathSafe('C:/Users/x/Documents/anything/x.txt', ['C:/a'], 3), true);
+  });
+});
+
+describe('path-guard ・ symlink/junction 逃逸防护 (PATH-001)', () => {
+  it('allowedDirs 内的 junction 指向目录外 → 必须拒绝（realpath 解析后越界）', () => {
+    if (process.platform !== 'win32') return; // junction 主要在 Windows
+    let base: string | null = null;
+    try {
+      base = mkdtempSync(join(tmpdir(), 'pg-link-'));
+      const allowed = join(base, 'safe');
+      const secretDir = join(base, 'secret');
+      mkdirSync(allowed, { recursive: true });
+      mkdirSync(secretDir, { recursive: true });
+      writeFileSync(join(secretDir, 'plan.txt'), 'top-secret');
+      const link = join(allowed, 'link');
+      try {
+        symlinkSync(secretDir, link, 'junction');
+      } catch {
+        return; // 无 junction 权限的环境跳过
+      }
+      // 攻击：allowed 目录内 junction 指向 external secret —— realpath 后必须判定越界
+      const r = checkPathSafe(join(link, 'plan.txt'), [allowed]);
+      assert.equal(r.ok, false, 'junction 逃逸必须被拒绝');
+      // L3 也不能借 junction 逃逸到敏感路径
+      const r3 = checkPathSafe(join(link, 'plan.txt'), [allowed], 3);
+      assert.equal(r3.ok, false, 'L3 经 junction 访问也需被 realpath 拦截');
+    } finally {
+      if (base) { try { rmSync(base, { recursive: true, force: true }); } catch { /* ignore */ } }
+    }
+  });
+
+  it('不含 junction 的正常路径不受影响', () => {
+    assert.equal(isPathSafe('C:/workspace/app/file.ts', ['C:/workspace']), true);
   });
 });

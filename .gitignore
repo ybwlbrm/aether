@@ -9,9 +9,13 @@ tsconfig.tsbuildinfo
 __pycache__/
 
 # P2-1 修复：数据目录包含加密密钥、settings.json（3MB base64 背景图）、数据库等敏感数据
-data/
+# /data/ 仅根目录 —— 避免误伤 src/backend/src/modules/data/（GITIGNORE-BUG-001 修复）
+/data/
 *.log
-workspace/
+/workspace/
+# bundle 产物：build/sqljs_dist 是文件（内含 sql.js wasm base64），非目录
+build/sqljs_dist
+*.lnk
 
 # 构建产物与运行时日志（Wave5 补全）
 dist_electron/
@@ -36,8 +40,26 @@ build/ffmpeg.exe
 build/ffprobe.exe
 build/yt-dlp.exe
 
+# ===== private/local-only (added by audit) =====
+*.apk
+*.exe
+qa/
+.omo/
+smoke_*.txt
+tsc_output.txt
+cap_sync.log
+eb_run*.log
+pack_*.log
+
+.idea/
+*.iml
+
+/src/data/
+
+
 # Aether 2.0 build artifacts (from bundle build)
 build/lib/
 build/static/
 build/worker.js
 .idea/
+

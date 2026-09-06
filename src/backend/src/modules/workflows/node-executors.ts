@@ -9,6 +9,7 @@ import { fetchWithRetry } from '../../lib/fetch-retry.js';
 import { getSettings } from '../../lib/dal.js';
 import { executeCommand } from '../../lib/command.js';
 import { isSafeFetchUrl } from '../../lib/safe-fetch.js';
+import { evaluateCondition } from '../../lib/condition.js';
 import { resolve } from 'node:path';
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
@@ -200,20 +201,13 @@ export async function executeNode(
       }
     }
     case 'condition': {
-      // 条件节点：根据表达式判断走向（简单支持 truthy / 比较）
-      const expr = String(cfg.expression || '');
-      const value = String(cfg.value ?? '');
-      let result = false;
-      if (expr === 'truthy') {
-        result = Boolean(value && value !== 'false' && value !== '0');
-      } else if (expr === 'equals') {
-        result = value === String(cfg.compare ?? '');
-      } else if (expr === 'contains') {
-        result = value.includes(String(cfg.compare ?? ''));
-      } else {
-        result = Boolean(value);
-      }
-      return { output: `条件判断: ${expr || 'truthy'} → ${result ? '通过' : '不通过'}`, data: { passed: result } };
+      // 条件节点（WF-001 / P0-28）：13 种操作符安全求值（无 eval）
+      // 优先使用 operator 字段；兼容旧 expression 字段（truthy/equals/contains）
+      const op = String((cfg as { operator?: unknown }).operator || cfg.expression || 'truthy');
+      const value: unknown = cfg.value;
+      const compare: unknown = cfg.compare;
+      const result = evaluateCondition(op, value, compare);
+      return { output: `条件判断: ${op} → ${result ? '通过' : '不通过'}`, data: { passed: result } };
     }
     case 'system': {
       // 系统命令节点：执行 shell 命令（如音量控制、打开程序等）

@@ -22,6 +22,7 @@ import {
 } from '../core/models/index.js';
 import { ModelRegistry } from '../core/models/index.js';
 import { decrypt, isEncrypted } from './crypto.js';
+import { ProviderCredentialError } from '../core/errors/index.js';
 
 type Db = SQLJsDatabase<typeof schema>;
 
@@ -53,8 +54,12 @@ function rowToLegacyProvider(
   if (encryptionKey && isEncrypted(apiKey)) {
     try {
       apiKey = decrypt(apiKey, encryptionKey);
-    } catch {
-      // 解密失败时保留原值（上层会得到 401，可定位为密钥问题）
+    } catch (cause) {
+      // P0-13b/P0-14 修复：解密失败 → ProviderCredentialError 停止执行。
+      // 绝不把密文当 API Key 继续发送（否则必然 401，且用户无法定位是密钥损坏）。
+      // 单 provider 请求（buildRuntimeForProvider）会抛给调用方；
+      // buildAllRuntimes 在循环内 catch 后跳过损坏 provider。
+      throw new ProviderCredentialError(row.name || row.id, cause);
     }
   }
   return {
@@ -113,10 +118,16 @@ export function buildAllRuntimes(
   const rows = db.select().from(schema.providers).all();
   const runtimes = new Map<string, ReturnType<typeof buildModelRuntime>>();
   for (const row of rows) {
-    const config = rowToLegacyProvider(row, encryptionKey);
-    const runtime = buildModelRuntime(config);
-    registerProviderModels(registry, config);
-    runtimes.set(row.id, runtime);
+    try {
+      const config = rowToLegacyProvider(row, encryptionKey);
+      const runtime = buildModelRuntime(config);
+      registerProviderModels(registry, config);
+      runtimes.set(row.id, runtime);
+    } catch (err) {
+      // P0-14: 单个 provider 凭据损坏不应拖垮全部 provider 的 runtime 构建
+      const name = row.name || row.id;
+      console.warn(`[ModelRuntimeBridge] 跳过凭据损坏的 provider "${name}":`, err instanceof Error ? err.message : String(err));
+    }
   }
   return runtimes;
 }

@@ -119,4 +119,22 @@ describe('activityStore — 跨 Run 去重与隔离（P0-08/P1-12）', () => {
     // agent.completed ≠ task.completed：任务仍应 running（当前实现误判 completed = RED）
     expect(progress?.status).toBe('running');
   });
+
+  it('EVT-003: 统一事件身份 = eventId 优先（不同 eventId 不因 seq 相同被误杀）', () => {
+    const store = useActivityStore.getState();
+    store.appendEvents('conv1', [env({ eventType: 'agent.started', seq: 5, taskId: 'r1', eventId: 'e-5' })]);
+    // 另一事件 eventId 不同但 sessionId+taskId+seq 相同：eventId 全局唯一 → 应视为不同事件
+    store.appendEvent('conv1', env({ eventType: 'agent.started', seq: 5, taskId: 'r1', eventId: 'e-5-bis' }));
+    expect(useActivityStore.getState().getEvents('conv1')).toHaveLength(2);
+  });
+
+  it('EVT-003: 两个入口对相同 eventId 的去重行为一致（append 后 batch 重放不重复）', () => {
+    const store = useActivityStore.getState();
+    store.appendEvent('conv1', env({ eventType: 'task.started', seq: 1, taskId: 'r1', eventId: 'shared-1' }));
+    store.appendEvents('conv1', [env({ eventType: 'task.started', seq: 1, taskId: 'r1', eventId: 'shared-1' })]);
+    expect(useActivityStore.getState().getEvents('conv1')).toHaveLength(1);
+    // 不同 run：sessionId 不同且 eventId 不同 → 全部保留
+    store.appendEvents('conv1', [env({ eventType: 'agent.started', seq: 1, sessionId: 's-2', taskId: 'run-B', eventId: 'e-b1' })]);
+    expect(useActivityStore.getState().getEvents('conv1')).toHaveLength(2);
+  });
 });

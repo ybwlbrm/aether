@@ -164,6 +164,9 @@ function parseSSEStream(
     // 断流检测：EOF 但未收到任何终结事件 → 暴露 stream-truncated（对齐 harness STREAM_CLOSED 语义）
     if (eof && !sawTerminal) {
       emit({ kind: 'stream-truncated' });
+      // EVT-002（P0-15）：断流必须让 Promise reject —— 调用方据此进入 error 分支，
+      // 不能让 UI 认为流已正常结束（否则出现"回答只生成一半"的假稳定状态）。
+      throw new Error('stream-truncated: 未收到业务终结事件（连接可能中断）');
     }
   };
 

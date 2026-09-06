@@ -37,14 +37,16 @@ function waitForBackendHealth(timeoutMs = HEALTH_TIMEOUT_MS) {
       try {
         const res = await fetch(HEALTH_URL, { signal: AbortSignal.timeout(2000) });
         if (res.ok) {
-          // 验证确实是 Aether 实例（health 响应含 aether 标识；未命中则继续等）
+          // E1-001：必须是真正的 Aether 后端 —— 校验 health 响应的显式身份标识
+          // （app/name 含 aether），而不是凭任意 JSON 的 status 字段就判定成功。
+          // 防止"3000 被其他服务占用 → 误认为后端已启动"。
           const body = await res.json().catch(() => ({}));
-          const isAether = body && (
-            (typeof body.name === 'string' && /aether/i.test(body.name)) ||
-            (typeof body.app === 'string' && /aether/i.test(body.app)) ||
-            typeof body.status === 'string'
-          );
-          if (isAether) return resolve(body);
+          const appId = typeof body.app === 'string' ? body.app : '';
+          const nameId = typeof body.name === 'string' ? body.name : '';
+          const isAether = appId.toLowerCase() === 'aether' || /aether/i.test(nameId);
+          if (isAether && typeof body.version === 'string' && body.version) {
+            return resolve(body);
+          }
         }
       } catch { /* 尚未就绪，继续轮询 */ }
       if (Date.now() >= deadline) {

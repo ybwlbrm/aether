@@ -113,4 +113,41 @@ describe('streamClient — SSE 流错误必须 reject（P0-14/P0-15）', () => {
       .rejects.toThrow('服务器内部错误');
     vi.unstubAllGlobals();
   });
+
+  it('EVT-002: EOF 但未收到业务终结事件 → stream-truncated reject（不再静默 resolve）', async () => {
+    const onEvent = vi.fn();
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      body: new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode('data: {"content":"被截断的半截输出"}\n\n'));
+          controller.close(); // 直接 EOF，无 task.completed / task.failed
+        },
+      }),
+    } as unknown as Response));
+
+    await expect(streamConversation('conv1', 'hi', { onEvent })).rejects.toThrow(/stream-truncated/);
+    // 截断事件本身也要先送达 UI（组件据此展示"连接中断"）
+    expect(onEvent).toHaveBeenCalledWith(expect.objectContaining({ kind: 'stream-truncated' }));
+    vi.unstubAllGlobals();
+  });
+
+  it('EVT-002: 收到业务终结事件后 EOF → resolve（不误判截断）', async () => {
+    const onEvent = vi.fn();
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      body: new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode(
+            'data: {"content":"完整输出"}\n\n' +
+            'event: task.completed\ndata: {"eventId":"e9","eventType":"task.completed","seq":2,"status":"completed"}\n\n',
+          ));
+          controller.close();
+        },
+      }),
+    } as unknown as Response));
+
+    await expect(streamConversation('conv1', 'hi', { onEvent })).resolves.toBeUndefined();
+    vi.unstubAllGlobals();
+  });
 });

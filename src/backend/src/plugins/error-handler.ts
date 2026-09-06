@@ -36,7 +36,10 @@ export function registerErrorHandler(app: FastifyInstance): void {
     }
 
     // 未知错误
-    console.error('未处理的错误:', error);
+    // SEC-003: 日志脱敏 —— 只记录错误 message（不打印完整 error 对象/stack，
+    // 避免把请求体、密钥或内部路径写入日志）
+    const logMsg = error instanceof Error ? error.message : String(error);
+    console.error(`未处理的错误: ${logMsg}${process.env.NODE_ENV !== 'production' ? '\n' + (error instanceof Error && error.stack ? error.stack : '') : ''}`);
     return reply.status(500).send({
       error: {
         code: 'INTERNAL_ERROR',

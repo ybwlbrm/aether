@@ -2,6 +2,46 @@
 
 > 注意：本机未安装 git，使用 CHANGELOG.md 追踪变更历史。
 
+## [2.1.0] — 2026-09-06 · 全项目终极审计收敛版
+
+### Added（新增）
+- **Provider 凭据错误**：API Key 解密失败时抛出 `ProviderCredentialError` 并停止执行（绝不再把密文当 Bearer 发送导致 401），UI 可获知"凭据无法解密"
+- **上传文件签名校验（magic bytes）**：背景图 / 工具箱转换 / 视频音频提取三处上传端点校验文件真实头字节，拒绝 `evil.exe → .png` 伪装
+- **工作流条件节点**：支持 13 种操作符（equals / not_equals / contains / starts_with / ends_with / truthy / falsy / greater_than / less_than / greater_or_equal / less_or_equal / exists / not_exists），纯函数求值（禁止 eval）
+- **移动端离线队列边界**：队列上限 100 条、24 小时超期丢弃、单命令 5 次重试进入死信，防止 localStorage 无限膨胀
+
+### Changed（变更）
+- YouTube/视频下载 URL 增加 SSRF 收紧校验：仅允许公网地址（拦截回环 / 内网 / 链路本地 / 元数据 / IPv6 字面量 / 混淆 IP）
+- 后端日志统一脱敏（Authorization 头、apiKey、password、token 打码），生产模式未处理错误只记录 message 不落完整堆栈
+- 前端事件去重键统一为 `getEventIdentity`（eventId 优先，回退 sessionId+taskId+seq），杜绝实时/回放双入口行为不一致
+- `/api/health` 返回显式 Aether 身份标识（app/name/version），Electron 不再"端口被占就误认成功"
+- 重写 README：版本徽章 / 测试数量 / 下载区与实际构建产物对齐
+
+### Fixed（修复）
+- **SSE 断流检测**：EOF 但未收到业务终结事件时 Promise 必须 reject（此前静默 resolve，产生"回答只生成一半"假稳定）
+- **run 生命周期事件**：`run.created` / `run.started` 写入失败不再被静默吞掉（critical 模式 + 补偿标记 failed）
+- **Run 状态机唯一主人**：`finalizeRunTokens` 增加非法状态转移拦截（completed→completed / created→completed 等抛 `INVALID_RUN_TRANSITION` 且不写入）
+- **路径守卫（L3）**：Level 3 不再完全绕过 —— 仍拒绝 system32 / .git / 用户 .config 等敏感路径段
+- **symlink/junction 逃逸**：路径校验使用 realpath 解析物理路径，allowedDirs 内 junction 指向外部目录被拦截（L2/L3 均生效）
+- **gitignore 误伤**：`data/` 规则改为 `/data/`，不再误伤 `src/backend/src/modules/data`（7 个源码文件已入版本库）
+
+### Security（安全）
+- yt-dlp 下载禁止访问云元数据 / 内网 / 回环 / 链路本地地址
+- 上传文件真实类型校验（magic bytes）
+- 日志全面脱敏，生产环境不落密钥与堆栈
+- Host 头校验、CORS 白名单、敏感端点 Bearer Token 机制维持并回归验证
+
+### Performance（性能）
+- 前端去重与投影保持 O(1)/O(n) 可控，无新增全量扫描
+
+### Breaking Changes（破坏性变更）
+- 无 API 破坏；`/api/health` 响应新增字段（向后兼容）
+
+### Migration（迁移）
+- 无 schema 变更；数据库迁移版本维持 v13
+
+---
+
 ## [Unreleased]
 
 ### 2026-09-05 — 黑屏根因修复 + 工具箱依赖检测修复 + 全量重打包

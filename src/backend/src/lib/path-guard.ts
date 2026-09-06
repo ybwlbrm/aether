@@ -16,6 +16,29 @@
 
 import { resolve, sep } from 'node:path';
 import { homedir } from 'node:os';
+import { realpathSync } from 'node:fs';
+
+/**
+ * PATH-001 (SEC/P0-22): 解析 symlink/junction/reparse point 后的最终物理路径。
+ * 仅靠 resolve() 无法识破 allowedDirs 内的 junction/symlink 指向外部目录的逃逸。
+ * realpathSync.native 在 Windows 下可解析 junction 与 reparse point。
+ * 路径不存在（即将创建）时回退：解析父目录的物理路径再拼接文件名。
+ */
+export function resolvePhysicalPath(targetPath: string): string {
+  const resolved = resolve(targetPath);
+  try {
+    return realpathSync.native(resolved);
+  } catch {
+    // 目标不存在：尝试解析其父目录（父目录可能是 junction）
+    try {
+      const parent = resolve(resolved, '..');
+      const base = resolved.split(/[\\/]/).filter(Boolean).pop() ?? '';
+      return resolve(realpathSync.native(parent), base);
+    } catch {
+      return resolved;
+    }
+  }
+}
 
 /** 敏感路径段（路径按分隔符拆分后逐段匹配） */
 const FORBIDDEN_PATH_PATTERNS = [
@@ -31,6 +54,20 @@ export interface PathCheckResult {
   error?: string;
 }
 
+/** 敏感路径段检测（Level 3 也执行，防止超级权限访问 system32/.git/.config 等） */
+function checkForbiddenSegments(resolved: string, lower: string): string | null {
+  const segments = lower.split(sep).filter(Boolean);
+  for (const fp of FORBIDDEN_PATH_PATTERNS) {
+    if (segments.includes(fp)) {
+      return `禁止访问敏感路径: ${fp}`;
+    }
+  }
+  if (lower.startsWith(HOME_DIR + sep + '.config') || lower.startsWith(HOME_DIR + sep + 'appdata')) {
+    return '禁止访问用户配置目录';
+  }
+  return null;
+}
+
 /** 完整校验：allowedDirs 包含性 + 敏感路径段 + 用户配置目录防护 */
 export function checkPathSafe(
   targetPath: string,
@@ -41,36 +78,36 @@ export function checkPathSafe(
     return { ok: false, error: '路径为空' };
   }
   const resolved = resolve(targetPath);
+  // PATH-001: 用 realpath 解析后的物理路径做边界/敏感判断，杜绝 junction/symlink 逃逸
+  const physical = resolvePhysicalPath(resolved);
+  const lower = physical.toLowerCase();
 
-  // Level 3（超级）绕过所有路径限制，允许全局访问
-  if (permissionLevel === 3) return { ok: true };
+  // Level 3（超级）：绕过 allowedDirs（允许全局访问），但仍拒绝敏感路径段与用户配置目录
+  // SEC-004 修复：原来 L3 直接 return ok:true，可访问 system32/.git/.config —— 危险面过大
+  if (permissionLevel === 3) {
+    const forbidden = checkForbiddenSegments(physical, lower);
+    if (forbidden) return { ok: false, error: forbidden };
+    return { ok: true };
+  }
 
   // 始终校验 allowedDirs
   if (!allowedDirs || allowedDirs.length === 0) {
     return { ok: false, error: '未配置允许访问的目录' };
   }
   const inAllowed = allowedDirs.some(dir => {
-    const allowed = resolve(dir);
+    const allowed = resolvePhysicalPath(resolve(dir));
     // 根目录（盘符根 / Unix /）以 sep 结尾，不再追加；否则追加 sep 防止前缀误匹配（如 C:/workspace-other）
     const prefix = allowed.endsWith(sep) ? allowed : allowed + sep;
-    return resolved.startsWith(prefix) || resolved === allowed;
+    return physical.startsWith(prefix) || physical === allowed;
   });
   if (!inAllowed) {
-    return { ok: false, error: `路径 "${resolved}" 不在允许的目录内` };
+    return { ok: false, error: `路径 "${physical}" 不在允许的目录内` };
   }
 
   // 按「路径段」精确匹配敏感目录，避免误伤合法路径（如 my-windows-app）
-  const lower = resolved.toLowerCase();
-  const segments = lower.split(sep).filter(Boolean);
-  for (const fp of FORBIDDEN_PATH_PATTERNS) {
-    if (segments.includes(fp)) {
-      return { ok: false, error: `禁止访问敏感路径: ${fp}` };
-    }
-  }
-
-  // 阻止访问任何用户的 AppData/Home 配置目录
-  if (lower.startsWith(HOME_DIR + sep + '.config') || lower.startsWith(HOME_DIR + sep + 'appdata')) {
-    return { ok: false, error: '禁止访问用户配置目录' };
+  const forbidden = checkForbiddenSegments(physical, lower);
+  if (forbidden) {
+    return { ok: false, error: forbidden };
   }
 
   return { ok: true };

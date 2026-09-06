@@ -34,3 +34,7 @@ export {
   type RetryErrorOptions,
   isRetryable,
 } from './retry-error.js';
+
+export {
+  ProviderCredentialError,
+} from './provider-credential-error.js';

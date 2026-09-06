@@ -24,7 +24,7 @@ const METADATA_SUFFIXES = [
 ];
 
 /** 解析 hostname 为标准化 IPv4 地址（若为 IP 形式） */
-function parseIpv4(host: string): string | null {
+export function parseIpv4(host: string): string | null {
   // 去除 IPv6 括号
   const h = host.startsWith('[') ? host.slice(1, -1) : host;
 
@@ -59,12 +59,12 @@ function parseIpv4(host: string): string | null {
 }
 
 /** 判断 IPv4 是否为链路本地地址 (169.254.0.0/16) */
-function isLinkLocal(ip: string): boolean {
+export function isLinkLocal(ip: string): boolean {
   return /^169\.254\./.test(ip);
 }
 
 /** 判断 IPv4 是否为私网/回环地址（允许用于本地 AI 提供商） */
-function isPrivateOrLoopback(ip: string): boolean {
+export function isPrivateOrLoopback(ip: string): boolean {
   // 回环 127.0.0.0/8
   if (/^127\./.test(ip)) return true;
   // 私网 10.0.0.0/8
@@ -79,7 +79,7 @@ function isPrivateOrLoopback(ip: string): boolean {
 }
 
 /** 判断 hostname 是否为元数据服务域名 */
-function isMetadataHostname(host: string): boolean {
+export function isMetadataHostname(host: string): boolean {
   const lower = host.toLowerCase();
   if (METADATA_HOSTS.has(lower)) return true;
   for (const suffix of METADATA_SUFFIXES) {

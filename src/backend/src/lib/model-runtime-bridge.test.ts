@@ -128,4 +128,24 @@ describe('lib/model-runtime-bridge', () => {
     assert.ok(built);
     assert.equal(built!.config.apiKey, enc, '无 key 时不解密（透传），调用方负责处理');
   });
+
+  it('P0-14: 解密失败 → ProviderCredentialError（绝不保留密文当 API Key 发送）', () => {
+    const enc = encrypt('sk-must-not-leak-999', TEST_ENC_KEY);
+    seedProvider('bad-creds', ['m1'], ['text'], enc);
+    assert.throws(
+      () => buildRuntimeForProvider(getDb(), 'bad-creds', 'wrong-key-00000000000000000000'),
+      (err: unknown) => {
+        assert.match(String((err as Error).message), /凭据无法解密|credential/i, 'should be a credential error');
+        return true;
+      },
+    );
+  });
+
+  it('P0-14: buildAllRuntimes 跳过损坏 provider（一个坏不拖垮全部）', () => {
+    seedProvider('bad-creds-bulk', ['m1'], ['text'], encrypt('x', TEST_ENC_KEY));
+    const registry = new ModelRegistry();
+    const runtimes = buildAllRuntimes(getDb(), registry, 'wrong-key-bulk-0000000000000');
+    assert.equal(runtimes.has('bad-creds-bulk'), false, '损坏 provider 应被跳过，不进入 runtime 集合');
+    assert.ok(runtimes.size >= 1, '正常 provider 仍应构建');
+  });
 });

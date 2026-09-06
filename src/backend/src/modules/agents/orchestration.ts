@@ -141,6 +141,7 @@ export async function handleOrchestrate(
   // eventBus path below is untouched (Adapter pattern §2.1).
   try {
     ensureRunRow(db, runTaskId, body.conversationId, 'super');
+    // P0-11: run.created 为关键事件，失败必须显式暴露（不再静默吞错）
     void emitV2Event({
       runId: runTaskId,
       sessionId: convId,
@@ -148,8 +149,14 @@ export async function handleOrchestrate(
       agentId: 'sisyphus',
       type: 'run.created',
       payload: { status: 'created' },
+      critical: true,
     });
-  } catch { /* v2 runtime must never break legacy orchestration */ }
+  } catch (e: unknown) {
+    // v2 runtime 不得打断 legacy orchestration 主线，但必须记录错误级别日志并补偿 run 终态
+    console.error('[orchestration] run.created 事件写入失败，run 事件轨迹可能不完整:',
+      e instanceof Error ? e.message : String(e));
+    try { finalizeRunTokens(db, runTaskId, 'failed', {}, 'event store write failed'); } catch { /* noop */ }
+  }
 
   // 使用 sse-handler 的 setupSse 创建上下文（内部完成 writeHead 与 sseSend，避免重复写头）
   const sseCtx = setupSse(reply, body.conversationId, db, config, () => saveDb(config));
@@ -300,8 +307,8 @@ export async function handleOrchestrate(
         content: `正在分析任务并分派 Agent`,
       });
       // v2 mirror: run.started + agent.started (sisyphus orchestrator)
-      void emitV2Event({ runId: runTaskId, sessionId: convId, taskId: runTaskId, agentId: 'sisyphus', type: 'run.started', payload: { status: 'running' } });
-      void emitV2Event({ runId: runTaskId, sessionId: convId, taskId: runTaskId, agentId: 'sisyphus', type: 'agent.started', payload: { status: 'running' } });
+void emitV2Event({ runId: runTaskId, sessionId: convId, taskId: runTaskId, agentId: 'sisyphus', type: 'run.started', payload: { status: 'running' }, critical: true });
+  void emitV2Event({ runId: runTaskId, sessionId: convId, taskId: runTaskId, agentId: 'sisyphus', type: 'agent.started', payload: { status: 'running' }, critical: true });
     }
 
     // 2. 每个 Agent 使用自己的配置模型并行调用，逐个发送结果

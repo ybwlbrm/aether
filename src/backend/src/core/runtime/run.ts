@@ -60,6 +60,11 @@ const VALID_RUN_TRANSITIONS: Record<RunStatus, RunStatus[]> = {
   interrupted: [],
 };
 
+/** RUN-001: 校验状态转移是否合法（任何模块改 run 状态前必须先过此函数） */
+export function isValidRunTransition(from: RunStatus, to: RunStatus): boolean {
+  return VALID_RUN_TRANSITIONS[from]?.includes(to) ?? false;
+}
+
 /**
  * Terminal run states (absorbing).
  */

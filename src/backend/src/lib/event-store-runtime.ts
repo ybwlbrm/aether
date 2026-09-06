@@ -18,6 +18,8 @@ import { eq } from 'drizzle-orm';
 import * as schema from '../db/schema/index.js';
 import { getDb } from '../db/client.js';
 import { SqliteEventStore, DbSequenceAllocator } from '../core/events/index.js';
+import { isValidRunTransition, type RunStatus } from '../core/runtime/run.js';
+import { RuntimeError } from '../core/errors/index.js';
 import type { AgentEvent } from '@pacc/shared';
 
 type Db = SQLJsDatabase<typeof schema>;
@@ -99,7 +101,11 @@ export function mapWorkflowEventType(type: string): AgentEvent['type'] {
  * Emit a v2 AgentEvent to the production events table.
  * The seq is allocated atomically (claim-row + UNIQUE arbitration), and the
  * eventId is preserved so replay/afterSeq stay consistent.
- * Never throws — orchestration must not break because an event write failed.
+ *
+ * 默认宽松：失败仅 warn 并返回 null（orchestration 不应因 events 表写入失败而中断）。
+ * critical=true（P0-11）：关键生命周期事件（run.started / run.created / task.started
+ * 等）写入失败时抛错 —— 调用方必须捕获并补偿（标记 run 失败 / 传播错误），
+ * 避免"run 已经跑了但事件库里没有起点"的假稳定状态。
  */
 export async function emitV2Event(input: {
   runId: string;
@@ -111,6 +117,7 @@ export async function emitV2Event(input: {
   payload: Record<string, unknown>;
   metadata?: Record<string, unknown>;
   eventId?: string;
+  critical?: boolean;
 }): Promise<AgentEvent | null> {
   try {
     const seq = await getV2SequenceAllocator().allocate(input.runId);
@@ -131,7 +138,12 @@ export async function emitV2Event(input: {
     await getV2EventStore().append(event);
     return event;
   } catch (err) {
-    // Never break orchestration because the events table write failed
+    if (input.critical) {
+      // P0-11: 关键事件失败必须显式暴露，由调用方补偿
+      console.error('[EventStoreRuntime] critical emitV2Event failed:', err instanceof Error ? err.message : String(err));
+      throw err;
+    }
+    // 非关键事件：记录但不中断主流程
     console.warn('[EventStoreRuntime] emitV2Event failed:', err instanceof Error ? err.message : String(err));
     return null;
   }
@@ -174,6 +186,14 @@ export function finalizeRunTokens(
   error?: string,
 ): void {
   const { runs } = schema;
+  // RUN-001 (P0-8/9): 任何 run 状态写入必须先过状态机 —— 禁止 completed→running 等非法转移
+  const existing = db.select({ status: runs.status }).from(runs).where(eq(runs.id, runId)).get();
+  if (existing && !isValidRunTransition(existing.status as RunStatus, status as RunStatus)) {
+    throw new RuntimeError(`非法状态转移: ${existing.status} → ${status}`, {
+      code: 'INVALID_RUN_TRANSITION',
+      context: { runId, from: existing.status, to: status },
+    });
+  }
   const inputTokens = tokens.inputTokens ?? 0;
   const outputTokens = tokens.outputTokens ?? 0;
   db.update(runs)

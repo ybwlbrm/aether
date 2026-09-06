@@ -77,6 +77,15 @@ function sortBySeq(events: AgentEventEnvelope[]): AgentEventEnvelope[] {
   return events.slice().sort((a, b) => a.seq - b.seq);
 }
 
+/**
+ * P0-17/EVT-003: 统一事件身份（去重键）。
+ * 优先级：eventId（全局唯一 UUID）→ 缺失时回退 sessionId+taskId+seq。
+ * appendEvent 与 appendEvents 必须使用同一身份函数，否则重放/实时双入口行为不一致。
+ */
+export function getEventIdentity(ev: AgentEventEnvelope): string {
+  return ev.eventId || `${ev.sessionId}::${ev.taskId}::${ev.seq}`;
+}
+
 export const useActivityStore = create<ActivityState>((set, get) => ({
   eventsByConv: {},
   cursorByConv: {},
@@ -84,12 +93,9 @@ export const useActivityStore = create<ActivityState>((set, get) => ({
 
   appendEvent: (convId, event) => {
     const list = get().eventsByConv[convId] ?? [];
-    // P0-08：去重键 = eventId 优先，回退 sessionId+taskId+seq（仅 seq 会跨 Run 误判）
-    //   v1 envelope 用 sessionId/taskId 标识运行；Run A seq=1 与 Run B seq=1 是不同事件。
-    const isDup = list.some(e =>
-      e.eventId === event.eventId ||
-      (e.sessionId === event.sessionId && e.taskId === event.taskId && e.seq === event.seq),
-    );
+    // P0-08/EVT-003：去重身份统一走 getEventIdentity（eventId 优先，回退 sessionId+taskId+seq）
+    const identity = getEventIdentity(event);
+    const isDup = list.some(e => getEventIdentity(e) === identity);
     if (isDup) return;
     list.push(event);
     const sorted = sortBySeq(list);
@@ -103,9 +109,10 @@ export const useActivityStore = create<ActivityState>((set, get) => ({
   appendEvents: (convId, events) => {
     if (events.length === 0) return;
     const list = get().eventsByConv[convId] ?? [];
-    const known = new Set(list.map(e => `${e.eventId}::${e.sessionId}::${e.taskId}::${e.seq}`));
+    // P0-17/EVT-003：统一身份（与 appendEvent 同一函数），杜绝双入口键不一致
+    const known = new Set(list.map(e => getEventIdentity(e)));
     for (const ev of events) {
-      const key = `${ev.eventId}::${ev.sessionId}::${ev.taskId}::${ev.seq}`;
+      const key = getEventIdentity(ev);
       if (known.has(key)) continue;
       known.add(key);
       list.push(ev);

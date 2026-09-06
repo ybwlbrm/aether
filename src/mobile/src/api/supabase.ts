@@ -93,11 +93,21 @@ const CHANNEL_RELEASE_DELAY_MS = 1000;
 
 const OFFLINE_QUEUE_KEY = 'aether_offline_commands';
 
+// MOB-001 (P0-58): 离线队列边界 —— 防止网络长期断开后队列无限增长
+/** 队列最大条数（超出拒绝新命令） */
+const MAX_QUEUE_SIZE = 100;
+/** 命令最大存活时间（24h 超期直接丢弃，防止陈旧命令堆积） */
+const MAX_COMMAND_AGE_MS = 24 * 60 * 60 * 1000;
+/** 单命令最大重试次数（超过即进入死信丢弃） */
+const MAX_RETRY_ATTEMPTS = 5;
+
 interface QueuedCommand {
   id: string;
   content: string;
   conversation_id: string | null;
   created_at: string;
+  /** 已尝试上传次数（失败递增，达到 MAX_RETRY_ATTEMPTS 进入死信） */
+  attempts?: number;
 }
 
 /** 生成 UUID（crypto.randomUUID，兼容旧 WebView 回退） */
@@ -131,8 +141,19 @@ function saveQueue(queue: QueuedCommand[]): void {
 function enqueueCommand(cmd: QueuedCommand): void {
   const queue = loadQueue();
   if (queue.some((c) => c.id === cmd.id)) return;
+  // MOB-001: 队列上限保护（不拒绝会导致 localStorage 无限膨胀）
+  if (queue.length >= MAX_QUEUE_SIZE) {
+    console.warn(`[supabase] 离线命令队列已满（上限 ${MAX_QUEUE_SIZE}），拒绝新命令 ${cmd.id}`);
+    return;
+  }
   queue.push(cmd);
   saveQueue(queue);
+}
+
+/** 命令是否超期（非法的 created_at 视为超期，直接丢弃） */
+function isExpired(cmd: QueuedCommand): boolean {
+  const age = Date.now() - new Date(cmd.created_at).getTime();
+  return !Number.isFinite(age) || age > MAX_COMMAND_AGE_MS;
 }
 
 let flushingQueue = false;
@@ -151,13 +172,25 @@ export async function flushPendingQueue(): Promise<number> {
     const remaining: QueuedCommand[] = [];
     let flushed = 0;
     for (const cmd of queue) {
+      // MOB-001: 超期命令直接丢弃（陈旧命令不值得继续消耗重试）
+      if (isExpired(cmd)) {
+        settlePending(cmd.id + '-queued');
+        continue;
+      }
       const ok = await sendCommand(cmd.content, cmd.conversation_id ?? undefined, cmd.id, false);
       if (ok) {
         flushed++;
         // 清除该命令入队时的 pending 占位标记（-queued），避免超时清理前计数滞留
         settlePending(cmd.id + '-queued');
       } else {
-        remaining.push(cmd);
+        // MOB-001: 重试计数 —— 达到上限进入死信（丢弃），避免无限重试
+        const attempts = (cmd.attempts ?? 0) + 1;
+        if (attempts >= MAX_RETRY_ATTEMPTS) {
+          console.warn(`[supabase] 命令 ${cmd.id} 连续失败 ${attempts} 次，进入死信（丢弃）`);
+          settlePending(cmd.id + '-queued');
+          continue;
+        }
+        remaining.push({ ...cmd, attempts });
       }
     }
     saveQueue(remaining);

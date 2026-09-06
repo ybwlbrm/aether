@@ -4,6 +4,7 @@ import { writeFileSync, unlinkSync, existsSync, mkdirSync, readdirSync, statSync
 import { resolve, basename, relative } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { getSettings, saveSettings } from '../../lib/dal.js';
+import { assertMagicMatches } from '../../lib/magic-bytes.js';
 
 // 目录模式允许的图片扩展名（小写，不含点）
 const IMAGE_EXTS = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'avif']);
@@ -55,8 +56,12 @@ export function registerBackgroundRoutes(app: FastifyInstance, config: BackendCo
       const match = dataUrl.match(/^data:image\/(png|jpeg|jpg);base64,(.+)$/);
       if (!match) continue;
       const ext = match[1] === 'jpeg' ? 'jpg' : 'png';
+      const raw = Buffer.from(match[2], 'base64');
+      // SEC-002: magic bytes 校验 — 拒绝伪装图片（evil.exe 改名 .png 等）
+      const magicOk = assertMagicMatches(raw, ext);
+      if (!magicOk.ok) continue;
       const name = `${randomUUID()}.${ext}`;
-      writeFileSync(resolve(bgDir, name), Buffer.from(match[2], 'base64'));
+      writeFileSync(resolve(bgDir, name), raw);
       saved.push(`/data/backgrounds/${name}`);
     }
     // 保存到 settings

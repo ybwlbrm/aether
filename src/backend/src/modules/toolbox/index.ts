@@ -8,6 +8,7 @@ import { registerEncodingRoutes, utilityOp, encodeOp } from './encoding.js';
 import { registerDownloadRoutes } from './download.js';
 import { registerVideoRoutes, extractAudioFromVideo, downloadWithYtDlp } from './video.js';
 import { exportDir, convertWithFfmpeg as utilsConvertWithFfmpeg, convertWithLibreOffice, imagesToPdf as utilsImagesToPdf, parseCsv, detectEncryptedAudio as utilsDetectEncryptedAudio, decryptQmcStaticCipher as utilsDecryptQmcStaticCipher, QMC_STATIC_CIPHER as utilsQMC_STATIC_CIPHER, getDocx } from './utils.js';
+import { assertMagicMatches, isTextExtension } from '../../lib/magic-bytes.js';
 
 // 统一导出目录函数（所有子模块使用同一个）
 export { exportDir };
@@ -127,6 +128,15 @@ export function registerToolboxRoutes(app: FastifyInstance, config: BackendConfi
         const outName = `${randomUUID()}.${target}`;
         const outPath = resolve(dir, outName);
         let outBuf: Buffer | null = null;
+
+        // SEC-002: magic bytes 校验 — 声明的扩展名必须与文件真实签名一致（防 evil.exe→image/png 伪装）
+        if (!isTextExtension(ext)) {
+          const magicOk = assertMagicMatches(buf, ext);
+          if (!magicOk.ok) {
+            results.push({ file: name, output: '', success: false, message: `文件类型与扩展名不符（实际: ${magicOk.detected}）` });
+            continue;
+          }
+        }
 
         // 图片 → PDF
         if (['png', 'jpg', 'jpeg', 'webp'].includes(ext) && target === 'pdf') {

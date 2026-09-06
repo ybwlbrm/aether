@@ -3,6 +3,7 @@ import cors from '@fastify/cors';
 import swagger from '@fastify/swagger';
 import swaggerUi from '@fastify/swagger-ui';
 import { registerErrorHandler } from './plugins/error-handler.js';
+import { buildLoggerConfig } from './lib/logger-config.js';
 import { loadBackendConfig, type BackendConfig, migratePlaintextApiKeys } from './config/index.js';
 import { initDb, markDirty, flushDbSync } from './db/client.js';
 import { runMigrations } from './db/migrate.js';
@@ -42,14 +43,8 @@ export async function buildApp(config?: BackendConfig) {
   const cfg = config || (await loadBackendConfig());
 
   const app = Fastify({
-    logger: process.env.NODE_ENV === 'production'
-      ? true  // 生产环境用默认 logger，不依赖 pino-pretty 导致打包后崩溃
-      : {
-          transport: {
-            target: 'pino-pretty',
-            options: { colorize: true },
-          },
-        },
+    // SEC-003: 统一日志脱敏（redact Authorization 头 / apiKey / password / token 等）
+    logger: buildLoggerConfig(process.env.NODE_ENV),
     bodyLimit: 100 * 1024 * 1024, // 100MB，允许上传大背景图
   });
 
