@@ -120,6 +120,17 @@ export function getEventIdentity(ev: AgentEventEnvelope): string {
   return ev.eventId || `${ev.sessionId}::${ev.taskId}::${ev.seq}`;
 }
 
+// ── React #185 修复：getEvents 引用缓存 ──
+// Chat/CodingHome 用 useActivityStore(s => s.getEvents(convId)) 订阅；getEvents 每次
+// 重建数组会产生新引用 → Zustand selector 判定变化 → 无限重渲染（Max update depth）。
+// 缓存同一 convId 的合并结果，写路径显式失效。
+const eventsCache = new Map<string, AgentEventEnvelope[]>();
+function invalidateEventsCache(convId?: string | null): void {
+  if (convId == null) { eventsCache.clear(); return; }
+  eventsCache.delete(convId);
+}
+export function resetEventsCacheForTest(): void { eventsCache.clear(); }
+
 /**
  * 从 envelope 推导 runKey。
  * 优先使用 envelope.runId（v2 协议）；v1 协议用 sessionId+taskId 组合生成稳定 run key。
@@ -192,6 +203,7 @@ export const useActivityStore = create<ActivityState>((set, get) => ({
         runsByConversation: { ...s.runsByConversation, [convId]: newRuns },
       };
     });
+    invalidateEventsCache(convId);
   },
 
   appendEvents: (convId, events) => {
@@ -268,6 +280,7 @@ export const useActivityStore = create<ActivityState>((set, get) => ({
         runsByConversation: newRunsByConversation,
       };
     });
+    invalidateEventsCache(convId);
   },
 
   replaceEvents: (convId, events) => {
@@ -346,6 +359,7 @@ export const useActivityStore = create<ActivityState>((set, get) => ({
         runsByConversation: newRunsByConversation,
       };
     });
+    invalidateEventsCache(convId);
   },
 
   clearConv: (convId) => {
@@ -377,6 +391,7 @@ export const useActivityStore = create<ActivityState>((set, get) => ({
         runsByConversation: newRunsByConversation,
       };
     });
+    invalidateEventsCache(convId);
   },
 
   clearRun: (runId) => {
@@ -408,15 +423,21 @@ export const useActivityStore = create<ActivityState>((set, get) => ({
         runsByConversation: newRunsByConversation,
       };
     });
+    invalidateEventsCache(); // runId 语义清除后 conv 不可反查，全清缓存
   },
 
   getEvents: (convId) => {
+    // UX-004：引用缓存 —— 数据未变时返回同一数组引用，避免 Zustand selector 无限重渲染（React #185）
+    const cached = eventsCache.get(convId);
+    if (cached) return cached;
     const runIds = get().runsByConversation[convId] ?? [];
     const allEvents: AgentEventEnvelope[] = [];
     for (const runId of runIds) {
       allEvents.push(...(get().eventsByRun[runId] ?? []));
     }
-    return sortBySeq(allEvents);
+    const sorted = sortBySeq(allEvents);
+    eventsCache.set(convId, sorted);
+    return sorted;
   },
 
   getEventsByRun: (runId) => get().eventsByRun[runId] ?? [],

@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import type { AgentEventEnvelope } from '@pacc/shared';
-import { projectToRecords, type ActivityRecord, useActivityStore, projectTaskProgress, getEventIdentity } from './activityStore';
+import { projectToRecords, type ActivityRecord, useActivityStore, projectTaskProgress, getEventIdentity, resetEventsCacheForTest } from './activityStore';
 import { parseSseFrame } from '../api/streamClient';
 
 function env(partial: Partial<AgentEventEnvelope> & { eventType: AgentEventEnvelope['eventType'] }): AgentEventEnvelope {
@@ -375,5 +375,47 @@ describe('activityStore — Run-scoped 状态隔离（P0-03 第三轮审计）',
     expect(repliesB.get('agent-2')).toBe('Foo');
     expect(repliesA.has('agent-2')).toBe(false);
     expect(repliesB.has('agent-1')).toBe(false);
+  });
+});
+
+describe('activityStore · getEvents 引用缓存 (UX-004 / React #185 回归)', () => {
+  beforeEach(() => {
+    useActivityStore.setState({ eventsByRun: {}, cursorByRun: {}, taskCardCache: {}, reasoningCache: {}, runMetaById: {}, runsByConversation: {} });
+    resetEventsCacheForTest();
+  });
+
+  it('相同事件集多次调用 getEvents 返回同一数组引用（Zustand selector 稳定，不再无限重渲染）', () => {
+    const store = useActivityStore.getState();
+    store.appendEvent('conv1', env({ eventType: 'task.started', seq: 1, taskId: 'r1' }));
+    const a = store.getEvents('conv1');
+    const b = store.getEvents('conv1');
+    expect(a).toBe(b);
+  });
+
+  it('appendEvent 追加后缓存失效并返回新引用（含新事件）', () => {
+    const store = useActivityStore.getState();
+    store.appendEvent('conv1', env({ eventType: 'task.started', seq: 1, taskId: 'r1' }));
+    const before = store.getEvents('conv1');
+    store.appendEvent('conv1', env({ eventType: 'task.completed', seq: 2, taskId: 'r1' }));
+    const after = store.getEvents('conv1');
+    expect(after).not.toBe(before);
+    expect(after).toHaveLength(2);
+  });
+
+  it('appendEvents 批量路径同样使缓存失效', () => {
+    const store = useActivityStore.getState();
+    store.appendEvent('conv1', env({ eventType: 'task.started', seq: 1, taskId: 'r1' }));
+    store.appendEvents('conv1', [env({ eventType: 'task.completed', seq: 2, taskId: 'r1' })]);
+    expect(store.getEvents('conv1')).toHaveLength(2);
+  });
+
+  it('replaceEvents / clearConv 失效缓存', () => {
+    const store = useActivityStore.getState();
+    store.appendEvent('conv1', env({ eventType: 'task.started', seq: 1, taskId: 'r1' }));
+    store.replaceEvents('conv1', [env({ eventType: 'task.started', seq: 9, taskId: 'r2' })]);
+    expect(store.getEvents('conv1')).toHaveLength(1);
+    expect(store.getEvents('conv1')[0].taskId).toBe('r2');
+    store.clearConv('conv1');
+    expect(store.getEvents('conv1')).toHaveLength(0);
   });
 });
