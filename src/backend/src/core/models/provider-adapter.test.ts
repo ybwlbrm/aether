@@ -8,6 +8,8 @@ import type { ModelRequest } from './model-runtime.js';
 import type { StreamChunk, TokenUsage, FinishReason } from '@pacc/shared';
 import { OpenAICompatibleAdapter, type Transport } from './provider-adapter.js';
 import { ModelError } from '../errors/index.js';
+import { createRetryPolicy } from './retry-policy.js';
+import { createCircuitBreaker } from './circuit-breaker.js';
 
 describe('provider-adapter', () => {
   describe('OpenAICompatibleAdapter', () => {
@@ -459,6 +461,141 @@ describe('provider-adapter', () => {
           (err: unknown) =>
             err instanceof ModelError && err.code === 'PROVIDER_UNAVAILABLE' && err.retryable === true,
         );
+      });
+
+      // ── P0-11：thinking/reasoningEffort 真实透传到 Provider 请求 ──
+
+      it('P0-11: thinking/reasoningEffort 被写入请求体（不再只上层知道）', async () => {
+        let capturedBody: Record<string, unknown> = {};
+        const fetchImpl = (async (_url: string | URL | Request, init?: RequestInit) => {
+          capturedBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+          return sseResponse(ssePayload);
+        }) as typeof fetch;
+
+        const adapter = new OpenAICompatibleAdapter({
+          providerId: 'openai',
+          baseUrl: 'https://api.example.com/v1',
+          apiKey: 'sk-test',
+          fetchImpl,
+          allowHttpTransport: true,
+        });
+
+        for await (const _ of adapter.streamMessages(createRequest({ thinking: true, reasoningEffort: 'high' }))) {
+          void _;
+        }
+        assert.ok(Object.keys(capturedBody).length > 0, '请求体应被捕获');
+        assert.deepEqual(capturedBody.thinking, { type: 'enabled' });
+        assert.equal(capturedBody.reasoning_effort, 'high');
+      });
+
+      it('P0-11: thinking=false → thinking.type=disabled 且不带 reasoning_effort', async () => {
+        let capturedBody: Record<string, unknown> = {};
+        const fetchImpl = (async (_url: string | URL | Request, init?: RequestInit) => {
+          capturedBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+          return sseResponse(ssePayload);
+        }) as typeof fetch;
+
+        const adapter = new OpenAICompatibleAdapter({
+          providerId: 'openai',
+          baseUrl: 'https://api.example.com/v1',
+          apiKey: 'sk-test',
+          fetchImpl,
+          allowHttpTransport: true,
+        });
+
+        for await (const _ of adapter.streamMessages(createRequest({ thinking: false, reasoningEffort: 'high' }))) {
+          void _;
+        }
+        assert.deepEqual(capturedBody.thinking, { type: 'disabled' });
+        assert.equal(capturedBody.reasoning_effort, undefined, 'thinking=false 时不应发送 reasoning_effort');
+      });
+
+      // ── P1-02：CRLF 帧边界（标准 SSE \r\n\r\n）──
+
+      it('P1-02: CRLF frame boundary (CRLF CRLF) parsed correctly', async () => {
+        const crlfPayload = [
+          'data: {"id":"c1","object":"chat.completion.chunk","created":1,"model":"gpt-4","choices":[{"index":0,"delta":{"role":"assistant","content":"CRLF"},"finish_reason":null}]}',
+          'data: {"id":"c1","object":"chat.completion.chunk","created":1,"model":"gpt-4","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}',
+          'data: [DONE]',
+        ].join('\r\n\r\n') + '\r\n\r\n';
+
+        const fetchImpl: typeof fetch = async () => {
+          const encoder = new TextEncoder();
+          const bytes = encoder.encode(crlfPayload);
+          const stream = new ReadableStream<Uint8Array>({
+            start(controller) {
+              // 故意单字节尾部拆分，验证逐帧重组（非一次性大段）
+              for (const b of bytes) controller.enqueue(Uint8Array.of(b));
+              controller.close();
+            },
+          });
+          return new Response(stream, { status: 200, headers: { 'Content-Type': 'text/event-stream' } });
+        };
+
+        const adapter = new OpenAICompatibleAdapter({
+          providerId: 'openai',
+          baseUrl: 'https://api.example.com/v1',
+          apiKey: 'sk-test',
+          fetchImpl,
+          allowHttpTransport: true,
+        });
+
+        const chunks: StreamChunk[] = [];
+        for await (const chunk of adapter.streamMessages(createRequest())) {
+          chunks.push(chunk);
+        }
+        const textDeltas = chunks.filter((c): c is Extract<StreamChunk, { type: 'text-delta' }> => c.type === 'text-delta');
+        assert.deepEqual(textDeltas.map((d) => d.text), ['CRLF']);
+      });
+
+      // ── P0-10：RetryPolicy 集成（429 重试后成功）──
+
+      it('P0-10: 429 一次失败后自动重试成功（RetryPolicy 集成）', async () => {
+        let calls = 0;
+        const fetchImpl = (async () => {
+          calls += 1;
+          if (calls === 1) {
+            return new Response('rate limited', { status: 429, headers: { 'Content-Type': 'text/plain' } });
+          }
+          return sseResponse(ssePayload);
+        }) as typeof fetch;
+
+        const adapter = new OpenAICompatibleAdapter({
+          providerId: 'openai',
+          baseUrl: 'https://api.example.com/v1',
+          apiKey: 'sk-test',
+          fetchImpl,
+          allowHttpTransport: true,
+          // 注入低延迟重试策略（快测）
+          retryPolicy: createRetryPolicy({ baseDelayMs: 10, maxRetries: 2 }),
+          circuitBreaker: createCircuitBreaker({ failureThreshold: 100 }),
+        } as never);
+
+        const chunks: StreamChunk[] = [];
+        for await (const chunk of adapter.streamMessages(createRequest())) {
+          chunks.push(chunk);
+        }
+        assert.ok(calls >= 2, `应重试至少 2 次，实际 ${calls}`);
+        const textDeltas = chunks.filter((c): c is Extract<StreamChunk, { type: 'text-delta' }> => c.type === 'text-delta');
+        assert.deepEqual(textDeltas.map((d) => d.text), ['Hello', ' world']);
+      });
+
+      // ── P1-03：streamToComplete 元数据注入 ──
+
+      it('P1-03: complete() 返回的 Response 带完整 provider/model 元数据', async () => {
+        const fetchImpl = async () => sseResponse(ssePayload) as unknown as Response;
+        const adapter = new OpenAICompatibleAdapter({
+          providerId: 'my-provider',
+          baseUrl: 'https://api.example.com/v1',
+          apiKey: 'sk-test',
+          fetchImpl: fetchImpl as typeof fetch,
+          allowHttpTransport: true,
+        });
+
+        const response = await adapter.complete(createRequest({ provider: 'request-provider', model: 'request-model' }));
+        assert.equal(response.provider, 'request-provider');
+        assert.equal(response.model, 'request-model');
+        assert.ok(response.id, 'Response 应携带 id');
       });
     });
   });

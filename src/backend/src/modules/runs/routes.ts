@@ -13,13 +13,13 @@ import { and, desc, eq, sql, type SQL } from 'drizzle-orm';
 import type { SQLJsDatabase } from 'drizzle-orm/sql-js';
 import * as schema from '../../db/schema/index.js';
 import { AppError } from '@pacc/shared';
-import { randomUUID } from 'node:crypto';
 // P0-01/P0-02: Run-scoped cancellation registry
 import { runCancellationRegistry } from '../../lib/run-cancellation-registry.js';
+// P0-05 收口：唯一 Run 状态写入入口（禁止路由层直接 db.update(runs) 绕过状态机）
+import { RunLifecycleManager, type RunAction } from '../../core/runtime/index.js';
 
 type Db = SQLJsDatabase<typeof schema>;
 type RunRow = typeof runs.$inferSelect;
-type RunInsert = typeof runs.$inferInsert;
 type RunStatus = RunRow['status'];
 type RunMode = RunRow['mode'];
 
@@ -103,8 +103,36 @@ function runNotFound(id: string): { code: string; message: string } {
   return { code: 'RUN_NOT_FOUND', message: `run ${id} 未找到` };
 }
 
+/** 动作映射：HTTP action → RunLifecycleManager action */
+function mapAction(action: string): RunAction {
+  switch (action) {
+    case 'start': return 'start';
+    case 'pause': return 'pause';
+    case 'resume': return 'resume';
+    case 'cancel': return 'cancel';
+    case 'complete': return 'complete';
+    case 'fail': return 'fail';
+    case 'recover': return 'recover';
+    default: throw new Error(`未知 Run 动作: ${action}`);
+  }
+}
+
+/** runId 生成（metadata.runId 允许外部指定，缺省 randomUUID） */
+function randomUUIDFallback(): string {
+  // 动态 import 避免与 RunLifecycleManager 循环依赖；node:crypto 为内置模块无副作用
+  return globalThis.crypto?.randomUUID?.() ?? randomUUIDLocal();
+}
+
+let localCounter = 0;
+function randomUUIDLocal(): string {
+  localCounter += 1;
+  return `run-${Date.now().toString(36)}-${localCounter.toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
 /**
  * 注册 Run 管理路由（Aether 2.0 P2）
+ * P0-05 收口：所有 runs 状态写入统一经 RunLifecycleManager 状态机，
+ * 路由层不再直接 db.update(runs)/db.insert(runs)。
  */
 export function registerRunRoutes(app: FastifyInstance, config: BackendConfig): void {
   const db = getDb();
@@ -118,20 +146,8 @@ export function registerRunRoutes(app: FastifyInstance, config: BackendConfig): 
       tags: ['runs'],
     },
   }, async (_request, reply) => {
-    const stale = db
-      .select()
-      .from(runs)
-      .where(sql`${runs.status} IN ('running', 'waiting')`)
-      .all();
-    const now = new Date().toISOString();
-    let marked = 0;
-    for (const run of stale) {
-      db.update(runs)
-        .set({ status: 'interrupted', completedAt: now, endReason: 'crashed' })
-        .where(eq(runs.id, run.id))
-        .run();
-      marked += 1;
-    }
+    const lifecycle = new RunLifecycleManager(db);
+    const marked = lifecycle.recoverStale();
     if (marked > 0) saveDb(config);
     return { recovered: marked, message: marked > 0 ? `已标记 ${marked} 个崩溃遗留 Run 为 interrupted` : '无遗留 Run' };
   });
@@ -153,22 +169,17 @@ export function registerRunRoutes(app: FastifyInstance, config: BackendConfig): 
     },
   }, async (request, reply) => {
     const body = request.body as { conversationId?: string; mode?: unknown; rootAgentId?: string; metadata?: Record<string, unknown> };
-    const id = randomUUID();
-    const now = new Date().toISOString();
-    const values: RunInsert = {
-      id,
-      status: 'created',
+    const id = body.metadata?.runId as string | undefined ?? randomUUIDFallback();
+    const lifecycle = new RunLifecycleManager(db);
+    const row = lifecycle.create({
+      runId: id,
+      conversationId: body.conversationId ?? null,
       mode: body.mode === undefined || !isRunMode(body.mode) ? 'normal' : body.mode,
       rootAgentId: body.rootAgentId ?? null,
-      createdAt: now,
-    };
-    if (body.conversationId !== undefined) values.conversationId = body.conversationId;
-    if (body.metadata !== undefined) values.metadata = JSON.stringify(body.metadata);
-    db.insert(runs).values(values).run();
+      metadata: body.metadata,
+    });
     saveDb(config);
-    const created = db.select().from(runs).where(eq(runs.id, id)).get();
-    if (!created) throw new Error('预期外：Run 插入后回读为空');
-    return reply.code(201).send(rowToJson(created));
+    return reply.code(201).send(rowToJson(row));
   });
 
   // 通用状态转移端点（start / pause / resume / cancel）：
@@ -178,7 +189,6 @@ export function registerRunRoutes(app: FastifyInstance, config: BackendConfig): 
     path: string,
     action: string,
     allowed: readonly RunStatus[],
-    patch: (now: string) => Partial<RunInsert>,
     after?: (runId: string) => void,
   ) => {
     app.post(path, {
@@ -189,25 +199,32 @@ export function registerRunRoutes(app: FastifyInstance, config: BackendConfig): 
       },
     }, async (request, reply) => {
       const { runId } = request.params as { runId: string };
-      const run = db.select().from(runs).where(eq(runs.id, runId)).get();
+      const lifecycle = new RunLifecycleManager(db);
+      const run = lifecycle.get(runId);
       if (!run) return reply.code(404).send({ error: runNotFound(runId) });
-      if (!allowed.includes(run.status)) {
-        return reply.code(409).send({ error: invalidTransition(run.status, action) });
+      if (!allowed.includes(run.status as RunStatus)) {
+        return reply.code(409).send({ error: invalidTransition(run.status as RunStatus, action) });
       }
-      db.update(runs).set(patch(new Date().toISOString())).where(eq(runs.id, runId)).run();
+      // P0-05：经 RunLifecycleManager 状态机转移（内部二次校验，双保险）
+      let updated: ReturnType<RunLifecycleManager['transition']>;
+      try {
+        updated = lifecycle.transition(runId, mapAction(action), {
+          endReason: action === 'cancel' ? 'cancelled' : undefined,
+        });
+      } catch (err) {
+        return reply.code(409).send({ error: invalidTransition(run.status as RunStatus, action) });
+      }
       saveDb(config);
-      const updated = db.select().from(runs).where(eq(runs.id, runId)).get();
-      if (!updated) return reply.code(404).send({ error: runNotFound(runId) });
       after?.(runId);
       return rowToJson(updated);
     });
   };
 
-  registerTransition('/api/runs/:runId/start', 'start', ['created'], (now) => ({ status: 'running', startedAt: now }));
-  registerTransition('/api/runs/:runId/pause', 'pause', ['running'], () => ({ status: 'waiting' }));
-  registerTransition('/api/runs/:runId/resume', 'resume', ['waiting'], () => ({ status: 'running' }));
+  registerTransition('/api/runs/:runId/start', 'start', ['created']);
+  registerTransition('/api/runs/:runId/pause', 'pause', ['running']);
+  registerTransition('/api/runs/:runId/resume', 'resume', ['waiting']);
   // Wave0-CX: cancel 除状态机转移外，真正 abort 执行流（runCancellationRegistry，幂等）
-  registerTransition('/api/runs/:runId/cancel', 'cancel', ['running', 'waiting'], (now) => ({ status: 'cancelled', completedAt: now, endReason: 'cancelled' }), (runId) => {
+  registerTransition('/api/runs/:runId/cancel', 'cancel', ['running', 'waiting'], (runId) => {
     runCancellationRegistry.cancel(runId);
   });
 

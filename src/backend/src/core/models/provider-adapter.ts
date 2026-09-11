@@ -9,6 +9,8 @@ import type { ModelRequest, ModelResponse } from './model-runtime.js';
 import type { StreamChunk, TokenUsage, FinishReason } from '@pacc/shared';
 import { ModelError } from '../errors/index.js';
 import { streamToComplete } from './model-runtime.js';
+import { createRetryPolicy, extractRetryAfterMs } from './retry-policy.js';
+import { createCircuitBreaker } from './circuit-breaker.js';
 
 /**
  * Provider adapter interface — implemented by each provider integration.
@@ -88,6 +90,9 @@ export interface FetchTransportOptions {
  * Build an OpenAI-compatible /chat/completions request body from a ModelRequest.
  * stream=true + stream_options.include_usage are always set so the wire
  * protocol matches what the SSE parser expects.
+ *
+ * P0-11 修复：thinking/reasoningEffort 必须真实透传到 Provider 请求参数
+ * （此前仅上层知道，Adapter 未转发 —— UI 开了深度思考但 Provider 收不到）。
  */
 function buildChatBody(request: ModelRequest): Record<string, unknown> {
   const messages = request.systemPrompt
@@ -102,7 +107,28 @@ function buildChatBody(request: ModelRequest): Record<string, unknown> {
   if (request.tools && request.tools.length > 0) body.tools = request.tools;
   if (request.temperature !== undefined) body.temperature = request.temperature;
   if (request.maxTokens !== undefined) body.max_tokens = request.maxTokens;
+  // P0-11: thinking / reasoningEffort 透传
+  if (request.thinking !== undefined || request.reasoningEffort !== undefined) {
+    body.thinking = { type: request.thinking === false ? 'disabled' : 'enabled' };
+    if (request.thinking !== false && request.reasoningEffort) {
+      body.reasoning_effort = request.reasoningEffort;
+    }
+  }
   return body;
+}
+
+/** FetchTransportOptions — 增加 Retry/CircuitBreaker 集成（P0-10） */
+export interface FetchTransportOptions {
+  /** Base URL (e.g. 'https://api.openai.com/v1') — the /chat/completions path is appended */
+  baseUrl: string;
+  /** API key (sent as `Authorization: Bearer <key>`) */
+  apiKey?: string;
+  /** Custom fetch implementation (for testing / non-browser envs) */
+  fetchImpl?: typeof fetch;
+  /** Retry policy（缺省创建：3 次重试 + jitter） */
+  retryPolicy?: import('./retry-policy.js').RetryPolicy;
+  /** Circuit breaker（缺省创建：5 次失败熔断 30s） */
+  circuitBreaker?: import('./circuit-breaker.js').CircuitBreaker;
 }
 
 /**
@@ -110,54 +136,120 @@ function buildChatBody(request: ModelRequest): Record<string, unknown> {
  * stream enabled and yields the raw response body bytes. This is the wire
  * path the legacy `fetch(.../chat/completions)` calls migrate onto.
  *
- * Non-2xx responses throw a retryable-flagged ModelError carrying the
- * provider status so callers can distinguish rate-limits from hard errors.
+ * P0-10 收口：429/5xx 自动重试（指数退避 + jitter + Retry-After 尊重 +
+ * abortable sleep），连续失败触发熔断（快速失败，避免拖垮 Provider 查询）。
+ * 非 2xx 响应抛出 retryable-flagged ModelError。
  */
 export function createFetchTransport(opts: FetchTransportOptions): Transport {
   const fetchImpl = opts.fetchImpl ?? globalThis.fetch.bind(globalThis);
+  const retryPolicy = opts.retryPolicy ?? createRetryPolicy();
+  const circuitBreaker = opts.circuitBreaker ?? createCircuitBreaker();
+
   return async function* (request, signal): AsyncIterable<Uint8Array> {
     const body = buildChatBody(request);
-    const response = await fetchImpl(`${opts.baseUrl.replace(/\/$/, '')}/chat/completions`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        ...(opts.apiKey ? { Authorization: `Bearer ${opts.apiKey}` } : {}),
-      },
-      body: JSON.stringify(body),
-      signal,
-    });
-
-    if (!response.ok) {
-      const text = await response.text().catch(() => '');
-      throw new ModelError(`provider request failed (${response.status}): ${text.slice(0, 200)}`, {
-        provider: request.provider,
-        model: request.model,
-        code: response.status === 429 ? 'RATE_LIMIT' : 'PROVIDER_UNAVAILABLE',
-        statusCode: response.status,
-        retryable: response.status === 429 || response.status >= 500,
-      });
-    }
-
-    if (!response.body) {
-      throw new ModelError('provider returned an empty body', {
-        provider: request.provider,
-        model: request.model,
-        code: 'PROVIDER_UNAVAILABLE',
-        retryable: true,
-      });
-    }
-
-    const reader = response.body.getReader();
-    try {
-      for (;;) {
-        const { done, value } = await reader.read();
-        if (done) return;
-        yield value;
+    let attempt = 0;
+    for (;;) {
+      // 熔断检查（P0-10）
+      if (!circuitBreaker.allowRequest()) {
+        throw new ModelError('provider circuit breaker open — 快速失败（连续失败过多）', {
+          provider: request.provider,
+          model: request.model,
+          code: 'CIRCUIT_OPEN',
+          retryable: false,
+        });
       }
-    } finally {
-      reader.releaseLock();
+      let response: Response;
+      try {
+        response = await fetchImpl(`${opts.baseUrl.replace(/\/$/, '')}/chat/completions`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            ...(opts.apiKey ? { Authorization: `Bearer ${opts.apiKey}` } : {}),
+          },
+          body: JSON.stringify(body),
+          signal,
+        });
+      } catch (e: unknown) {
+        // 网络错误（Abort 除外）→ 可重试
+        if (signal?.aborted) throw e;
+        circuitBreaker.recordFailure();
+        const netErr = e instanceof Error ? e : new Error(String(e));
+        if (retryPolicy.shouldRetry(attempt, { code: 'NETWORK_ERROR', retryable: true })) {
+          attempt += 1;
+          await retryPolicy.sleep(retryPolicy.delayMs(attempt), signal);
+          continue;
+        }
+        throw new ModelError(`provider network error: ${netErr.message}`, {
+          provider: request.provider,
+          model: request.model,
+          code: 'NETWORK_ERROR',
+          retryable: true,
+        });
+      }
+
+      if (!response.ok) {
+        circuitBreaker.recordFailure();
+        const text = await response.text().catch(() => '');
+        // Retry-After 头（秒）→ 毫秒
+        const retryAfterHeader = response.headers.get('retry-after');
+        const retryAfterMs = retryAfterHeader !== null && Number(retryAfterHeader) > 0
+          ? Number(retryAfterHeader) * 1000
+          : undefined;
+        const err = new ModelError(`provider request failed (${response.status}): ${text.slice(0, 200)}`, {
+          provider: request.provider,
+          model: request.model,
+          code: response.status === 429 ? 'RATE_LIMIT' : 'PROVIDER_UNAVAILABLE',
+          statusCode: response.status,
+          retryable: response.status === 429 || response.status >= 500,
+        });
+        // 附加 retryAfterMs（供 RetryPolicy 尊重 Retry-After）
+        const withRetryAfter = Object.assign(err, { retryAfterMs });
+        if (retryPolicy.shouldRetry(attempt, withRetryAfter)) {
+          attempt += 1;
+          const delay = retryPolicy.delayMs(attempt, extractRetryAfterMs(withRetryAfter));
+          await retryPolicy.sleep(delay, signal);
+          continue;
+        }
+        throw err;
+      }
+
+      // 成功：重置熔断计数
+      circuitBreaker.recordSuccess();
+
+      if (!response.body) {
+        throw new ModelError('provider returned an empty body', {
+          provider: request.provider,
+          model: request.model,
+          code: 'PROVIDER_UNAVAILABLE',
+          retryable: true,
+        });
+      }
+
+      const reader = response.body.getReader();
+      try {
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) return;
+          yield value;
+        }
+      } finally {
+        reader.releaseLock();
+      }
     }
   };
+}
+
+/**
+ * Find the next SSE frame boundary in a buffer.
+ * Returns the index of the boundary start, or -1 when no complete frame yet.
+ * Supports \r\n\r\n (CRLF) and \n\n (LF) — standard SSE frame delimiters (P1-02).
+ */
+function findFrameBoundary(buffer: string): number {
+  const crlf = buffer.indexOf('\r\n\r\n');
+  const lf = buffer.indexOf('\n\n');
+  if (crlf === -1) return lf;
+  if (lf === -1) return crlf;
+  return Math.min(crlf, lf);
 }
 
 /**
@@ -177,6 +269,10 @@ export interface OpenAICompatibleAdapterOptions {
    *  The transport should yield Uint8Array chunks from the SSE connection.
    */
   transport?: Transport;
+  /** P0-10: 自定义 RetryPolicy（缺省 3 次重试 + jitter） */
+  retryPolicy?: ReturnType<typeof createRetryPolicy>;
+  /** P0-10: 自定义 CircuitBreaker（缺省 5 次失败熔断 30s） */
+  circuitBreaker?: ReturnType<typeof createCircuitBreaker>;
   /** Optional mock for testing — if provided, streamMessages yields from mock instead of transport */
   mock?: (request: ModelRequest) => AsyncIterable<StreamChunk>;
   /**
@@ -186,7 +282,6 @@ export interface OpenAICompatibleAdapterOptions {
    */
   allowHttpTransport?: boolean;
 }
-
 /**
  * OpenAI-compatible provider adapter.
  *
@@ -202,6 +297,8 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
   private readonly transport?: Transport;
   private readonly mock?: (request: ModelRequest) => AsyncIterable<StreamChunk>;
   private readonly allowHttpTransport: boolean;
+  private readonly retryPolicy?: ReturnType<typeof createRetryPolicy>;
+  private readonly circuitBreaker?: ReturnType<typeof createCircuitBreaker>;
 
   constructor(options: OpenAICompatibleAdapterOptions) {
     this.providerId = options.providerId;
@@ -211,15 +308,21 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
     this.transport = options.transport;
     this.mock = options.mock;
     this.allowHttpTransport = options.allowHttpTransport ?? false;
+    this.retryPolicy = options.retryPolicy;
+    this.circuitBreaker = options.circuitBreaker;
   }
 
   /**
    * Non-streaming completion — delegates to streamMessages + streamToComplete.
-   * Injects the request provider/model into the assembled response.
+   * P1-03 修复：元数据（provider/model）显式注入 accumulator，
+   * 使 streamToComplete 生成的 Response 独立完整（不再依赖外部二次注入）。
    */
   async complete(request: ModelRequest): Promise<ModelResponse> {
     const stream = this.streamMessages(request);
-    const response = await streamToComplete(stream);
+    const response = await streamToComplete(stream, {
+      provider: request.provider || this.providerId,
+      model: request.model,
+    });
     return {
       ...response,
       provider: request.provider || this.providerId,
@@ -264,6 +367,9 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
         baseUrl: this.baseUrl,
         apiKey: this.apiKey,
         fetchImpl: this.fetchImpl,
+        // P0-10：自定义 RetryPolicy / CircuitBreaker 透传（缺省由 transport 内部创建）
+        retryPolicy: this.retryPolicy,
+        circuitBreaker: this.circuitBreaker,
       });
       yield* this.parseSSEStream(request, httpTransport);
       return;
@@ -281,6 +387,11 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
   /**
    * Parse SSE stream from a transport and yield StreamChunk events.
    * Falls back to the injected `transport` option when none is passed.
+   *
+   * P1-02 修复：使用标准 SSE 帧边界（\r\n\r\n 或 \n\n）逐帧解析，而不是
+   * 仅按 \n\n 切分 —— 部分 Provider 使用 CRLF 会导致内容积压到 buffer 最后
+   * 才大段处理（"看起来流式，实际最后一起出来"）。同时支持多行 data 拼接、
+   * event:/id:/retry: 字段、混合 CRLF/LF。
    */
   private async *parseSSEStream(
     request: ModelRequest,
@@ -321,33 +432,41 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
       }
     };
 
+    /** 解析一帧（不含结尾空行）：逐行提取 data: 字段，支持多行 data 拼接 */
+    const parseFrame = function* (frame: string): Generator<StreamChunk> {
+      const dataLines: string[] = [];
+      for (const rawLine of frame.split(/\r?\n/)) {
+        const line = rawLine.replace(/\r$/, '');
+        if (line.startsWith('data:')) {
+          // data: 后单个前导空格剥离；多行 data 以 \n 拼接
+          dataLines.push(line.slice(5).replace(/^ /, ''));
+        }
+        // event:/id:/retry: 行在本协议中忽略（OpenAI 兼容流只关心 data:）
+      }
+      if (dataLines.length === 0) return;
+      const data = dataLines.join('\n');
+      yield* handleData(data);
+    };
+
     for await (const chunk of transportStream) {
       buffer += decoder.decode(chunk, { stream: true });
 
-      // Split on double newline (SSE frame delimiter)
-      const frames = buffer.split('\n\n');
-      buffer = frames.pop() ?? ''; // Keep incomplete frame in buffer
-
-      for (const frame of frames) {
-        const lines = frame.split('\n');
-        for (const line of lines) {
-          if (!line.startsWith('data: ')) continue;
-          const data = line.slice(6).trim();
-          yield* handleData(data);
+      // 标准 SSE 帧边界：\r\n\r\n 或 \n\n（含混合）
+      let boundaryIndex: number;
+      while ((boundaryIndex = findFrameBoundary(buffer)) !== -1) {
+        const frame = buffer.slice(0, boundaryIndex);
+        buffer = buffer.slice(boundaryIndex + (buffer.startsWith('\r\n\r\n', boundaryIndex) ? 4 : 2));
+        if (frame.length > 0) {
+          yield* parseFrame(frame);
           if (finished) return;
         }
       }
     }
 
-    // Flush any remaining buffer
+    // Flush any remaining buffer（EOF 尾部，无空行终止）
     if (buffer.trim()) {
-      const lines = buffer.split('\n');
-      for (const line of lines) {
-        if (!line.startsWith('data: ')) continue;
-        const data = line.slice(6).trim();
-        yield* handleData(data);
-        if (finished) return;
-      }
+      yield* parseFrame(buffer);
+      if (finished) return;
     }
 
     // If stream ended without [DONE]/finish_reason, emit finish once

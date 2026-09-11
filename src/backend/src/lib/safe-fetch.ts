@@ -176,9 +176,15 @@ export function assertPublicFetchUrl(raw: string, fieldName = 'url'): void {
  * 字面量 IP 已由 isSafeFetchUrl 校验，无需 DNS。
  * 重定向的每一跳都应再次调用（每次重新 resolve）。
  */
-export async function resolveAndValidateUrl(raw: string): Promise<void> {
+export async function resolveAndValidateUrl(raw: string, opts?: { publicOnly?: boolean }): Promise<void> {
   if (!isSafeFetchUrl(raw)) {
     throw new Error('SSRF: 禁止访问内网/链路本地/元数据地址或非 http(s) 协议');
+  }
+  if (opts?.publicOnly) {
+    // P1-24: provider/URL 两种安全策略分离 —— public-only 场景先做字符串级公网校验
+    if (!isPublicFetchUrl(raw)) {
+      throw new Error('SSRF(public-only): 禁止访问本机回环/私网/链路本地地址');
+    }
   }
   const u = new URL(raw);
   const host = u.hostname;
@@ -192,7 +198,19 @@ export async function resolveAndValidateUrl(raw: string): Promise<void> {
     if (ipv4 && isLinkLocal(ipv4)) {
       throw new Error(`SSRF: 域名 "${host}" 解析出链路本地地址 ${r.address}，拒绝访问`);
     }
+    // P1-24: public-only 场景解析出私网/回环（127.0.0.0/8, 10/8, 172.16/12, 192.168/16, 0.0.0.0/8）→ 拒绝
+    if (opts?.publicOnly && ipv4 && isPrivateOrLoopback(ipv4)) {
+      throw new Error(`SSRF(public-only): 域名 "${host}" 解析出私网/回环地址 ${r.address}，拒绝访问`);
+    }
   }
+}
+
+/**
+ * P1-24/25: public-only DNS 校验助手 —— 供 web_fetch 等公网抓取场景调用。
+ * 每个 URL（含重定向每一跳）都重新 resolve，缓解 DNS rebinding TOCTOU。
+ */
+export async function assertPublicResolve(raw: string): Promise<void> {
+  return resolveAndValidateUrl(raw, { publicOnly: true });
 }
 
 /** Wave0-SS: 是否为 IPv6 字面量（含 [::1] 括号形式） */

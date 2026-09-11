@@ -13,7 +13,6 @@ import { clearReadFileCache } from '../../lib/files.js';
 import { listMcpTools } from '../../lib/mcp-client.js';
 import { AppError, StreamError } from '@pacc/shared';
 import { createEventBus } from '../../lib/event-bus.js';
-import { executeTool } from '../../lib/tool-executor.js';
 import { buildAllTools, filterToolsByWebSearch } from '../../lib/tool-registry.js';
 import { parseSse, withChunkTimeout, SseStreamError } from '../../lib/sse-parser.js';
 import { translate, buildChatRequestBody, parseToolArgsSafe } from '../../lib/stream-translate.js';
@@ -28,8 +27,9 @@ import { setupSse, cleanupSse, sendErrorAndEnd, type SseContext } from './sse-ha
 import { runAgentToolLoop, type ToolLoopContext } from './tool-loop.js';
 // Aether 2.0 v2 Event Runtime wiring (Phase 4-9 integration fix):
 // writes v2 AgentEvents to the `events` table alongside the legacy eventBus,
-// and owns the runs-row lifecycle (ensureRunRow / finalizeRunTokens).
-import { emitV2Event, ensureRunRow, finalizeRunTokens } from '../../lib/event-store-runtime.js';
+// and owns the runs-row lifecycle via RunLifecycleManager (P0-05 收口后
+// ensureRunRow/finalizeRunTokens 不再被编排直接调用）。
+import { emitV2Event } from '../../lib/event-store-runtime.js';
 // Aether 2.0 Model Runtime bridge (FIX-6): wire the legacy providers table
 // into the core ModelRuntime/ModelRegistry so the bridge runs in production
 // instead of being dead code. Legacy fetch path is untouched (Adapter §2.1).
@@ -37,6 +37,9 @@ import { buildAllRuntimes, buildRuntimeForProvider } from '../../lib/model-runti
 import { ModelRegistry } from '../../core/models/index.js';
 // P0-01/P0-02: Run-scoped cancellation registry (replaces conversation-scoped activeRequests)
 import { runCancellationRegistry } from '../../lib/run-cancellation-registry.js';
+// P0-02/P0-04/P0-05: 统一 Run 上下文（单 ID）+ RunLifecycleManager（唯一状态机写入入口）
+import { createRunContext } from '../../core/runtime/index.js';
+import { RunLifecycleManager } from '../../core/runtime/index.js';
 
 // P1-7 修复：运行时自定义提示词存放在局部 Map，不再突变模块级共享的 AGENTS 数组
 const customPrompts = new Map<string, string>();
@@ -132,14 +135,30 @@ export async function handleOrchestrate(
   }
 
   const convId = body.conversationId || 'anonymous';
-  const runTaskId = randomUUID();
+  // P0-02 修复：统一 Run 上下文 —— 一次执行只创建一个 Run ID，
+  // taskId 默认 = runId，SSE/EventBus/EventStore/Approval/Cancellation 全部共享。
+  const runCtx = createRunContext({
+    conversationId: body.conversationId,
+    agentId: 'sisyphus',
+    agentType: 'orchestrator',
+  });
+  const runTaskId = runCtx.runId;
 
+  // P0-05 修复：Run 行创建必须走 RunLifecycleManager 状态机（created → running），
+  // 禁止 ensureRunRow 直接插入 status='running' 绕过状态机。
   // Aether 2.0 v2 Event Runtime wiring (FIX-1/FIX-2): every orchestration run
   // owns a `runs` row and mirrors key lifecycle events into the `events` table,
   // so GET /api/runs/:runId/events and replay return real data. The legacy
   // eventBus path below is untouched (Adapter pattern §2.1).
+  const runLifecycle = new RunLifecycleManager(db);
   try {
-    ensureRunRow(db, runTaskId, body.conversationId, 'super');
+    runLifecycle.createAndStart({
+      runId: runTaskId,
+      conversationId: body.conversationId,
+      mode: 'super',
+      rootAgentId: 'sisyphus',
+      metadata: { prompt: body.prompt?.slice(0, 200) },
+    });
     // P0-11: run.created 为关键事件，失败必须显式暴露（不再静默吞错）
     void emitV2Event({
       runId: runTaskId,
@@ -154,17 +173,20 @@ export async function handleOrchestrate(
     // v2 runtime 不得打断 legacy orchestration 主线，但必须记录错误级别日志并补偿 run 终态
     console.error('[orchestration] run.created 事件写入失败，run 事件轨迹可能不完整:',
       e instanceof Error ? e.message : String(e));
-    try { finalizeRunTokens(db, runTaskId, 'failed', {}, 'event store write failed'); } catch { /* noop */ }
+    try { runLifecycle.transition(runTaskId, 'fail', { error: 'event store write failed', endReason: 'error' }); } catch { /* noop */ }
   }
 
   // 使用 sse-handler 的 setupSse 创建上下文（内部完成 writeHead 与 sseSend，避免重复写头）
-  const sseCtx = setupSse(reply, body.conversationId, db, config, () => saveDb(config));
+  // P0-02：传入统一 runTaskId，setupSse 不再自行生成
+  const sseCtx = setupSse(reply, body.conversationId, db, config, () => saveDb(config), { runTaskId });
   const { eventBus, clientAbort, heartbeatInterval } = sseCtx;
   const sseSend = sseCtx.sseSend;
 
   // 注册到 RunCancellationRegistry（run-scoped，而非 conversation-scoped）
+  // P0-03 修复：客户端断开（reply.raw close）只关闭 SSE Transport，
+  // Run 继续执行并保持注册 —— 移除 close → unregister 监听；
+  // 只有 Run 真正结束（finally 中正常/异常收尾）才注销。
   runCancellationRegistry.register(runTaskId, body.conversationId || '', clientAbort);
-  reply.raw.on('close', () => { runCancellationRegistry.unregister(runTaskId); });
 
   try {
     // 解析文件操作权限
@@ -354,7 +376,16 @@ void emitV2Event({ runId: runTaskId, sessionId: convId, taskId: runTaskId, agent
 
     // 并行调用但逐个收集结果 — L19: 每个 Agent 知道其他 Agent 在并行工作
     const otherAgentsInfo = targetAgents.filter(a => a.id !== 'sisyphus').map(a => `${a.name}(${a.role})`).join('、');
-    await Promise.all(targetAgents.map(async (agent) => {
+    // P1-20/P1-40 修复：Run 级 Memory Context 一次计算、所有 Agent 共享只读快照。
+    // 旧实现每个 Agent 在 Promise.all 内各自 getActiveMemoriesFormatted() —— 10 个 Agent
+    // 重复读取同一批记忆（性能浪费 + 并行下看到不同 Memory 状态）。
+    const runMemorySnapshot = await getActiveMemoriesFormatted().catch(() => '');
+    // P1-36 修复：保留 agentOrder —— Promise.all 完成后按目标顺序稳定排序，
+    // 避免「先完成的 Agent 排在前面」导致汇总 Prompt 顺序不确定（B/C/A 抖动）。
+    const agentOrder = new Map<string, number>();
+    targetAgents.forEach((a, i) => agentOrder.set(a.id, i));
+    results.length = targetAgents.length; // 预分配槽位
+    await Promise.all(targetAgents.map(async (agent, targetIndex) => {
       const ep = resolveAgentEndpoint(agent.id);
       // 统一协议：按真实执行时机发送 agent.started（不再是循环前群发假信号）
       const agentCtx = agentOf(agent.id);
@@ -369,7 +400,7 @@ void emitV2Event({ runId: runTaskId, sessionId: convId, taskId: runTaskId, agent
       }
       if (!ep) {
         const errResult = { agentId: agent.id, name: agent.name, icon: agent.icon, role: agent.role, status: 'error', reply: 'No provider configured', tokens: 0 };
-        results.push(errResult);
+        results[targetIndex] = errResult;
         sseSend('agent-result', JSON.stringify(errResult));
         if (body.conversationId) {
           eventBus.emit(convId, 'agent.error', {
@@ -383,8 +414,8 @@ void emitV2Event({ runId: runTaskId, sessionId: convId, taskId: runTaskId, agent
         // 单个 Agent 调用（含 function calling 循环）
         // L19: 在 system prompt 中注入其他 Agent 的存在，避免重复工作
         const crossContext = otherAgentsInfo ? `\n\n注意：其他 Agent 正在并行工作（${otherAgentsInfo}），请聚焦你的专业领域，不要重复其他 Agent 的工作。` : '';
-        // 注入用户记忆（从 DB + JSON 合并读取）
-        const memoriesContext = await getActiveMemoriesFormatted();
+        // 注入用户记忆（P1-20/P1-40：Run 级共享快照，不再每 Agent 重复查询）
+        const memoriesContext = runMemorySnapshot;
         const memoryBlock = memoriesContext ? `\n\n## 用户记忆（长期/短期）\n${memoriesContext}\n` : '';
         // 权限级别提示（Level 3 = 超级，可访问整个文件系统）
         const permLevel = agentSettings.permissionLevel ?? 2;
@@ -448,7 +479,7 @@ void emitV2Event({ runId: runTaskId, sessionId: convId, taskId: runTaskId, agent
           tokens: toolLoopResult.agentTokens,
           toolSummary: toolLoopResult.lastToolResult,
         };
-        results.push(doneResult);
+        results[targetIndex] = doneResult;
         sseSend('agent-result', JSON.stringify(doneResult));
         if (body.conversationId) {
           eventBus.emit(convId, 'agent.completed', {
@@ -458,7 +489,7 @@ void emitV2Event({ runId: runTaskId, sessionId: convId, taskId: runTaskId, agent
         }
       } catch (e: unknown) {
         const errResult = { agentId: agent.id, name: agent.name, icon: agent.icon, role: agent.role, status: 'error', reply: (e instanceof Error ? e.message : String(e)) };
-        results.push(errResult);
+        results[targetIndex] = errResult;
         sseSend('agent-result', JSON.stringify(errResult));
         if (body.conversationId) {
           eventBus.emit(convId, 'agent.error', {
@@ -470,9 +501,10 @@ void emitV2Event({ runId: runTaskId, sessionId: convId, taskId: runTaskId, agent
     }));
 
     // 3. Sisyphus 汇总所有结果 — 流式输出
-    // L21: 过滤掉失败的 Agent 结果，避免把报错文本当作"分析结果"汇总
-    const validResults = results.filter(r => r.status !== 'error');
-    const errorResults = results.filter(r => r.status === 'error');
+    // L21/P1-36：过滤失败 Agent 与预分配槽位可能残留的 undefined，保留目标顺序
+    const filledResults = results.filter((r: any) => r !== undefined);
+    const validResults = filledResults.filter((r: any) => r.status !== 'error');
+    const errorResults = filledResults.filter((r: any) => r.status === 'error');
     const historyContext = (body.history || []).filter((m: any) => m.role === 'user' || m.role === 'assistant').slice(-6)
       .map((m: any) => {
         // 剥离图片 markdown URL（/data/chat-images/ 是服务端虚拟路径，AI 无法访问）
@@ -499,7 +531,18 @@ ${errorResults.length > 0 ? `\n注意：以下 Agent 执行失败，结果不可
 2. 逻辑连贯，避免重复
 3. 直接给出最终答案，不要提到"根据各Agent分析"等`;
     let finalReply = '';
-    let totalAgentTokens = results.reduce((sum: number, r: any) => sum + (r.tokens || 0), 0);
+    // P1-38 修复：token 统计基于过滤后的 filledResults（剔除预分配空槽 undefined）
+    let totalAgentTokens = filledResults.reduce((sum: number, r: any) => sum + (r.tokens || 0), 0);
+    // P1-37 修复：汇总失败 fallback —— 选择最高置信度成功结果，
+    // 而不是简单的 results[0]（可能只是最先完成的 Agent，不一定最可信）。
+    const bestValidFallback = (): string => {
+      const done = filledResults.filter((r: any) => r && r.status === 'done');
+      if (done.length === 0) return '处理完成';
+      // 优先选带实际工具成果的结果（更可信），其次取最后一个成功的
+      const withTool = done.filter((r: any) => r.toolSummary && r.toolSummary.length > 0);
+      const pick = withTool.length > 0 ? withTool[withTool.length - 1] : done[done.length - 1];
+      return pick?.reply || '处理完成';
+    };
     try {
       // P0-01/P0-02: 使用 Model Runtime Bridge 进行流式完成（汇总阶段）
       const sisyphusRuntime = buildRuntimeForProvider(db, 'sisyphus', config.encryptionKey);
@@ -640,8 +683,8 @@ ${errorResults.length > 0 ? `\n注意：以下 Agent 执行失败，结果不可
           }
         }
       }
-    } catch { /* 汇总失败则用第一个结果 */
-      finalReply = results[0]?.reply || '处理完成';
+    } catch { /* 汇总失败 → P1-37 修复：选最高置信度成功结果，而非 results[0]（可能只是最先完成的 Agent） */
+      finalReply = bestValidFallback();
       sseSend('message', JSON.stringify({ content: finalReply }));
     }
 
@@ -700,7 +743,12 @@ ${errorResults.length > 0 ? `\n注意：以下 Agent 执行失败，结果不可
       // status + token snapshot, and emit run.completed / run.cancelled.
       const terminalStatus = clientAbort.signal.aborted ? 'cancelled' as const : 'completed' as const;
       try {
-        finalizeRunTokens(db, runTaskId, terminalStatus, { totalTokens: totalAgentTokens }, undefined);
+        // P0-05: 状态机统一收口 —— 经 RunLifecycleManager 完成终态写入
+        if (terminalStatus === 'cancelled') {
+          runLifecycle.transition(runTaskId, 'cancel', { totalTokens: totalAgentTokens });
+        } else {
+          runLifecycle.transition(runTaskId, 'complete', { totalTokens: totalAgentTokens, endReason: 'completed' });
+        }
         void emitV2Event({
           runId: runTaskId, sessionId: convId, taskId: runTaskId, agentId: 'sisyphus',
           type: terminalStatus === 'cancelled' ? 'run.cancelled' : 'run.completed',
@@ -726,7 +774,11 @@ ${errorResults.length > 0 ? `\n注意：以下 Agent 执行失败，结果不可
         });
         // Aether 2.0 v2 mirror (FIX-2): mark the run failed and record the error
         try {
-          finalizeRunTokens(db, runTaskId, 'failed', { totalTokens: 0 }, (e instanceof Error ? e.message : String(e)) || '内部错误');
+          // P0-05: 状态机统一收口 —— 经 RunLifecycleManager 标记失败
+          runLifecycle.transition(runTaskId, 'fail', {
+            error: (e instanceof Error ? e.message : String(e)) || '内部错误',
+            endReason: 'error',
+          });
           void emitV2Event({
             runId: runTaskId, sessionId: convId, taskId: runTaskId, agentId: 'sisyphus',
             type: 'run.failed',

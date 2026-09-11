@@ -6,24 +6,28 @@ import type { SQLJsDatabase } from 'drizzle-orm/sql-js';
 import { eq } from 'drizzle-orm';
 import type { AgentEventEnvelope, AgentEventType } from '@pacc/shared';
 import { flushPacks, setWritePackedRow, unpackRow } from './chunk-packer.js';
-import { rowToEnvelope, nextSeq, getNextSeq, pendingPacks, isPackable, queuePack, shouldFlushPack, PACKABLE_EVENT_TYPES, PACK_MAX_CHUNKS, PACK_MAX_BYTES, PackedChunk, EventEmitOptions, ActivityEventRow } from './types.js';
+import { rowToEnvelope, nextSeq, getNextSeq, pendingPacks, isPackable, queuePack, shouldFlushPack, PACKABLE_EVENT_TYPES, PACK_MAX_CHUNKS, PACK_MAX_BYTES, PackedChunk, EventEmitOptions, ActivityEventRow, createEventBusState, type EventBusState } from './types.js';
 
-/** 初始化序号：从 DB 现有最大 seq 继续（进程重启后不重复） */
-export function initSequences(db: SQLJsDatabase<any>): void {
+/**
+ * 初始化序号：从 DB 现有最大 seq 继续（进程重启后不重复）
+ * P1-07: 支持实例状态（绑定到 EventBus 实例而非模块全局）
+ */
+export function initSequences(db: SQLJsDatabase<any>, state?: EventBusState): void {
+  const seqMap = state?.nextSeq ?? nextSeq;
   try {
     const rows = (db as any).select({ conversationId: activityEvents.conversationId, seq: activityEvents.seq })
       .from(activityEvents).all() as { conversationId: string; seq: number }[];
-    const maxByConv = new Map<string, number>();
     for (const r of rows) {
-      maxByConv.set(r.conversationId, Math.max(maxByConv.get(r.conversationId) ?? 0, r.seq));
-    }
-    for (const [convId, max] of maxByConv) {
-      nextSeq.set(convId, Math.max(nextSeq.get(convId) ?? 0, max));
+      seqMap.set(r.conversationId, Math.max(seqMap.get(r.conversationId) ?? 0, r.seq));
     }
   } catch { /* 表不存在时静默（冷启动） */ }
 }
 
-/** 写单行（原始事件或打包行） */
+/**
+ * 写单行（原始事件或打包行）
+ * P1-08 修复：不再静默吞错 —— critical 事件写失败抛错（调用方补偿/标记 run 失败），
+ * 非 critical 事件记录 error 级日志并继续（best effort）。
+ */
 export function createWriteRow(db: SQLJsDatabase<any>, saveDbCb?: () => void) {
   return (row: {
     id: string;
@@ -39,7 +43,10 @@ export function createWriteRow(db: SQLJsDatabase<any>, saveDbCb?: () => void) {
     parentEventId?: string | null;
     metadata?: Record<string, unknown> | null;
     createdAt: string;
+    /** P1-08: 关键生命周期事件（task.started/run.started 等）写失败必须显式暴露 */
+    critical?: boolean;
   }): void => {
+    const isCritical = row.critical === true;
     try {
       (db as any).insert(activityEvents).values({
         id: row.id,
@@ -58,14 +65,21 @@ export function createWriteRow(db: SQLJsDatabase<any>, saveDbCb?: () => void) {
       }).run();
       saveDbCb?.();
     } catch (e) {
-      console.error('[EventBus] 事件落库失败:', e instanceof Error ? e.message : String(e));
+      const msg = e instanceof Error ? e.message : String(e);
+      if (isCritical) {
+        // 关键事件：fail fast + 显式暴露（调用方负责补偿）
+        console.error(`[EventBus] 关键事件落库失败（${row.eventType} seq=${row.seq}）:`, msg);
+        throw new Error(`EventBus critical write failed: ${row.eventType} — ${msg}`);
+      }
+      // 非关键事件：error 级日志 + 继续（best effort）
+      console.error(`[EventBus] 事件落库失败（${row.eventType} seq=${row.seq}）:`, msg);
     }
   };
 }
 
 /** 持久化单个事件 */
 export function createPersist(writeRow: (row: any) => void) {
-  return (env: AgentEventEnvelope): void => {
+  return (env: AgentEventEnvelope, opts?: { critical?: boolean }): void => {
     writeRow({
       id: env.eventId,
       conversationId: env.sessionId,
@@ -80,6 +94,7 @@ export function createPersist(writeRow: (row: any) => void) {
       parentEventId: env.parentEventId ?? null,
       metadata: env.metadata ?? null,
       createdAt: env.timestamp,
+      critical: opts?.critical,
     });
   };
 }

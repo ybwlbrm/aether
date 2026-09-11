@@ -53,6 +53,8 @@ export interface ModelRequest {
   maxTokens?: number;
   /** Enable thinking/reasoning mode */
   thinking?: boolean;
+  /** Reasoning effort level (P0-11: 透传到 Provider 的 reasoning_effort 参数) */
+  reasoningEffort?: 'low' | 'medium' | 'high';
   /** Tool definitions for function calling */
   tools?: Array<{
     type: 'function';
@@ -139,16 +141,22 @@ interface StreamAccumulator {
  * - Finish reason extraction
  * - Usage extraction
  *
+ * P1-03 修复：id/provider/model 元数据从 ModelRequest 注入（StreamChunk 协议
+ * 不携带 provider/model，通用 accumulator 必须由调用方提供这些元数据，
+ * 否则生成的 Response 无法独立使用）。
+ *
  * @param stream - Async iterable of StreamChunk events
+ * @param metadata - 可选元数据（P1-03：provider/model/id 注入）
  * @returns Promise resolving to assembled ModelResponse
  */
 export async function streamToComplete(
-  stream: AsyncIterable<StreamChunk>
+  stream: AsyncIterable<StreamChunk>,
+  metadata?: { provider?: string; model?: string; id?: string },
 ): Promise<ModelResponse> {
   const acc: StreamAccumulator = {
-    id: '',
-    provider: '',
-    model: '',
+    id: metadata?.id ?? '',
+    provider: metadata?.provider ?? '',
+    model: metadata?.model ?? '',
     content: '',
     reasoningContent: '',
     toolCalls: new Map(),

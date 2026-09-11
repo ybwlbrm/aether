@@ -35,6 +35,7 @@ import { registerAuthRoutes } from './modules/auth/index.js';
 import { registerRunRoutes, registerRunEventsRoutes, registerRunStreamRoutes } from './modules/runs/index.js';
 import { closeAllMcpClients } from './lib/mcp-client.js';
 import { generateLocalAuthToken, verifyAuthToken } from './lib/auth-token.js';
+import { setProviderDataDir } from './lib/provider.js';
 import fastifyStatic from '@fastify/static';
 import { resolve } from 'node:path';
 import { existsSync, mkdirSync } from 'node:fs';

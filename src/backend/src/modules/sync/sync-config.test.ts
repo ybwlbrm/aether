@@ -10,6 +10,7 @@ import {
   buildOwnershipFilters,
   computeConfigFingerprint,
   buildSyncResponse,
+  ensureSyncIdentity,
   type SyncConfig,
   type OwnershipFilters,
 } from './sync-config.js';
@@ -171,5 +172,73 @@ describe('sync-config pure logic', () => {
     assert.equal(filters.userId, null);
     assert.equal(filters.deviceId, 'device-123');
     // 路由层会检查 userId 为 null 时直接返回空数组
+  });
+
+  // ============================================================
+  // P1-14: 身份初始化闭环（ensureSyncIdentity）
+  // ============================================================
+
+  it('P1-14: ensureSyncIdentity — 已有 userId 直接返回（已绑定）', async () => {
+    const cfg: SyncConfig = {
+      supabaseUrl: 'https://test.supabase.co',
+      supabaseKey: 'test-key',
+      deviceId: 'device-123',
+      userId: 'already-bound-user',
+    };
+    // 即使 auth 调用会抛错，已有 userId 也应短路返回
+    const failSb = { auth: { getUser: async () => { throw new Error('should not be called'); } } } as never;
+    const result = await ensureSyncIdentity(failSb, cfg);
+    assert.equal(result, 'already-bound-user');
+  });
+
+  it('P1-14: ensureSyncIdentity — 通过 Auth session 绑定 userId', async () => {
+    const cfg: SyncConfig = {
+      supabaseUrl: 'https://test.supabase.co',
+      supabaseKey: 'test-key',
+      deviceId: 'device-123',
+    };
+    const mockSb = {
+      auth: {
+        getUser: async () => ({ data: { user: { id: 'session-user-1' } } }),
+        signInAnonymously: async () => { throw new Error('not needed'); },
+      },
+    } as never;
+    const result = await ensureSyncIdentity(mockSb, cfg);
+    assert.equal(result, 'session-user-1');
+    assert.equal(cfg.userId, 'session-user-1', '身份应写回配置对象');
+  });
+
+  it('P1-14: ensureSyncIdentity — Auth 无会话时走匿名登录', async () => {
+    const cfg: SyncConfig = {
+      supabaseUrl: 'https://test.supabase.co',
+      supabaseKey: 'test-key',
+      deviceId: 'device-123',
+    };
+    const mockSb = {
+      auth: {
+        getUser: async () => ({ data: { user: null } }),
+        signInAnonymously: async () => ({ data: { user: { id: 'anon-user-1' } }, error: null }),
+      },
+    } as never;
+    const result = await ensureSyncIdentity(mockSb, cfg);
+    assert.equal(result, 'anon-user-1');
+    assert.equal(cfg.userId, 'anon-user-1', '匿名身份应写回配置对象');
+  });
+
+  it('P1-14: ensureSyncIdentity — 两者均失败返回 null（调用方降级不上传空身份数据）', async () => {
+    const cfg: SyncConfig = {
+      supabaseUrl: 'https://test.supabase.co',
+      supabaseKey: 'test-key',
+      deviceId: 'device-123',
+    };
+    const mockSb = {
+      auth: {
+        getUser: async () => ({ data: { user: null } }),
+        signInAnonymously: async () => ({ data: { user: null }, error: { message: 'anon not enabled' } }),
+      },
+    } as never;
+    const result = await ensureSyncIdentity(mockSb, cfg);
+    assert.equal(result, null);
+    assert.equal(cfg.userId, undefined, '失败时不应写入 userId');
   });
 });

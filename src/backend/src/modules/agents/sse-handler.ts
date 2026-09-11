@@ -13,15 +13,29 @@ export interface SseContext {
   heartbeatInterval: ReturnType<typeof setInterval> | null;
 }
 
+export interface SetupSseOptions {
+  /** 外部传入的统一 Run ID（P0-02：一次执行只创建一个 ID，此处不得自行生成） */
+  runTaskId: string;
+  /** 可选：外部传入的 AbortController（未传则内部创建） */
+  abortController?: AbortController;
+}
+
+/**
+ * 初始化 SSE 上下文。
+ * P0-02 修复：runTaskId 必须由上层 createRunContext() 创建后传入，
+ * 本函数不再自行 randomUUID —— 否则 task.started 用 ID A、其余事件用 ID B，
+ * 产生幽灵数据。
+ */
 export function setupSse(
   reply: FastifyReply,
   conversationId: string | undefined,
   db: any,
   config: any,
-  saveDb: () => void
+  saveDb: () => void,
+  options: SetupSseOptions,
 ): SseContext {
   const convId = conversationId || 'anonymous';
-  const runTaskId = randomUUID();
+  const runTaskId = options.runTaskId;
 
   // SSE 响应头
   reply.raw.writeHead(200, {
@@ -52,19 +66,23 @@ export function setupSse(
     saveDb,
   );
 
-  const clientAbort = new AbortController();
+  // P0-02/P0-03: clientAbort 支持外部传入（上层 Run 生命周期共享同一个 AbortController，
+  // 确保 registry.cancel(runId) 与 SSE 传输共用同一信号源）
+  const clientAbort = options.abortController ?? new AbortController();
 
   // 心跳
   const heartbeatInterval = startHeartbeat(reply);
 
   // 任务开始（只有真实会话才落库；anonymous 跳过，避免垃圾数据）
+  // P0-02 修复：task.started 使用上层传入的 runTaskId（与 run.created/agent/tool 事件一致）
+  // P1-08: task.started 为关键生命周期事件 —— 写失败显式抛错（运行起点不可丢）
   if (conversationId) {
     eventBus.emit(convId, 'task.started', {
       taskId: runTaskId,
       agentId: 'sisyphus',
       agentType: 'orchestrator',
       content: '', // 将在外部填充
-    });
+    }, { critical: true });
   }
 
   return {

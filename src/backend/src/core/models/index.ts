@@ -59,3 +59,21 @@ export {
   type UsageRecord,
   type UsageTotals,
 } from './usage.js';
+
+// Retry Policy (P0-10: ModelRuntime 组成部分)
+export {
+  type RetryPolicy,
+  type RetryPolicyOptions,
+  type RetryablePredicate,
+  createRetryPolicy,
+  defaultRetryable,
+  extractRetryAfterMs,
+} from './retry-policy.js';
+
+// Circuit Breaker (P0-10: ModelRuntime 组成部分)
+export {
+  type CircuitBreaker,
+  type CircuitBreakerOptions,
+  type CircuitState,
+  createCircuitBreaker,
+} from './circuit-breaker.js';

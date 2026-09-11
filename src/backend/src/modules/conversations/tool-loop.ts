@@ -1,11 +1,11 @@
 import { randomUUID } from 'node:crypto';
-import { executeTool } from '../../lib/tool-executor.js';
 import { buildToolPayload } from '@pacc/shared';
 import { parseToolArgsSafe, buildChatRequestBody } from '../../lib/stream-translate.js';
-import { createPendingApproval } from '../../lib/approvals-center.js';
 import { drainDirectives } from '../../lib/inbox.js';
 import { buildModelRuntime, type ModelRequest } from '../../core/models/index.js';
 import { messages } from '../../db/schema/index.js';
+// P0-01 收口：统一生产工具执行器（Agent → ToolRuntime → PolicyEngine → Approval → ToolExecutor）
+import { createProductionToolExecutor, type ProductionToolExecutor } from '../../lib/production-tool-executor.js';
 
 export interface ToolLoopConfig {
   apiMessages: any[];
@@ -89,6 +89,30 @@ export async function executeToolLoop(
   let aiError: string | null = null;
 
   let maxTurns = configMaxTurns;
+
+  // P0-01 收口：统一生产工具执行器（循环外构建一次，循环内复用）
+  const productionExecutor: ProductionToolExecutor = createProductionToolExecutor({
+    mcpTools,
+    getMcpServers,
+    allowedDirs,
+    permissionLevel: settings.permissionLevel ?? 2,
+    defaultDir,
+    sessionId: conversationId,
+    runId: runContext.taskId,
+    taskId: runContext.taskId,
+    agentId: runContext.agentId,
+    signal: clientAbortSignal,
+    onApprovalPrompt: ({ id, toolName, argsSummary }) => {
+      sseSend('ask-confirm', JSON.stringify({ id, toolName, argsSummary }));
+      eventBus.emit(runContext.sessionId, 'task.ask-confirm', {
+        taskId: runContext.taskId,
+        agentId: runContext.agentId,
+        agentType: runContext.agentType,
+        content: `需要确认执行工具 ${toolName}`,
+        metadata: { approvalId: id, toolName, argsSummary, runId: runContext.taskId, agentId: runContext.agentId },
+      });
+    },
+  });
 
   while (maxTurns-- > 0) {
     // inbox 指令（steer/followup）：运行中用户补充的指令 → drain 为 user 消息注入下一轮
@@ -267,45 +291,9 @@ export async function executeToolLoop(
         const mcpTool = mcpTools.find(t => t.name === funcName);
         let result: string;
         try {
-          // BE-05: 传递 abort signal 到工具执行，支持客户端断连时取消
-          const execResult = await executeTool(funcName, args, {
-            mcpTools,
-            getMcpServers,
-            allowedDirs,
-            permissionLevel: settings.permissionLevel ?? 2,
-            defaultDir,
-            sessionId: conversationId,
-            signal: clientAbortSignal,
-            onApproval: async (toolName, toolArgs, argsSummary) => {
-              // 发起审批挂起：SSE 推送 task.ask-confirm 事件，前端弹窗让用户决定
-              const { id: approvalId, promise } = createPendingApproval({
-                toolName,
-                args: toolArgs,
-                conversationId,
-                prompt: ({ id: apId, toolName: name, argsSummary: summ }) => {
-                  sseSend('ask-confirm', JSON.stringify({ id: apId, toolName: name, argsSummary: summ }));
-                  eventBus.emit(runContext.sessionId, 'task.ask-confirm', {
-                    taskId: runContext.taskId,
-                    agentId: runContext.agentId,
-                    agentType: runContext.agentType,
-                    content: `需要确认执行工具 ${name}`,
-                    metadata: { approvalId: apId, toolName: name, argsSummary: summ },
-                  });
-                },
-              });
-              const { approved, decision } = await promise;
-              // 决议结果事件
-              eventBus.emit(runContext.sessionId, 'task.plan', {
-                taskId: runContext.taskId,
-                agentId: runContext.agentId,
-                agentType: runContext.agentType,
-                content: approved
-                  ? `用户已批准执行 ${toolName}`
-                  : `用户未批准 ${toolName}（${decision === 'timeout' ? '审批超时' : '已拒绝'}）`,
-              });
-              return { approved, decision };
-            },
-          });
+          // P0-01 收口：统一生产执行器（PolicyEngine 唯一裁决 + Approval + Timeout + Cancel）
+          // 审批在 executor 内部完整处理（onApprovalPrompt 回调推送 ask-confirm）
+          const execResult = await productionExecutor.execute(funcName, args);
           result = execResult.result;
           if (execResult.error) throw new Error(execResult.error);
         } catch (e: unknown) {

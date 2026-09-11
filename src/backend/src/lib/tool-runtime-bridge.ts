@@ -112,6 +112,10 @@ export function buildRegistryFromLegacyTools(): ToolRegistry {
 /**
  * Build a permissive Zod schema from a JSON-schema `parameters` object.
  * Falls back to z.record(z.unknown()) when parameters are missing/unsupported.
+ *
+ * P0-01 修复：尊重 JSON-schema 的 `required` 数组 —— 仅在 required 列表中的
+ * 属性生成为必填，其余属性为可选（.optional()）。旧实现把所有属性都生成 required，
+ * 导致 todo_write 等工具在未传可选参数时被误判 INVALID_INPUT。
  */
 export function buildZodFromJsonSchema(
   parameters?: Record<string, unknown>,
@@ -123,10 +127,17 @@ export function buildZodFromJsonSchema(
   if (!props || typeof props !== 'object') {
     return z.record(z.unknown());
   }
+  // 读取 required 数组（仅声明的属性必填）
+  const requiredSet = new Set<string>(
+    (Array.isArray((parameters as { required?: unknown }).required)
+      ? (parameters as { required?: unknown }).required as unknown[]
+      : []).map(String),
+  );
   // Build a loose object schema from declared properties, allowing extras.
   const shape: Record<string, z.ZodType<unknown>> = {};
   for (const [key, prop] of Object.entries(props as Record<string, Record<string, unknown>>)) {
-    shape[key] = buildZodFromProperty(prop);
+    const base = buildZodFromProperty(prop);
+    shape[key] = requiredSet.has(key) ? base : base.optional();
   }
   return z.object(shape).passthrough() as z.ZodType<unknown>;
 }

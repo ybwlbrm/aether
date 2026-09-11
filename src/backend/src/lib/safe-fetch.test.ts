@@ -63,3 +63,29 @@ describe('search-tools/ssrf 已统一复用 safe-fetch（Wave0-SS：单一基础
     assert.equal(searchIsSafe('https://example.com/x'), true);
   });
 });
+
+describe('P1-24/25: publicOnly DNS 校验（公网抓取场景，provider 场景分离安全策略）', () => {
+  test('P1-24: publicOnly 拒绝回环字面量（provider 允许、公网抓取拒绝）', async () => {
+    const { assertPublicResolve } = await import('./safe-fetch.js');
+    // provider 场景：本地 Ollama 合法（旧行为不变）
+    await resolveAndValidateUrl('http://127.0.0.1:11434/v1');
+    // 公网抓取场景：回环拒绝
+    await assert.rejects(assertPublicResolve('http://127.0.0.1:3000/x'), /SSRF/);
+    await assert.rejects(assertPublicResolve('http://localhost:3000/x'), /SSRF/);
+  });
+
+  test('P1-24: publicOnly 拒绝私网字面量（10.x / 172.16-31 / 192.168 / 0.0.0.0）', async () => {
+    const { assertPublicResolve } = await import('./safe-fetch.js');
+    await assert.rejects(assertPublicResolve('http://10.0.0.1/'), /SSRF/);
+    await assert.rejects(assertPublicResolve('http://172.16.0.1/'), /SSRF/);
+    await assert.rejects(assertPublicResolve('http://192.168.1.1/'), /SSRF/);
+    await assert.rejects(assertPublicResolve('http://0.0.0.0/'), /SSRF/);
+  });
+
+  test('P1-24: publicOnly 允许公网 URL（安全基线不破坏）', async () => {
+    const { assertPublicResolve } = await import('./safe-fetch.js');
+    // 公网字面量直接通过（不触发 DNS）
+    await assertPublicResolve('http://8.8.8.8/x');
+    await assertPublicResolve('http://1.1.1.1/x');
+  });
+});

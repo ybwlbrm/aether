@@ -6,12 +6,17 @@
  * The legacy JSON file (memory.json) is no longer used at runtime — it is
  * only for migration/import/export/backup purposes.
  *
+ * P1-16/P1-17 修复：
+ * - query 条件用 and(...) 组合（scope AND type AND content），不再 or(...)
+ * - importanceMin 直接进入 SQL（而非 limit 后内存过滤）
+ * - expiresAt 参与召回：expiresAt > now OR expiresAt IS NULL（过期记忆不召回）
+ *
  * Pure TypeScript — no Fastify/SSE/React imports.
  */
 
 import { getDb } from '../db/client.js';
 import { memories } from '../db/schema/index.js';
-import { eq, desc, like, or } from 'drizzle-orm';
+import { eq, desc, like, and, gt, isNull, or, sql, type SQL } from 'drizzle-orm';
 import { randomUUID } from 'node:crypto';
 import type { MemoryStore, MemoryEntry, MemoryQuery, MemoryScope } from '../core/memory/index.js';
 
@@ -30,6 +35,7 @@ function toDbRow(entry: MemoryEntry): typeof memories.$inferInsert {
     scope: (entry.scope ?? 'user') as DbMemoryScope,
     importance: entry.importance ?? 0.5,
     lastUsedAt: entry.lastUsedAt ?? null,
+    expiresAt: entry.expiresAt ?? null,
     createdAt: entry.createdAt ?? now,
     updatedAt: now,
   };
@@ -47,6 +53,7 @@ function toCoreEntry(row: typeof memories.$inferSelect): MemoryEntry {
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
     lastUsedAt: row.lastUsedAt ?? undefined,
+    expiresAt: row.expiresAt ?? undefined,
   };
 }
 
@@ -89,8 +96,9 @@ export class SqliteMemoryStore implements MemoryStore {
     const limit = q.limit ?? 50;
     const offset = q.offset ?? 0;
 
-    // Build conditions array first
-    const conditions: any[] = [];
+    // P1-16 修复：条件用 AND 组合（scope AND type AND contentContains AND importanceMin），
+    // 不再 or(...) —— 否则 scope=user 且 type=project 会匹配到任意 scope 的记忆。
+    const conditions: Array<SQL<unknown> | undefined> = [];
     if (q.scope !== undefined) {
       conditions.push(eq(memories.scope, q.scope));
     }
@@ -101,23 +109,22 @@ export class SqliteMemoryStore implements MemoryStore {
       const pattern = `%${q.contentContains}%`;
       conditions.push(or(like(memories.content, pattern), like(memories.key, pattern)));
     }
+    // P1-16: importanceMin 直接进入 SQL（而不是 limit 后内存过滤）
+    if (q.importanceMin !== undefined) {
+      conditions.push(sql`${memories.importance} >= ${q.importanceMin}`);
+    }
+    // P1-17: expiresAt 参与召回 —— expiresAt > now OR expiresAt IS NULL（过期不召回）
+    conditions.push(or(gt(memories.expiresAt, new Date().toISOString()), isNull(memories.expiresAt)));
 
-    // Use a single query with conditional where
     const rows = db.select()
       .from(memories)
-      .where(conditions.length > 0 ? or(...conditions) : undefined)
+      .where(conditions.length > 0 ? and(...conditions) as SQL : undefined)
       .orderBy(desc(memories.createdAt))
       .limit(limit)
       .offset(offset)
       .all();
 
-    let matches = rows.map(toCoreEntry);
-
-    if (q.importanceMin !== undefined) {
-      matches = matches.filter((entry) => (entry.importance ?? 0.5) >= q.importanceMin!);
-    }
-
-    return matches;
+    return rows.map(toCoreEntry);
   }
 
   async delete(id: string): Promise<boolean> {

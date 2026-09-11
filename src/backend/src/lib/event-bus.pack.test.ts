@@ -100,4 +100,64 @@ describe('EventBus chunk-rows 打包', () => {
     assert.deepEqual(events.map(e => e.eventType), ['task.started', 'tool.started', 'tool.completed']);
     sqlDb.close();
   });
+
+  // ── P1-09：PackedChunk 保留完整最小 Event Envelope（多 Agent 归属不丢）──
+
+  it('P1-09: 打包行解包后保留 agentId/taskId/parentEventId（多 Agent 归属不丢失）', async () => {
+    const sqlDb = makeDb();
+    const drizzle = (await import('drizzle-orm/sql-js')).drizzle;
+    const schema = await import('../db/schema/index.js');
+    const db = drizzle(sqlDb, { schema: { activityEvents: schema.activityEvents } }) as any;
+
+    const bus = createEventBus(db, undefined, () => {});
+    // Agent A 的 reasoning delta（打包）+ Agent B 的 message delta（打包）
+    for (let i = 0; i < 3; i++) {
+      bus.emit('multi-agent', 'agent.reasoning.delta', {
+        taskId: 'task-a', agentId: 'hephaestus', agentType: 'builder', content: `H${i}`,
+      });
+    }
+    for (let i = 0; i < 3; i++) {
+      bus.emit('multi-agent', 'agent.message.delta', {
+        taskId: 'task-b', agentId: 'oracle', agentType: 'consultant', content: `O${i}`,
+      });
+    }
+    // 触发冲刷
+    bus.emit('multi-agent', 'task.completed', { taskId: 'task-x', agentId: 'sisyphus', status: 'completed', content: 'done' });
+
+    const events = bus.listEvents('multi-agent');
+    const reasonings = events.filter(e => e.eventType === 'agent.reasoning.delta');
+    const messages = events.filter(e => e.eventType === 'agent.message.delta');
+
+    // P1-09: 归属必须保留（旧实现会全部还原为 agent='main'/task=eventId）
+    assert.equal(reasonings.length, 3);
+    for (const r of reasonings) {
+      assert.equal(r.agentId, 'hephaestus', 'reasoning 事件 agentId 归属必须保留');
+      assert.equal(r.agentType, 'builder');
+      assert.equal(r.taskId, 'task-a', 'taskId 归属必须保留');
+    }
+    for (const m of messages) {
+      assert.equal(m.agentId, 'oracle', 'message 事件 agentId 归属必须保留');
+      assert.equal(m.agentType, 'consultant');
+      assert.equal(m.taskId, 'task-b', 'taskId 归属必须保留');
+    }
+    sqlDb.close();
+  });
+
+  it('P1-09: 单条 delta 原样落库保留 agentId', async () => {
+    const sqlDb = makeDb();
+    const drizzle = (await import('drizzle-orm/sql-js')).drizzle;
+    const schema = await import('../db/schema/index.js');
+    const db = drizzle(sqlDb, { schema: { activityEvents: schema.activityEvents } }) as any;
+
+    const bus = createEventBus(db, undefined, () => {});
+    bus.emit('single-agent', 'agent.message.delta', { taskId: 'task-z', agentId: 'librarian', agentType: 'searcher', content: 'solo' });
+    bus.emit('single-agent', 'task.completed', { taskId: 'task-z', agentId: 'librarian', status: 'completed', content: 'end' });
+
+    const events = bus.listEvents('single-agent');
+    const delta = events.find(e => e.eventType === 'agent.message.delta');
+    assert.ok(delta, '应回放出 delta 事件');
+    assert.equal(delta!.agentId, 'librarian');
+    assert.equal(delta!.taskId, 'task-z');
+    sqlDb.close();
+  });
 });

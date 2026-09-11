@@ -30,15 +30,14 @@ export interface ToolExecutorOptions {
   /** Policy for tool execution control */
   policy?: ToolPolicy;
   /**
-   * PERM-001 (P0-19/20)：可选的 capability 化 PolicyEngine（新权限体系）。
+   * PERM-001 (P0-19/20)：capability 化 PolicyEngine（新权限体系，P0-06 唯一裁决者）。
    * 注入后，deny 规则对 `tool:<name>` capability 生效（默认放行，零行为变化）。
-   * 提供 migration layer：旧 ToolPolicy（compatibility）与新 PolicyEngine 可并存；
-   * 新部署只注入 policyEngine，不注入 policy。
+   * P0-06 收口：approval 效果 → 触发审批；deny → 拒绝；allow/default → 放行。
    */
   policyEngine?: PolicyEngine;
   /**
    * P0-06/P1-38: 强制 PolicyEngine 裁决模式。
-   * - true: decision.allowed 为唯一裁决；无显式 allow/deny 规则时按 defaultDeny 语义拒绝（默认拒绝）。
+   * - true: decision 为唯一裁决；无显式 allow/deny 规则时按 defaultDeny 语义拒绝（默认拒绝）。
    * - false (默认): 兼容模式，仅显式 deny 拦截，无规则时放行（避免"空 engine 拒绝一切"）。
    * 系统收敛入口应调用 enableMandatoryPolicyEngine() 开启。
    */
@@ -59,8 +58,8 @@ export interface ToolExecutorOptions {
 
 /**
  * ToolExecutor — Orchestrates tool execution with policy, validation, timeout, and error handling.
- * 权限链路（PERM-001）：Capability → PolicyEngine → Approval → ToolRuntime → Executor
- * 权限优先级（P0-06/P1-38）：Explicit Deny > Capability Deny > Approval > Explicit Allow > Default Deny
+ * 权限链路（P0-06 收口）：Capability → PolicyEngine（唯一裁决）→ Approval → ToolRuntime → Executor
+ * 权限优先级：Explicit Deny > Approval > Explicit Allow > Default Deny
  */
 export class ToolExecutor {
   #registry: ToolRegistry;
@@ -86,33 +85,38 @@ export class ToolExecutor {
   }
 
   /**
-   * PERM-001: capability 化 PolicyEngine 裁决（capability 名为 `tool.<name>`，
+   * P0-06 收口：PolicyEngine 唯一裁决（capability 名为 `tool.<name>`，
    * 与 PolicyEngine 点分段通配约定一致 —— `tool.*` 可通配所有工具）。
-   * 
-   * 权限优先级：Explicit Deny > Capability Deny > Approval > Explicit Allow > Default Deny
-   * 
+   *
+   * 返回三态：
+   * - 'deny'：显式拒绝（最高优先级）
+   * - 'approval'：需要用户审批（approval 规则命中，P0-06 新增）
+   * - 'allow'：放行（granted/显式 allow/兼容模式无规则）
+   *
    * 两种模式：
-   * - 兼容模式 (enforcePolicyEngine=false, 默认)：仅显式 deny 规则拦截；无规则或仅有 allow 时放行。
-   *   避免"注入空 engine 即拒绝全部工具"的部署陷阱，零行为变化。
+   * - 兼容模式 (enforcePolicyEngine=false, 默认)：仅显式 deny/approval 规则拦截；
+   *   无规则或仅有 allow 时放行。避免"注入空 engine 即拒绝全部工具"的部署陷阱。
    * - 强制模式 (enforcePolicyEngine=true)：decision.allowed 为唯一裁决。
    *   无显式规则命中时按 default 效果（默认拒绝，即 defaultDeny 语义）。
-   *   系统收敛入口应显式开启。
    * 未注入 policyEngine 时完全跳过（旧行为零变化）。
    */
-  #evaluatePolicyEngine(toolName: string, context: ToolContext): boolean {
-    if (!this.#policyEngine) return true;
+  #evaluatePolicyEngine(toolName: string, context: ToolContext): 'allow' | 'deny' | 'approval' {
+    if (!this.#policyEngine) return 'allow';
     const decision = this.#policyEngine.evaluate(`tool.${toolName}`, {
       capabilities: context.permissions ?? [],
       agentId: context.agentId,
       runId: context.runId,
       extra: { tool: toolName },
     });
-    // 兼容模式：仅显式 deny 拦截
-    if (!this.#enforcePolicyEngine) {
-      return decision.effect !== 'deny';
+    // 强制模式：decision.allowed 为唯一裁决（approval 效果下 allowed=false 但需走审批而非拒绝）
+    if (this.#enforcePolicyEngine) {
+      if (decision.effect === 'approval') return 'approval';
+      return decision.allowed ? 'allow' : 'deny';
     }
-    // 强制模式：decision.allowed 为唯一裁决
-    return decision.allowed;
+    // 兼容模式：仅显式 deny/approval 规则拦截
+    if (decision.effect === 'deny') return 'deny';
+    if (decision.effect === 'approval') return 'approval';
+    return 'allow';
   }
 
   /**
@@ -136,42 +140,60 @@ export class ToolExecutor {
       }, durationMs);
     }
 
-    // Evaluate policy (PERM-001: 先过 capability 化 PolicyEngine，再走 legacy ToolPolicy)
-    if (!this.#evaluatePolicyEngine(toolName, context)) {
+    // P0-06 收口：PolicyEngine 唯一裁决（deny → 拒绝；approval → 审批；allow → 执行）
+    const policyDecision = this.#evaluatePolicyEngine(toolName, context);
+    if (policyDecision === 'deny') {
       const durationMs = Date.now() - startTime;
       return errorResult(toolName, {
         message: `Tool '${toolName}' is denied by policy`,
         code: 'TOOL_DENIED',
       }, durationMs);
     }
-    const policyResult = this.#policy.evaluate(toolName);
-    if (policyResult.action === 'deny') {
-      const durationMs = Date.now() - startTime;
-      return errorResult(toolName, {
-        message: `Tool '${toolName}' is denied by policy`,
-        code: 'TOOL_DENIED',
-      }, durationMs);
-    }
-
-    if (policyResult.action === 'require-approval') {
+    if (policyDecision === 'approval') {
       const durationMs = Date.now() - startTime;
       // P0-11: 优先使用注入的 requestApproval 回调（返回真实 apr-xxxx ID）
       if (this.#requestApproval) {
-        const argsSummary = this.#policy.getRules().find(r => r.pattern === toolName || this.#matchesPatternForApproval(toolName, r.pattern))
-          ? JSON.stringify(input).slice(0, 120)
-          : JSON.stringify(input).slice(0, 120);
+        const argsSummary = JSON.stringify(input).slice(0, 120);
         const { id, promise } = this.#requestApproval({
           toolName,
           argsSummary,
           context,
         });
-        // 返回 pendingApprovalResult，但 approvalId 使用真实 ID
-        // 注意：promise 由调用方（approvals-center）管理，这里只需返回 ID
+        void promise;
         return pendingApprovalResult(toolName, id, durationMs);
       }
       // 兼容模式：未注入回调时使用旧行为
       const approvalId = `${toolName}:${Date.now()}`;
       return pendingApprovalResult(toolName, approvalId, durationMs);
+    }
+
+    // 已批准标记（P0-08：审批通过后的二次执行直接放行，不再走 legacy ToolPolicy）
+    const approvedByUser = (context.metadata as Record<string, unknown> | undefined)?.approvedByUser === true;
+    if (!approvedByUser && this.#policy) {
+      const legacyPolicyResult = this.#policy.evaluate(toolName);
+      if (legacyPolicyResult.action === 'deny') {
+        const durationMs = Date.now() - startTime;
+        return errorResult(toolName, {
+          message: `Tool '${toolName}' is denied by policy`,
+          code: 'TOOL_DENIED',
+        }, durationMs);
+      }
+      if (legacyPolicyResult.action === 'require-approval') {
+        const durationMs = Date.now() - startTime;
+        // P0-11: 优先使用注入的 requestApproval 回调（返回真实 apr-xxxx ID）
+        if (this.#requestApproval) {
+          const argsSummary = JSON.stringify(input).slice(0, 120);
+          const { id, promise } = this.#requestApproval({
+            toolName,
+            argsSummary,
+            context,
+          });
+          void promise;
+          return pendingApprovalResult(toolName, id, durationMs);
+        }
+        const approvalId = `${toolName}:${Date.now()}`;
+        return pendingApprovalResult(toolName, approvalId, durationMs);
+      }
     }
 
     // Validate input against schema

@@ -52,6 +52,23 @@ export {
   RunStateMachine,
 } from './run.js';
 
+// Run context factory (P0-02: single Run ID across all components)
+export {
+  type RunContext,
+  type CreateRunContextOptions,
+  createRunContext,
+} from './run-context.js';
+
+// Run lifecycle manager (P0-05: single state-machine writer for runs table)
+export {
+  RunLifecycleManager,
+  getRunLifecycleManager,
+  resetRunLifecycleManager,
+  type RunAction,
+  type CreateRunInput,
+  type TransitionOptions,
+} from './run-lifecycle-manager.js';
+
 // Task state machine (Aether 2.0)
 export {
   type TaskStatus,

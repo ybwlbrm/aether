@@ -1,17 +1,18 @@
 /**
  * Policy Engine — Capability-based Authorization Rules
  *
- * Defines explicit allow/deny rules over capabilities, evaluated against a
+ * Defines explicit allow/deny/approval rules over capabilities, evaluated against a
  * PolicyContext (which carries the granted CapabilitySet).
  *
  * Semantics (P1-34):
  * - An explicit `deny` rule wins over everything, regardless of granted capabilities.
+ * - An `approval` rule requires human approval before the capability may be used.
  * - If no rule matches and the context carries the capability → allowed.
  * - If an explicit `allow` rule matches (and no deny matched) → allowed.
  * - Otherwise → denied (default deny for ungranted capabilities).
- * 
- * 权限优先级（P0-06/P1-38，与 ToolPolicy/PolicyEngine 注释对齐）：
- * Explicit Deny > Capability Deny > Approval > Explicit Allow > Default Deny
+ *
+ * 权限优先级（P0-06/P1-38，PolicyEngine = 唯一安全裁决者）：
+ * Explicit Deny > Approval > Explicit Allow > Default Deny
  */
 
 import type { Capability, CapabilitySet } from './capability.js';
@@ -19,7 +20,7 @@ import { hasCapability } from './capability.js';
 import { RuntimeError } from '../errors/index.js';
 
 /** Policy rule effect */
-export type PolicyEffect = 'allow' | 'deny';
+export type PolicyEffect = 'allow' | 'deny' | 'approval';
 
 /**
  * A single authorization rule.
@@ -48,7 +49,7 @@ export interface PolicyContext {
 /** Evaluation result */
 export interface PolicyDecision {
   allowed: boolean;
-  effect: 'allow' | 'deny' | 'default';
+  effect: 'allow' | 'deny' | 'approval' | 'default';
   matchedRule?: PolicyRule;
 }
 
@@ -65,9 +66,8 @@ function matchesRuleCapability(ruleCap: string, requested: Capability): boolean 
 /**
  * In-memory policy engine.
  *
- * Rules are ordered; the FIRST matching rule wins (deny has priority only if it
- * comes first — rules are evaluated in registration order, and a matching deny
- * always overrides a matching allow regardless of order via `denyWins`).
+ * Priority: first matching DENY rule wins; then APPROVAL rule (requires human
+ * approval); then granted capability / explicit ALLOW; otherwise default deny.
  */
 export class PolicyEngine {
   private readonly rules: PolicyRule[] = [];
@@ -98,19 +98,27 @@ export class PolicyEngine {
       }
     }
 
-    // 2. Grant from context capabilities → allowed (default allow path)
+    // 2. First matching APPROVAL rule → requires human approval
+    //    (checked after deny, before allow — approval is a gate, not a grant)
+    for (const rule of this.rules) {
+      if (rule.effect === 'approval' && matchesRuleCapability(rule.capability, capability)) {
+        return { allowed: false, effect: 'approval', matchedRule: rule };
+      }
+    }
+
+    // 3. Grant from context capabilities → allowed (default allow path)
     if (hasCapability(context.capabilities, capability)) {
       return { allowed: true, effect: 'default' };
     }
 
-    // 3. Explicit ALLOW rule → allowed even if not granted in context
+    // 4. Explicit ALLOW rule → allowed even if not granted in context
     for (const rule of this.rules) {
       if (rule.effect === 'allow' && matchesRuleCapability(rule.capability, capability)) {
         return { allowed: true, effect: 'allow', matchedRule: rule };
       }
     }
 
-    // 4. Default deny
+    // 5. Default deny
     return { allowed: false, effect: 'default' };
   }
 

@@ -165,6 +165,18 @@ export async function executeWorkflow(opts: ExecuteWorkflowOptions): Promise<Exe
     error: errorMsg,
     completedAt,
   }).where(eq(workflowRuns.id, runId)).run();
+  // P0-05 收口：工作流 Run 终态统一走 RunLifecycleManager 状态机
+  try {
+    const lifecycle = new RunLifecycleManager(db);
+    if (failed) {
+      lifecycle.transition(runId, 'fail', { error: errorMsg, endReason: 'error' });
+    } else {
+      lifecycle.transition(runId, 'complete', { endReason: 'completed' });
+    }
+  } catch (e: unknown) {
+    console.warn('[Workflow] runs 终态写入失败（不影响工作流执行）:',
+      e instanceof Error ? e.message : String(e));
+  }
   saveDb(config);
 
   // 事件：工作流结束（§57 workflow.completed / workflow.failed）
@@ -187,11 +199,27 @@ export async function executeWorkflow(opts: ExecuteWorkflowOptions): Promise<Exe
 // 需要导入的依赖
 import { eq } from 'drizzle-orm';
 import { workflowRuns } from '../../db/schema/index.js';
+import { RunLifecycleManager } from '../../core/runtime/index.js';
 import { randomUUID } from 'node:crypto';
 
 async function createWorkflowRunInternal(workflowId: string, firstNodeId: string | undefined, db: any, saveDb: (config: any) => void, config: any) {
   const runId = randomUUID();
   const now = new Date().toISOString();
+  // P0-04/P0-05 收口：Workflow 也进入统一 Run 架构（runs 表 + RunLifecycleManager 状态机）
+  try {
+    const lifecycle = new RunLifecycleManager(db);
+    lifecycle.createAndStart({
+      runId,
+      conversationId: null,
+      mode: 'workflow',
+      rootAgentId: 'workflow',
+      metadata: { workflowId, firstNodeId },
+    });
+  } catch (e: unknown) {
+    // workflowRuns 表是工作流自有记录，runs 行创建失败不应阻断工作流执行，但需记录
+    console.warn('[Workflow] runs 行创建失败（不影响工作流执行）:',
+      e instanceof Error ? e.message : String(e));
+  }
   db.insert(workflowRuns).values({
     id: runId,
     workflowId,

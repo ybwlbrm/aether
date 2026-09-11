@@ -23,6 +23,8 @@ import { registerDevice } from './sync-config.js';
 import { resolve } from 'node:path';
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { buildRuntimeForProvider } from '../../lib/model-runtime-bridge.js';
+// P0-04 收口：Remote Command 也进入统一 Run 架构（runs 表 + RunLifecycleManager 状态机）
+import { RunLifecycleManager } from '../../core/runtime/index.js';
 
 // ============================================================
 // 处理远程命令（手机端发来的指令）
@@ -38,6 +40,9 @@ export async function processRemoteCommand(
   const commandId = command.id;
   let content = command.content;
   const existingConvId = command.conversation_id;
+  // P0-04 收口：runId 提升到函数作用域，供外层 catch 写终态
+  let runTaskId = '';
+  let runLifecycle: RunLifecycleManager | null = null;
 
   // P0-1: 解析并剥离手机端附加的模式/Level/开关前缀 [mode=X][level=Y][deep=Z][web=W][loop=L]
   let remoteMode = 'normal';
@@ -437,7 +442,21 @@ export async function processRemoteCommand(
 
     // 创建 EventBus 用于发射活动事件（桌面端 ActivityStream 消费）
     const eventBus = createEventBus(getDb(), undefined, () => saveDb(backendConfig));
-    const runTaskId = randomUUID();
+    runTaskId = randomUUID();
+    // P0-04 收口：Remote Command 进入统一 Run 架构 —— runs 行 + created→running 状态机
+    try {
+      runLifecycle = new RunLifecycleManager(db);
+      runLifecycle.createAndStart({
+        runId: runTaskId,
+        conversationId: convId,
+        mode: remoteMode === 'super' ? 'super' : 'normal',
+        rootAgentId: 'main',
+        metadata: { source: 'remote-command', commandId },
+      });
+    } catch (e: unknown) {
+      console.warn('[Sync] runs 行创建失败（不影响远程命令执行）:',
+        e instanceof Error ? e.message : String(e));
+    }
     // P0-A16: 回填 run_id/task_id 到 remote_commands（移动端 SyncState 可追踪本次执行）
     void sb.from('remote_commands').update({
       run_id: runTaskId,
@@ -824,9 +843,23 @@ export async function processRemoteCommand(
       taskId: runTaskId, agentId: 'main', agentType: 'conversation',
       status: 'completed', content: '完成', endReason: 'completed',
     });
+    // P0-05 收口：Remote Command Run 终态统一经 RunLifecycleManager
+    try {
+      runLifecycle?.transition(runTaskId, 'complete', {
+        endReason: 'completed',
+        totalTokens: usageTotal.total_tokens || 0,
+      });
+    } catch (err) {
+      console.warn('[Sync] run 终态写入失败（不阻塞）:',
+        err instanceof Error ? err.message : String(err));
+    }
   } catch (e: unknown) {
     const errMsg = e instanceof Error ? e.message : String(e);
     console.error('[Sync] 远程命令处理失败:', errMsg);
+    // P0-05 收口：失败路径也写 Run 终态
+    try {
+      runLifecycle?.transition(runTaskId, 'fail', { error: errMsg, endReason: 'error' });
+    } catch { /* ignore */ }
     // 标记命令失败（尽力而为）
     try {
       await sb.from('remote_commands').update({

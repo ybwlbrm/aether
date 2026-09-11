@@ -193,4 +193,95 @@ describe('lib/dal/memory (SQLite memories 表)', () => {
     assert.equal(row.lastUsedAt, null, 'last_used_at 默认应为 null');
     assert.equal(row.expiresAt, null, 'expires_at 默认应为 null');
   });
+
+  // ── P1-19：中文关键词提取（split(/\s+/) 对无空格中文失效）──
+
+  it('P1-19: extractKeywords 对中文整句拆出多元关键词（非单一大词）', async () => {
+    const { extractKeywords } = await import('./active-memories.js');
+    const kws = extractKeywords('帮我继续完成上次那个济南项目');
+    // 中文整句应拆出多个 ≥2 字关键词（bigram/trigram），而非整个句子一个词
+    assert.ok(Array.isArray(kws) && kws.length > 1, `应拆出多个关键词，实际: ${JSON.stringify(kws)}`);
+    // 应包含项目相关片段（济南/项目）
+    const joined = kws.join('');
+    assert.ok(joined.includes('济南') || joined.includes('项目'), `应包含项目实体字词，实际: ${JSON.stringify(kws)}`);
+    assert.ok(kws.every(w => typeof w === 'string' && w.length >= 2), '每个关键词应 ≥2 字');
+    assert.ok(kws.length <= 8, '关键词上限 8 个');
+  });
+
+  it('P1-19: extractKeywords 英文/数字词正常切分', async () => {
+    const { extractKeywords } = await import('./active-memories.js');
+    const kws = extractKeywords('帮我看看 React useState hook 的用法');
+    assert.ok(kws.includes('react'), `应包含小写英文词 react，实际: ${JSON.stringify(kws)}`);
+    assert.ok(kws.includes('usestate'), `应包含 usestate，实际: ${JSON.stringify(kws)}`);
+  });
+
+  it('P1-19: getActiveMemoriesFormatted 用中文关键词召回相关记忆', async () => {
+    const { getActiveMemoriesFormatted } = await import('./active-memories.js');
+    // 先保存两条记忆
+    await saveMemory('济南项目需要明天交付,重点是数据迁移', 'project');
+    await saveMemory('今天天气很好适合出去走走', 'short_term');
+    // 用中文整句查询（无空格）——旧实现整句单关键词会召回不到济南项目
+    const formatted = await getActiveMemoriesFormatted('济南项目的进度如何了');
+    assert.ok(formatted.includes('济南项目'), `中文关键词应召回相关记忆，实际输出: ${formatted.slice(0, 200)}`);
+  });
+
+  // ── P1-16：查询条件 AND 语义（scope AND type AND content）──
+
+  it('P1-16: SqliteMemoryStore.query 条件为 AND（scope+type 同时过滤）', async () => {
+    const { SqliteMemoryStore } = await import('../../lib/memory-runtime-bridge.js');
+    const store = new SqliteMemoryStore();
+    await saveMemory('scope user project pak', 'project');
+    await saveMemory('scope user short pak', 'short_term');
+    // 同时限定 scope=user + type=project —— 只应返回 project 那条
+    const results = await store.query({ scope: 'user', type: 'project' } as never);
+    assert.ok(results.length === 1, `AND 语义应只命中 1 条，实际 ${results.length}（OR 会返回 2）`);
+    assert.equal(results[0].content, 'scope user project pak');
+  });
+
+  // ── P1-17：expiresAt 过期记忆不参与召回 ──
+
+  it('P1-17: SqliteMemoryStore.query 过滤已过期记忆（expiresAt 过去）', async () => {
+    const { SqliteMemoryStore } = await import('../../lib/memory-runtime-bridge.js');
+    const store = new SqliteMemoryStore();
+    await saveMemory('有效记忆内容alpha', 'long_term');
+    // 直接插入一条已过期记忆
+    const db = getDb();
+    const now = new Date().toISOString();
+    db.insert(memories).values({
+      id: 'expired-mem-1',
+      type: 'long_term',
+      key: '过期记忆内容beta',
+      content: '过期记忆内容beta',
+      tags: '[]',
+      scope: 'user',
+      importance: 0.9,
+      expiresAt: new Date(Date.now() - 1000).toISOString(), // 已过期
+      createdAt: now,
+      updatedAt: now,
+    }).run();
+
+    const results = await store.query({} as never);
+    assert.ok(!results.some(r => r.id === 'expired-mem-1'), '过期记忆不应被召回');
+    assert.ok(results.some(r => r.content.includes('alpha')), '有效记忆应被召回');
+  });
+
+  it('P1-17: getActiveMemoriesFormatted 不包含已过期记忆', async () => {
+    const { getActiveMemoriesFormatted } = await import('./active-memories.js');
+    const db = getDb();
+    const now = new Date().toISOString();
+    db.insert(memories).values({
+      id: 'expired-mem-2',
+      type: 'long_term',
+      key: '过期记忆内容gamma',
+      content: '过期记忆内容gamma',
+      tags: '[]',
+      scope: 'user',
+      importance: 0.9,
+      expiresAt: new Date(Date.now() - 1000).toISOString(),
+      createdAt: now,
+      updatedAt: now,
+    }).run();
+    const formatted = await getActiveMemoriesFormatted('gamma 记忆');
+    assert.ok(!formatted.includes('gamma'), '过期记忆不得进入格式化召回输出');
+  });
 });

@@ -16,6 +16,9 @@ export {
 export {
   type MemoryRuntime,
   InMemoryMemoryRuntime,
+  SqliteMemoryRuntime,
+  createProductionMemoryRuntime,
+  resetSqliteMemoryRuntime,
   isMemoryRuntime,
 } from './memory-runtime.js';
 

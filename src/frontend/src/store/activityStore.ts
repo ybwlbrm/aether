@@ -73,6 +73,8 @@ interface ActivityState {
   // 核心状态：按 runId 索引
   eventsByRun: Record<string, AgentEventEnvelope[]>;
   cursorByRun: Record<string, number>;
+  // P1-39: per-run 去重 identity Set（避免 appendEvent 的 O(n) list.some 扫描）
+  _eventIdentitySetByRun?: Record<string, Set<string>>;
   taskCardCache: Record<string, TaskCardCacheEntry>;
   reasoningCache: Record<string, ReasoningCacheEntry>;
   runMetaById: Record<string, RunMeta>;
@@ -155,6 +157,7 @@ function getConversationId(ev: AgentEventEnvelope): string {
 export const useActivityStore = create<ActivityState>((set, get) => ({
   eventsByRun: {},
   cursorByRun: {},
+  _eventIdentitySetByRun: {},
   taskCardCache: {},
   reasoningCache: {},
   runMetaById: {},
@@ -165,10 +168,17 @@ export const useActivityStore = create<ActivityState>((set, get) => ({
     const list = get().eventsByRun[runKey] ?? [];
     // P0-08/EVT-003：去重身份统一走 getEventIdentity（eventId 优先，回退 sessionId+taskId+seq）
     const identity = getEventIdentity(event);
-    const isDup = list.some(e => getEventIdentity(e) === identity);
-    if (isDup) return;
+    // P1-39 修复：用 Set 去重替代 list.some()（O(n) 扫描）—— 高频 reasoning delta 下
+    // 由 O(n² log n) 降为 O(n)。同时按 seq 追加（事件天然按到达顺序），仅在乱序时排序。
+    const seenSet = get()._eventIdentitySetByRun?.[runKey];
+    if (seenSet?.has(identity)) return;
     list.push(event);
-    const sorted = sortBySeq(list);
+    // 仅当新事件 seq 小于当前最后 seq 时才排序（事件流按 seq 递增到达）
+    const prevLast = list[list.length - 2];
+    let sorted = list;
+    if (prevLast && prevLast.seq > event.seq) {
+      sorted = sortBySeq(list);
+    }
     const maxSeq = sorted.length > 0 ? sorted[sorted.length - 1].seq : (get().cursorByRun[runKey] ?? 0);
 
     set(s => {
@@ -194,9 +204,14 @@ export const useActivityStore = create<ActivityState>((set, get) => ({
         newMeta.endReason = event.endReason;
       }
 
+      // P1-39：维护 per-run identity Set（避免重复 list.some 扫描）
+      const identitySet = new Set(s._eventIdentitySetByRun?.[runKey] ?? []);
+      identitySet.add(identity);
+
       return {
         eventsByRun: { ...s.eventsByRun, [runKey]: sorted },
         cursorByRun: { ...s.cursorByRun, [runKey]: maxSeq },
+        _eventIdentitySetByRun: { ...(s._eventIdentitySetByRun ?? {}), [runKey]: identitySet },
         taskCardCache: { ...s.taskCardCache, [runKey]: { ...s.taskCardCache[runKey], lastProcessedSeq: -1 } },
         reasoningCache: { ...s.reasoningCache, [runKey]: { ...s.reasoningCache[runKey], lastProcessedSeq: -1 } },
         runMetaById: { ...s.runMetaById, [runKey]: newMeta },
@@ -224,16 +239,19 @@ export const useActivityStore = create<ActivityState>((set, get) => ({
       const newReasoningCache = { ...s.reasoningCache };
       const newRunMetaById = { ...s.runMetaById };
       const newRunsByConversation = { ...s.runsByConversation };
+      // P1-39: per-run identity Set（批量追加时同步维护）
+      const newIdentitySets = { ...(s._eventIdentitySetByRun ?? {}) };
 
       for (const [runKey, runEvents] of byRun) {
         const list = newEventsByRun[runKey] ?? [];
-        const known = new Set(list.map(e => getEventIdentity(e)));
+        const identitySet = new Set(newIdentitySets[runKey] ?? []);
         for (const ev of runEvents) {
           const key = getEventIdentity(ev);
-          if (known.has(key)) continue;
-          known.add(key);
+          if (identitySet.has(key)) continue;
+          identitySet.add(key);
           list.push(ev);
         }
+        newIdentitySets[runKey] = identitySet;
         const sorted = sortBySeq(list);
         const maxSeq = sorted.length > 0 ? sorted[sorted.length - 1].seq : (newCursorByRun[runKey] ?? 0);
 
@@ -274,6 +292,7 @@ export const useActivityStore = create<ActivityState>((set, get) => ({
       return {
         eventsByRun: newEventsByRun,
         cursorByRun: newCursorByRun,
+        _eventIdentitySetByRun: newIdentitySets,
         taskCardCache: newTaskCardCache,
         reasoningCache: newReasoningCache,
         runMetaById: newRunMetaById,

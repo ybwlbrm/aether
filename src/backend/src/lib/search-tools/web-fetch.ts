@@ -2,7 +2,7 @@ import { existsSync, readFileSync, statSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { WEB_FETCH_TIMEOUT, WEB_FETCH_MAX_OUTPUT } from './constants.js';
 import { isPathSafe, resolveSearchPath } from './path-utils.js';
-import { isSafeFetchUrl } from './ssrf.js';
+import { isSafeFetchUrl, assertPublicResolve } from './ssrf.js';
 import { decodeHtmlEntities, stripTags } from './html-utils.js';
 
 /**
@@ -42,6 +42,12 @@ export async function executeWebFetch(
     if (!isSafeFetchUrl(url)) {
       return `错误: 不允许访问该 URL（仅支持公网 http/https 地址）: ${url}`;
     }
+    // P1-24/25: DNS 级校验（public-only：拒绝解析到私网/回环/链路本地/IPv6 的域名）
+    try {
+      await assertPublicResolve(url);
+    } catch (e: unknown) {
+      return `错误: ${e instanceof Error ? e.message : String(e)}: ${url}`;
+    }
 
     let currentUrl = url;
     let redirectCount = 0;
@@ -72,6 +78,12 @@ export async function executeWebFetch(
         // 校验重定向目标
         if (!isSafeFetchUrl(nextUrl)) {
           return `错误: 重定向目标不安全（SSRF 防护）: ${nextUrl}`;
+        }
+        // P1-25: 重定向每一跳重新做 DNS 级校验（防 DNS rebinding 换跳内网）
+        try {
+          await assertPublicResolve(nextUrl);
+        } catch (e: unknown) {
+          return `错误: 重定向目标 DNS 校验失败: ${e instanceof Error ? e.message : String(e)}: ${nextUrl}`;
         }
         currentUrl = nextUrl;
         redirectCount++;

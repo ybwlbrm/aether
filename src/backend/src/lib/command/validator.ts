@@ -1,6 +1,7 @@
 import { homedir } from 'node:os';
 import { isAbsolute, resolve, sep } from 'node:path';
 import { FORBIDDEN_PATH_PATTERNS } from './constants.js';
+import { checkPathSafe } from '../path-guard.js';
 
 /** 输出截断：超过上限时保留头部并标注原始长度 */
 export function truncateOutput(text: string, maxChars: number = 50000): string {
@@ -24,37 +25,24 @@ export function resolveWorkdir(workdir: string | undefined, allowedDirs: string[
   return process.cwd();
 }
 
-/** 工作目录安全校验：allowedDirs 约束 + 敏感路径段 + 用户配置目录 */
+/**
+ * 工作目录安全校验：统一走 path-guard.ts 的唯一实现（P1-23 收口）。
+ *
+ * 旧实现是第二套路径校验（resolve + startsWith + 自身敏感段列表），
+ * 且 Level 3 直接 return { ok: true } 绕过敏感路径检查（可访问
+ * system32/.git/.config）。新实现复用统一 PathGuard：
+ * - realpath 解析物理路径（防 junction/symlink 逃逸）
+ * - Level 3 仍拒绝敏感路径段与用户配置目录
+ * - allowedDirs 前缀匹配（防 C:/workspace-other 误匹配）
+ */
 export function isWorkdirSafe(targetDir: string, allowedDirs: string[] | undefined, permissionLevel?: number): { ok: boolean; error?: string } {
-  const resolved = resolve(targetDir);
-
-  // Level 3（超级）绕过所有路径限制
-  if (permissionLevel === 3) return { ok: true };
-
-  // 必须位于 allowedDirs 内
-  if (!allowedDirs || allowedDirs.length === 0) {
-    return { ok: false, error: '未配置允许访问的目录' };
+  if (!targetDir) {
+    return { ok: false, error: '工作目录为空' };
   }
-  const inAllowed = allowedDirs.some(dir => {
-    const allowed = resolve(dir);
-    return resolved.startsWith(allowed + sep) || resolved === allowed;
-  });
-  if (!inAllowed) {
-    return { ok: false, error: `工作目录 "${resolved}" 不在允许的目录内` };
-  }
-
-  // 敏感路径段检查：按分隔符拆分后精确匹配，避免子串误伤合法目录名
-  const lower = resolved.toLowerCase();
-  const segments = lower.split(sep).filter(Boolean);
-  for (const fp of FORBIDDEN_PATH_PATTERNS) {
-    if (segments.includes(fp)) {
-      return { ok: false, error: `禁止访问敏感路径: ${fp}` };
-    }
-  }
-  // 阻止访问用户配置目录
-  const home = homedir().toLowerCase();
-  if (lower.startsWith(home + sep + '.config') || lower.startsWith(home + sep + 'appdata')) {
-    return { ok: false, error: '禁止访问用户配置目录' };
-  }
+  const result = checkPathSafe(targetDir, allowedDirs, permissionLevel);
+  if (!result.ok) return { ok: false, error: result.error };
   return { ok: true };
 }
+
+/** 保留 FORBIDDEN_PATH_PATTERNS 导出以兼容旧引用（实际校验已走 path-guard） */
+export { FORBIDDEN_PATH_PATTERNS };

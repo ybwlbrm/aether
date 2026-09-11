@@ -1,11 +1,9 @@
 import type { StreamChunk } from '@pacc/shared';
 import { buildModelRuntime, type ModelRequest } from '../../core/models/index.js';
 import { buildChatRequestBody, parseToolArgsSafe } from '../../lib/stream-translate.js';
-import { executeTool } from '../../lib/tool-executor.js';
 import { buildToolPayload } from '@pacc/shared';
 import { filterToolsByWebSearch } from '../../lib/tool-registry.js';
 import { providerSupportsThinking } from '../../lib/provider.js';
-import { createPendingApproval } from '../../lib/approvals-center.js';
 import { drainDirectives } from '../../lib/inbox.js';
 import { MANDATORY_COMPLIANCE_PROMPT } from '../../lib/system-prompts.js';
 import { dedupToolResultReplacement } from '../../lib/deduplicate.js';
@@ -14,6 +12,8 @@ import { randomUUID } from 'node:crypto';
 import { eq, sql } from 'drizzle-orm';
 import { messages, conversations, mcpServers } from '../../db/schema/index.js';
 import { AppError } from '@pacc/shared';
+// P0-01 收口：统一生产工具执行器（Agent → ToolRuntime → PolicyEngine → Approval → ToolExecutor）
+import { createProductionToolExecutor, type ProductionToolExecutor } from '../../lib/production-tool-executor.js';
 
 export interface ToolLoopContext {
   agent: any;
@@ -63,6 +63,34 @@ export async function runAgentToolLoop(ctx: ToolLoopContext): Promise<ToolLoopRe
 
   // 循环模式：loop 开启时持续执行直到任务完整完成（极大上限，防死循环）；否则 30 轮
   let fcTurns = ctx.body.loop ? 500 : 30;
+
+  // P0-01 收口：统一生产工具执行器（PolicyEngine 唯一裁决 + Approval 完整绑定 + Timeout + Cancel）
+  // 在循环外构建一次（工具注册只做一遍），循环内复用。
+  const productionExecutor: ProductionToolExecutor = createProductionToolExecutor({
+    mcpTools: ctx.mcpTools,
+    getMcpServers: () => ctx.db.select().from(mcpServers).all() as any[],
+    allowedDirs: ctx.allowedDirs,
+    permissionLevel: ctx.agentSettings.permissionLevel ?? 2,
+    defaultDir: ctx.defaultDir,
+    sessionId: (ctx.body.conversationId as string | undefined) ?? 'anonymous',
+    runId: ctx.runTaskId,
+    taskId: ctx.runTaskId,
+    agentId: ctx.agent.id,
+    signal: ctx.clientAbort.signal,
+    onApprovalPrompt: ({ id, toolName, argsSummary }) => {
+      // P0-07：审批事件带完整运行上下文（runId/taskId/agentId）
+      ctx.sseSend('ask-confirm', JSON.stringify({ id, toolName, argsSummary }));
+      if (ctx.body.conversationId) {
+        ctx.eventBus.emit(ctx.convId, 'task.ask-confirm', {
+          taskId: ctx.runTaskId,
+          agentId: ctx.agent.id,
+          agentType: ctx.agentCtx.agentType,
+          content: `需要确认执行工具 ${toolName}`,
+          metadata: { approvalId: id, toolName, argsSummary, runId: ctx.runTaskId, agentId: ctx.agent.id },
+        });
+      }
+    },
+  });
 
   // Build ModelRuntime from endpoint config (outside loop for reuse in force summary)
   const providerConfig = {
@@ -242,45 +270,9 @@ export async function runAgentToolLoop(ctx: ToolLoopContext): Promise<ToolLoopRe
           : null;
 
         try {
-          // BE-05: 传递 abort signal 到工具执行，支持客户端断连时取消
-          const execResult = await executeTool(funcName, args, {
-            mcpTools: ctx.mcpTools,
-            getMcpServers: () => ctx.db.select().from(mcpServers).all() as any[],
-            allowedDirs: ctx.allowedDirs,
-            permissionLevel: ctx.agentSettings.permissionLevel ?? 2,
-            defaultDir: ctx.defaultDir,
-            sessionId: (ctx.body.conversationId as string | undefined) ?? 'anonymous',
-            signal: ctx.clientAbort.signal,
-            onApproval: async (toolName: string, toolArgs: any, argsSummary: string) => {
-              const { id: approvalId, promise } = createPendingApproval({
-                toolName,
-                args: toolArgs,
-                conversationId: ctx.body.conversationId ?? 'anonymous',
-                prompt: ({ id: apId, toolName: name, argsSummary: summ }) => {
-                  ctx.sseSend('ask-confirm', JSON.stringify({ id: apId, toolName: name, argsSummary: summ }));
-                  if (ctx.body.conversationId) {
-                    ctx.eventBus.emit(ctx.convId, 'task.ask-confirm', {
-                      taskId: ctx.runTaskId,
-                      agentId: ctx.agent.id,
-                      agentType: ctx.agentCtx.agentType,
-                      content: `需要确认执行工具 ${name}`,
-                      metadata: { approvalId: apId, toolName: name, argsSummary: summ },
-                    });
-                  }
-                },
-              });
-              const { approved, decision } = await promise;
-              if (ctx.body.conversationId) {
-                ctx.eventBus.emit(ctx.convId, 'task.plan', {
-                  taskId: ctx.runTaskId,
-                  agentId: ctx.agent.id,
-                  agentType: ctx.agentCtx.agentType,
-                  content: approved ? `用户已批准执行 ${toolName}` : `用户未批准 ${toolName}（${decision === 'timeout' ? '审批超时' : '已拒绝'}）`,
-                });
-              }
-              return { approved, decision };
-            },
-          });
+          // P0-01 收口：统一生产执行器（PolicyEngine 唯一裁决 + Approval + Timeout + Cancel）
+          // 审批在 executor 内部完整处理（onApprovalPrompt 回调推送 ask-confirm）
+          const execResult = await productionExecutor.execute(funcName, args);
           result = execResult.result;
           if (execResult.error) throw new Error(execResult.error);
         } catch (e: unknown) {

@@ -25,7 +25,7 @@ export interface ToolExecResult {
   durationMs: number;
 }
 
-/** 审批回调：返回 approved/rejected/timeout */
+/** 审批回调：返回 approved/rejected/timeout/aborted（P0-08: aborted = Run Cancel 打断） */
 export type ApprovalHook = (
   toolName: string,
   args: any,
@@ -60,10 +60,15 @@ export async function executeTool(
   }
 
   // ask-user：Level 1（只读）敏感工具在执行前请求用户确认
+  // P0-08: decision === 'aborted' 表示 Run 已被取消 —— 工具执行立即终止
   if (options.onApproval && requiresApproval(funcName, options.permissionLevel)) {
     const { approved, decision } = await options.onApproval(funcName, args, summarizeArgs(args));
     if (!approved) {
-      const reason = decision === 'timeout' ? '审批超时（60 秒未确认）' : '用户未批准本次工具调用';
+      const reason = decision === 'timeout'
+        ? '审批超时（60 秒未确认）'
+        : decision === 'aborted'
+          ? '运行已取消（aborted）'
+          : '用户未批准本次工具调用';
       return { name: funcName, args, result: `已停止：${reason}`, error: reason, durationMs: Date.now() - start };
     }
   }
@@ -94,7 +99,8 @@ export async function executeTool(
 
     switch (funcName) {
       case 'execute_command':
-        result = await executeCommand(args.command, args.workdir, args.timeout, allowedDirs, permissionLevel, defaultDir);
+        // P1-21: signal 透传到子进程（Run Cancel → taskkill 进程树）
+        result = await executeCommand(args.command, args.workdir, args.timeout, allowedDirs, permissionLevel, defaultDir, options.signal);
         addCommandHistory({ command: args.command || '', output: result, duration: 0, success: !result.startsWith('错误:'), source: 'agent' });
         break;
       case 'grep':

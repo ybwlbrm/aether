@@ -40,13 +40,31 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
 /**
+ * P1-13 修复：全局 dataDir 注入（由应用启动时基于 BackendConfig.dataDir 设置），
+ * 消除 dev / Electron / Portable / 自定义 DATA_DIR 下 settings.json 读取错位。
+ */
+let injectedDataDir: string | undefined;
+
+export function setProviderDataDir(dataDir: string | undefined): void {
+  injectedDataDir = dataDir;
+}
+
+/** 测试辅助：重置注入 */
+export function resetProviderDataDir(): void {
+  injectedDataDir = undefined;
+}
+
+/**
  * 同步读取 settings.json 中的 defaultProviders 配置。
  * 不能用 dal.ts 的 getSettings()（async），因为 getProviderByCapability 是同步函数。
+ * P1-13：优先使用 BackendConfig.dataDir 注入值（应用启动时统一设置），
+ * 其次 process.env.DATA_DIR，最后 __dirname 推导（兼容旧环境，仅在注入缺失时兜底）。
  */
 function readDefaultProvidersSync(): Record<string, string> {
   try {
-    const dataDir = process.env.DATA_DIR || resolve(__dirname, '..', '..', '..', '..', 'data');
-    const settingsPath = resolve(dataDir, 'settings.json');
+    const settingsPath = injectedDataDir
+      ? resolve(injectedDataDir, 'settings.json')
+      : resolve(process.env.DATA_DIR || resolve(__dirname, '..', '..', '..', '..', 'data'), 'settings.json');
     if (!existsSync(settingsPath)) return {};
     const raw = readFileSync(settingsPath, 'utf-8');
     const settings = JSON.parse(raw);
@@ -91,17 +109,40 @@ export function getProviderByCapability(
   encryptionKey: string,
 ): ResolvedProvider | null {
   const db = getDb();
-  const all = db.select().from(providers).all().map(r => rowToProvider(r, encryptionKey));
+  // P1-12 修复：单个 Provider 密钥损坏不得拖垮整个查询 —— 逐行 try/catch，
+  // 损坏的 Provider 跳过（标记 unhealthy，其余 Provider 正常参与选择）。
+  const all: ResolvedProvider[] = [];
+  const rows = db.select().from(providers).all();
+  for (const row of rows) {
+    try {
+      all.push(rowToProvider(row as never, encryptionKey));
+    } catch (e: unknown) {
+      console.warn('[Provider] 跳过密钥损坏的 Provider（查询不受影响）:',
+        (row as unknown as { name?: string }).name ?? (row as unknown as { id?: string }).id ?? 'unknown',
+        e instanceof Error ? e.message : String(e));
+    }
+  }
   return selectProviderByCapability(all, capability, readDefaultProvidersSync());
 }
 
 /**
  * 获取第一个可用的 provider（通用回退）
  * P0-1 修复：encryptionKey 由调用方传入。
+ * P1-12：单 Provider 损坏不影响其他 Provider。
  */
 export function getFirstAvailableProvider(encryptionKey: string): ResolvedProvider | null {
   const db = getDb();
-  const all = db.select().from(providers).all().map(r => rowToProvider(r, encryptionKey));
+  const all: ResolvedProvider[] = [];
+  const rows = db.select().from(providers).all();
+  for (const row of rows) {
+    try {
+      all.push(rowToProvider(row as never, encryptionKey));
+    } catch (e: unknown) {
+      console.warn('[Provider] 跳过密钥损坏的 Provider（查询不受影响）:',
+        (row as unknown as { name?: string }).name ?? (row as unknown as { id?: string }).id ?? 'unknown',
+        e instanceof Error ? e.message : String(e));
+    }
+  }
   if (all.length === 0) return null;
   return all.find(p => p.apiKey && p.apiKey !== '***encrypted***') || all[0];
 }

@@ -4,4 +4,4 @@
  * 现在与 provider/media/yt-dlp 共用同一套：IPv4 混淆 / IPv6 字面量全拒 / 元数据 /
  * 链路本地 / DNS rebinding（resolveAndValidateUrl）。
  */
-export { isSafeFetchUrl, resolveAndValidateUrl, assertSafeFetchUrl, isPublicFetchUrl, assertPublicFetchUrl } from '../safe-fetch.js';
+export { isSafeFetchUrl, resolveAndValidateUrl, assertSafeFetchUrl, isPublicFetchUrl, assertPublicFetchUrl, assertPublicResolve } from '../safe-fetch.js';

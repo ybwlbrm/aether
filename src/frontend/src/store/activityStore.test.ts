@@ -91,9 +91,10 @@ describe('parseSseFrame（streamClient 统一帧解析）', () => {
 
 describe('activityStore — 跨 Run 去重与隔离（P0-08/P1-12）', () => {
   beforeEach(() => {
-    useActivityStore.setState({ 
-      eventsByRun: {}, 
-      cursorByRun: {}, 
+    useActivityStore.setState({
+      eventsByRun: {},
+      cursorByRun: {},
+      _eventIdentitySetByRun: {},
       taskCardCache: {},
       reasoningCache: {},
       runMetaById: {},
@@ -148,9 +149,10 @@ describe('activityStore — 跨 Run 去重与隔离（P0-08/P1-12）', () => {
 
 describe('activityStore — Run-scoped 状态隔离（P0-03 第三轮审计）', () => {
   beforeEach(() => {
-    useActivityStore.setState({ 
-      eventsByRun: {}, 
-      cursorByRun: {}, 
+    useActivityStore.setState({
+      eventsByRun: {},
+      cursorByRun: {},
+      _eventIdentitySetByRun: {},
       taskCardCache: {},
       reasoningCache: {},
       runMetaById: {},
@@ -380,7 +382,7 @@ describe('activityStore — Run-scoped 状态隔离（P0-03 第三轮审计）',
 
 describe('activityStore · getEvents 引用缓存 (UX-004 / React #185 回归)', () => {
   beforeEach(() => {
-    useActivityStore.setState({ eventsByRun: {}, cursorByRun: {}, taskCardCache: {}, reasoningCache: {}, runMetaById: {}, runsByConversation: {} });
+    useActivityStore.setState({ eventsByRun: {}, cursorByRun: {}, _eventIdentitySetByRun: {}, taskCardCache: {}, reasoningCache: {}, runMetaById: {}, runsByConversation: {} });
     resetEventsCacheForTest();
   });
 

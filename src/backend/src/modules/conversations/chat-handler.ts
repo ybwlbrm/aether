@@ -16,7 +16,6 @@ import { listMcpTools } from '../../lib/mcp-client.js';
 import { syncMessageToSupabase, getSyncClient } from '../../lib/supabase-sync.js';
 import { createEventBus } from '../../lib/event-bus.js';
 import { buildToolPayload } from '@pacc/shared';
-import { executeTool } from '../../lib/tool-executor.js';
 import { buildAllTools, filterToolsByWebSearch } from '../../lib/tool-registry.js';
 import { parseSse, withChunkTimeout, SseStreamError } from '../../lib/sse-parser.js';
 import { translate, buildChatRequestBody, parseToolArgsSafe } from '../../lib/stream-translate.js';
@@ -26,6 +25,9 @@ import { compactRemovedHistory, buildCompactionSystemMessage } from '../../lib/c
 import { createPendingApproval } from '../../lib/approvals-center.js';
 import { pushDirective, drainDirectives } from '../../lib/inbox.js';
 import { runCancellationRegistry } from '../../lib/run-cancellation-registry.js';
+// P0-02/P0-04/P0-05: 统一 Run 上下文 + RunLifecycleManager（普通 Chat 与 Super 模式同构）
+import { createRunContext } from '../../core/runtime/index.js';
+import { RunLifecycleManager } from '../../core/runtime/index.js';
 import { fetchWithRetry } from '../../lib/fetch-retry.js';
 import { initSseHeaders, createSseSender, startSseHeartbeat, clearSseHeartbeat, sendSseError, sendSseDone, endSseResponse } from './sse-stream.js';
 import { processCompaction, executeForceSummary } from './compaction.js';
@@ -120,12 +122,31 @@ export async function handleSendMessage(
   const history = db.select().from(messages).where(eq(messages.conversationId, id)).orderBy(messages.createdAt).all();
 
   // 本轮会话事件统一归属的 agent 上下文（提前声明，供注册使用）
+  // P0-02/P0-04 修复：普通 Chat 路径也使用统一 Run 上下文 —— runId 唯一，
+  // taskId = runId，与 Super 模式同构；并创建 runs 行（RunLifecycleManager 状态机）。
+  const runCtx = createRunContext({
+    conversationId: id,
+    agentId: 'main',
+    agentType: 'conversation',
+  });
   const runContext = {
     sessionId: id,
-    taskId: randomUUID(),
-    agentId: 'main' as const,
-    agentType: 'conversation' as const,
+    taskId: runCtx.taskId,
+    agentId: runCtx.agentId as 'main',
+    agentType: runCtx.agentType as 'conversation',
   };
+  // P0-04: 普通 Chat 同样进入统一 Run 架构（runs 行 + created→running 状态机）
+  try {
+    const runLifecycle = new RunLifecycleManager(db);
+    runLifecycle.createAndStart({
+      runId: runCtx.runId,
+      conversationId: id,
+      mode: 'normal',
+      rootAgentId: 'main',
+    });
+  } catch (e: unknown) {
+    console.error('[Chat] runs 行创建失败:', e instanceof Error ? e.message : String(e));
+  }
 
   // 设置 SSE 响应头
   initSseHeaders(reply);
@@ -134,8 +155,9 @@ export async function handleSendMessage(
   // 结果保存到数据库，回来后通过轮询自动恢复
   const clientAbort = new AbortController();
   // 注册到 RunCancellationRegistry（run-scoped，使用 runContext.taskId 作为 runId）
+  // P0-03 修复：客户端断开（reply.raw close）只关闭 SSE Transport，Run 继续执行
+  // 并保持注册 —— 移除 close → unregister 监听；只有 Run 真正结束（finally）才注销。
   runCancellationRegistry.register(runContext.taskId, id, clientAbort);
-  reply.raw.on('close', () => { runCancellationRegistry.unregister(runContext.taskId); });
 
   // 发送 SSE 事件（忽略客户端已断开的写入错误）
   const sseSend = createSseSender(reply);
@@ -536,6 +558,30 @@ ${fileAttachmentsHint}
       endReason: clientAbort.signal.aborted ? 'aborted' : endedNormally ? 'completed' : 'max_turns',
     });
   }
+
+  // P0-05 收口：普通 Chat 的 runs 行终态也统一走 RunLifecycleManager 状态机
+  try {
+    const runLifecycle = new RunLifecycleManager(db);
+    if (aiError) {
+      runLifecycle.transition(runContext.taskId, 'fail', {
+        error: aiError,
+        endReason: 'error',
+        totalTokens: usageTotal.total_tokens || 0,
+      });
+    } else if (clientAbort.signal.aborted) {
+      runLifecycle.transition(runContext.taskId, 'cancel', { totalTokens: usageTotal.total_tokens || 0 });
+    } else {
+      runLifecycle.transition(runContext.taskId, 'complete', {
+        endReason: endedNormally ? 'completed' : 'max_turns',
+        totalTokens: usageTotal.total_tokens || 0,
+      });
+    }
+  } catch (e: unknown) {
+    // Run 终态写入失败不影响主流程，但必须记录（数据一致性可观测）
+    console.error('[Chat] runs 终态写入失败:', e instanceof Error ? e.message : String(e));
+  }
+  // P0-03 收口：Run 真正结束后才从 CancellationRegistry 注销
+  runCancellationRegistry.unregister(runContext.taskId);
 
   sendSseDone(sseSend);
   endSseResponse(reply);

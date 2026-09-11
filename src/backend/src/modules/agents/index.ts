@@ -11,9 +11,8 @@ import { AGENTS, routeMessage } from './agent-definitions.js';
 import { handleOrchestrate } from './orchestration.js';
 import { isSafeFetchUrl } from '../../lib/safe-fetch.js';
 import { buildModelRuntime, type ModelRequest } from '../../core/models/index.js';
-
-// 活跃的 AI 请求 AbortController 映射表（按 conversationId）
-const activeRequests = new Map<string, AbortController>();
+// P0-03 收口：取消统一走 RunCancellationRegistry（run-scoped）
+import { runCancellationRegistry } from '../../lib/run-cancellation-registry.js';
 
 // P1-7 修复：运行时自定义提示词存放在局部 Map，不再突变模块级共享的 AGENTS 数组
 const customPrompts = new Map<string, string>();
@@ -286,6 +285,7 @@ export function registerAgentRoutes(app: FastifyInstance, config: BackendConfig)
   });
 
   // 取消正在进行的 AI 生成请求
+  // P0-03 收口：统一走 RunCancellationRegistry（run-scoped），废弃 conversation-scoped activeRequests
   app.post('/api/agents/cancel', {
     schema: {
       description: '取消正在进行的 AI 生成',
@@ -298,11 +298,9 @@ export function registerAgentRoutes(app: FastifyInstance, config: BackendConfig)
     },
   }, async (request) => {
     const { conversationId } = request.body as { conversationId: string };
-    const controller = activeRequests.get(conversationId);
-    if (controller) {
-      controller.abort();
-      activeRequests.delete(conversationId);
-      return { success: true, message: '已取消生成' };
+    const cancelledRunIds = runCancellationRegistry.cancelConversation(conversationId);
+    if (cancelledRunIds.length > 0) {
+      return { success: true, message: `已取消 ${cancelledRunIds.length} 个运行`, cancelledRunIds };
     }
     return { success: false, message: '没有正在进行的生成' };
   });

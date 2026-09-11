@@ -13,8 +13,15 @@
  */
 import { randomUUID } from 'node:crypto';
 import { createApproval, summarizeArgs, type ApprovalRequest } from './approval.js';
+import { createHash } from 'node:crypto';
 
-/** Pending approval 记录，包含绑定上下文（run/task/agent/toolCall） */
+/** P0-07: 计算参数哈希（用户批准的必须是"这一份具体参数"，而非"该工具以后随便执行"） */
+export function hashToolArgs(args: Record<string, unknown>): string {
+  const canonical = JSON.stringify(args ?? {});
+  return createHash('sha256').update(canonical).digest('hex').slice(0, 16);
+}
+
+/** Pending approval 记录，包含绑定上下文（run/task/agent/toolCall + argsHash） */
 interface PendingApproval {
   request: ApprovalRequest & {
     conversationId?: string;
@@ -22,6 +29,7 @@ interface PendingApproval {
     taskId?: string;
     agentId?: string;
     toolCallId?: string;
+    argsHash?: string;
   };
   settle: (d: 'approved' | 'rejected') => void;
   dispose: () => void;
@@ -40,15 +48,20 @@ export function createPendingApproval(opts: {
   agentId?: string;
   toolCallId?: string;
   timeoutMs?: number;
-}): { id: string; promise: Promise<{ approved: boolean; decision: 'approved' | 'rejected' | 'timeout' }> } {
+  /** P0-08: Run Cancel 信号 —— abort 时立即结束审批等待（decision=aborted） */
+  signal?: AbortSignal;
+}): { id: string; promise: Promise<{ approved: boolean; decision: 'approved' | 'rejected' | 'timeout' | 'aborted' }> } {
   const id = `apr-${randomUUID().slice(0, 8)}`;
   const argsSummary = summarizeArgs(opts.args);
+  // P0-07: argsHash —— 批准绑定具体参数
+  const argsHash = hashToolArgs(opts.args);
   const { token, promise } = createApproval({
     id,
     toolName: opts.toolName,
     argsSummary,
     prompt: () => opts.prompt({ id, toolName: opts.toolName, argsSummary }),
     timeoutMs: opts.timeoutMs,
+    signal: opts.signal,
   });
 
   pending.set(id, {
@@ -65,6 +78,7 @@ export function createPendingApproval(opts: {
       taskId: opts.taskId,
       agentId: opts.agentId,
       toolCallId: opts.toolCallId,
+      argsHash,
     },
     settle: (d) => token.settle(d),
     dispose: () => { token.dispose(); pending.delete(id); },
@@ -94,6 +108,7 @@ export function listPendingApprovals(): Array<{
   taskId?: string;
   agentId?: string;
   toolCallId?: string;
+  argsHash?: string;
 }> {
   return Array.from(pending.values()).map(({ request }) => ({
     id: request.id,
@@ -104,6 +119,7 @@ export function listPendingApprovals(): Array<{
     taskId: request.taskId,
     agentId: request.agentId,
     toolCallId: request.toolCallId,
+    argsHash: request.argsHash,
   }));
 }
 

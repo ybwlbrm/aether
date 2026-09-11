@@ -57,6 +57,8 @@ export interface MemoryEntry {
   lastUsedAt?: string;
   /** Computed decay score for forgetting policies */
   decayScore?: number;
+  /** P1-17: 过期时间（ISO 8601）—— 过期记忆不再被召回（expiresAt > now OR IS NULL） */
+  expiresAt?: string;
 }
 
 /**
@@ -138,8 +140,15 @@ export class InMemoryMemoryStore implements MemoryStore {
 
   /**
    * Checks if an entry matches a query.
+   * P1-17: 过期记忆不匹配（expiresAt > now OR IS NULL）。
    */
   private matchesQuery(entry: MemoryEntry, query: MemoryQuery): boolean {
+    // P1-17: 过期过滤（expiresAt 已过 → 不召回）
+    if (entry.expiresAt) {
+      const now = Date.now();
+      const expires = new Date(entry.expiresAt).getTime();
+      if (Number.isFinite(expires) && expires <= now) return false;
+    }
     if (query.scope && entry.scope !== query.scope) {
       return false;
     }

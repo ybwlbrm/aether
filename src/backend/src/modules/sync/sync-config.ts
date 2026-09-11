@@ -128,6 +128,81 @@ function getSupabase(): SupabaseClient | null {
 }
 
 // ============================================================
+// 身份初始化闭环（P1-14）
+// ============================================================
+
+/** 保存当前 BackendConfig 引用，供 ensureSyncIdentity 持久化使用 */
+let currentBackendConfig: BackendConfig | null = null;
+
+export function setSyncBackendConfig(config: BackendConfig | null): void {
+  currentBackendConfig = config;
+}
+
+function persistWithConfig(): void {
+  if (currentBackendConfig) {
+    persistSyncConfig(syncConfig, currentBackendConfig);
+  }
+}
+
+/**
+ * P1-14 收口：确保同步身份（userId）已绑定。
+ *
+ * 问题：首次配置时 upsert 设备/数据用 user_id = cfg.userId ?? null，
+ * 下载又因「没有 userId → 返回空」—— 电脑显示同步成功、手机看不到数据。
+ *
+ * 闭环：Supabase Auth → 确定当前 UID → 绑定 Desktop Device → 保存本地身份引用
+ * → 所有上传/下载自动使用该 UID。
+ *
+ * 策略：
+ * 1. 已有 cfg.userId → 直接返回（已绑定）
+ * 2. 尝试现有 Auth session（getUser()，桌面端可能已持有 JWT）
+ * 3. 尝试匿名登录（signInAnonymously，个人模式：一人一库多设备）
+ * 成功后将 userId 写回 cfg 并持久化 sync-config.json。
+ *
+ * @returns 绑定后的 userId；无法绑定返回 null（调用方据此降级：不上传空身份数据）
+ */
+export async function ensureSyncIdentity(sb: SupabaseClient, cfg: SyncConfig): Promise<string | null> {
+  if (cfg.userId) return cfg.userId;
+  try {
+    // 1. 现有 Auth session（JWT / refresh token）
+    const { data: userData } = await sb.auth.getUser();
+    if (userData.user?.id) {
+      cfg.userId = userData.user.id;
+      syncConfig = cfg;
+      persistWithConfig();
+      console.log('[Sync] 身份已绑定（Auth session）:', cfg.userId);
+      return cfg.userId;
+    }
+    // 2. 匿名登录（个人模式默认路径）
+    const { data: anonData, error: anonErr } = await sb.auth.signInAnonymously();
+    if (!anonErr && anonData.user?.id) {
+      cfg.userId = anonData.user.id;
+      syncConfig = cfg;
+      persistWithConfig();
+      console.log('[Sync] 身份已绑定（匿名登录）:', cfg.userId);
+      return cfg.userId;
+    }
+    if (anonErr) {
+      console.warn('[Sync] 匿名登录失败（Supabase 需启用 Anonymous sign-ins）:', anonErr.message);
+    }
+  } catch (e: unknown) {
+    console.warn('[Sync] 身份初始化失败（不阻塞，但数据将不绑定用户）:',
+      e instanceof Error ? e.message : String(e));
+  }
+  return null;
+}
+
+/**
+ * 便捷：注册前先保证身份，返回绑定后的 userId（null = 无法绑定）。
+ * 供启动初始化、配置保存、上传等入口统一调用（P1-14 闭环）。
+ */
+export async function ensureIdentityThenRegister(sb: SupabaseClient, cfg: SyncConfig): Promise<string | null> {
+  const userId = await ensureSyncIdentity(sb, cfg);
+  await registerDevice(sb, cfg);
+  return userId;
+}
+
+// ============================================================
 // 注册设备到 Supabase
 // ============================================================
 
@@ -224,14 +299,17 @@ export async function syncConversationsToSupabase(sb: SupabaseClient, cfg: SyncC
 export function registerSyncConfigRoutes(app: FastifyInstance, config: BackendConfig): void {
   // 启动时加载配置
   syncConfig = loadSyncConfig(config);
+  // P1-14: 保存配置引用，供 ensureSyncIdentity 持久化身份
+  setSyncBackendConfig(config);
 
   // 如果已有配置，自动初始化 Supabase 和 Realtime 监听
   if (syncConfig) {
     const sb = getSupabase();
     if (sb) {
-      // BE-UA-01: 设备注册 fire-and-forget → 显式错误日志（注册失败不应阻塞启动）
-      registerDevice(sb, syncConfig).catch(e => {
-        console.warn('[Sync] 设备注册失败:', e instanceof Error ? e.message : e);
+      // P1-14: 启动时先保证身份绑定（Supabase Auth → UID → 设备绑定 → 本地持久化），
+      // 再注册设备 —— 避免 user_id=null 写入导致手机端看不到数据。
+      ensureIdentityThenRegister(sb, syncConfig).catch(e => {
+        console.warn('[Sync] 启动身份初始化失败:', e instanceof Error ? e.message : e);
       });
       // Realtime listener will be set up by registerSyncRoutes after importing
       // 启动时全量同步本地对话到 Supabase（手机端才能看到电脑端历史对话）
@@ -288,18 +366,31 @@ export function registerSyncConfigRoutes(app: FastifyInstance, config: BackendCo
     if (!sb) return reply.code(500).send({ error: '无法创建 Supabase 客户端' });
 
     try {
-      await registerDevice(sb, syncConfig);
+      // P1-14: 配置保存后立即走身份闭环（Supabase Auth → UID → 设备绑定 → 本地持久化），
+      // 确保 sync-config.json 中 userId 不为空，后续上传/下载都使用该 UID。
+      const boundUserId = await ensureIdentityThenRegister(sb, syncConfig);
       // Realtime listener will be set up by registerSyncRoutes after importing
       // 连接成功后全量同步本地对话（手机端立即可见所有历史对话）
       // BE-UA-02: 连接后全量同步 fire-and-forget → await 确保错误可感知，同时不阻塞响应
       const syncResult = await syncConversationsToSupabase(sb, syncConfig);
       console.log(`[Sync] 连接后全量同步完成: ${syncResult.ok} 条消息，${syncResult.fail} 条失败`);
       
+      // P1-15: 同步日志状态必须来自真实 SyncResult（partial/failed/success），不硬编码 success
+      const overallOk = syncResult.fail === 0 && boundUserId !== null;
+      await sb.from('sync_log').insert({
+        device_id: syncConfig.deviceId,
+        user_id: syncConfig.userId ?? null,
+        action: 'config_init',
+        status: overallOk ? 'success' : (syncResult.fail > 0 && syncResult.ok > 0 ? 'partial' : 'failed'),
+        details: `身份绑定: ${boundUserId ? '✓' : '✗'}; 同步 ${syncResult.ok} 条消息，${syncResult.fail} 条失败`,
+        created_at: new Date().toISOString(),
+      });
+
       // P1-18: 返回 success/partial/failed 格式
       const response = buildSyncResponse({
         conversations: `同步 ${syncResult.ok} 条消息，${syncResult.fail} 条失败`,
       });
-      return { ...response, message: '同步配置已保存，Realtime 监听已启动', deviceId: syncConfig.deviceId };
+      return { ...response, message: '同步配置已保存，Realtime 监听已启动', deviceId: syncConfig.deviceId, userId: syncConfig.userId ?? null };
     } catch (e: unknown) {
       return reply.code(500).send({ error: `连接失败: ${e instanceof Error ? e.message : String(e)}` });
     }
@@ -375,12 +466,18 @@ export function registerSyncConfigRoutes(app: FastifyInstance, config: BackendCo
     const syncResult = await syncConversationsToSupabase(sb, syncConfig);
     results.conversations = `同步 ${syncResult.ok} 条消息，${syncResult.fail} 条失败`;
 
-    // 记录同步日志
+    // P1-15 修复：Sync Log 状态必须来自统一 SyncResult —— 不再无条件 success。
+    // 之前部分失败也可能写 status=success，导致 UI（partial）与日志（success）不一致。
+    const syncStatus = syncResult.fail === 0
+      ? 'success'
+      : (syncResult.ok > 0 ? 'partial' : 'failed');
+    // 记录同步日志（状态来自真实结果）
     await sb.from('sync_log').insert({
       device_id: deviceId,
       user_id: syncConfig.userId ?? null,
       action: 'upload',
-      status: 'success',
+      status: syncStatus,
+      details: `同步 ${syncResult.ok} 条消息，${syncResult.fail} 条失败`,
       created_at: now,
     });
 

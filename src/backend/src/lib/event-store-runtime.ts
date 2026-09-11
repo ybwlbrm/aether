@@ -18,8 +18,7 @@ import { eq } from 'drizzle-orm';
 import * as schema from '../db/schema/index.js';
 import { getDb } from '../db/client.js';
 import { SqliteEventStore, DbSequenceAllocator } from '../core/events/index.js';
-import { isValidRunTransition, type RunStatus } from '../core/runtime/run.js';
-import { RuntimeError } from '../core/errors/index.js';
+import { RunLifecycleManager } from '../core/runtime/index.js';
 import type { AgentEvent } from '@pacc/shared';
 
 type Db = SQLJsDatabase<typeof schema>;
@@ -151,9 +150,10 @@ export async function emitV2Event(input: {
 
 /**
  * Ensure a runs row exists for the given runId (idempotent).
- * This is the production writer for Oracle gap C: orchestration runs get a
- * runs row so start/pause/resume/cancel and token snapshots have somewhere
- * to land.
+ * P0-05 收口：内部统一走 RunLifecycleManager 状态机（created → running），
+ * 不再直接插入 status='running' 绕过 created→running 状态机。
+ * 本函数保留为 migration compatibility（测试/旧调用方），生产新代码应直接使用
+ * RunLifecycleManager。
  */
 export function ensureRunRow(
   db: Db,
@@ -161,22 +161,20 @@ export function ensureRunRow(
   conversationId?: string,
   mode: 'normal' | 'super' | 'workflow' | 'background' = 'normal',
 ): void {
-  const { runs } = schema;
-  const existing = db.select({ id: runs.id }).from(runs).where(eq(runs.id, runId)).get();
+  const lifecycle = new RunLifecycleManager(db);
+  const existing = db.select({ id: schema.runs.id }).from(schema.runs).where(eq(schema.runs.id, runId)).get();
   if (existing) return;
-  db.insert(runs).values({
-    id: runId,
+  lifecycle.createAndStart({
+    runId,
     conversationId: conversationId ?? null,
-    status: 'running',
     mode,
-    startedAt: new Date().toISOString(),
-    createdAt: new Date().toISOString(),
-  }).run();
+  });
 }
 
 /**
  * Write terminal status + token usage back to the runs row.
- * Fixes Oracle gap C: completed/failed + token fields had no DB producer.
+ * P0-05 收口：内部统一走 RunLifecycleManager 状态机（RUN-001 校验 + 终态写入）。
+ * 保留为 migration compatibility；生产新代码应直接使用 RunLifecycleManager。
  */
 export function finalizeRunTokens(
   db: Db,
@@ -185,27 +183,13 @@ export function finalizeRunTokens(
   tokens: { inputTokens?: number; outputTokens?: number; totalTokens?: number },
   error?: string,
 ): void {
-  const { runs } = schema;
-  // RUN-001 (P0-8/9): 任何 run 状态写入必须先过状态机 —— 禁止 completed→running 等非法转移
-  const existing = db.select({ status: runs.status }).from(runs).where(eq(runs.id, runId)).get();
-  if (existing && !isValidRunTransition(existing.status as RunStatus, status as RunStatus)) {
-    throw new RuntimeError(`非法状态转移: ${existing.status} → ${status}`, {
-      code: 'INVALID_RUN_TRANSITION',
-      context: { runId, from: existing.status, to: status },
-    });
-  }
-  const inputTokens = tokens.inputTokens ?? 0;
-  const outputTokens = tokens.outputTokens ?? 0;
-  db.update(runs)
-    .set({
-      status,
-      completedAt: new Date().toISOString(),
-      endReason: status === 'cancelled' ? 'cancelled' : status === 'failed' ? 'error' : 'completed',
-      inputTokens,
-      outputTokens,
-      totalTokens: tokens.totalTokens ?? inputTokens + outputTokens,
-      error: error ?? null,
-    })
-    .where(eq(runs.id, runId))
-    .run();
+  const lifecycle = new RunLifecycleManager(db);
+  const action = status === 'completed' ? 'complete' : status === 'failed' ? 'fail' : 'cancel';
+  lifecycle.transition(runId, action, {
+    inputTokens: tokens.inputTokens,
+    outputTokens: tokens.outputTokens,
+    totalTokens: tokens.totalTokens,
+    error: error ?? undefined,
+    endReason: status === 'cancelled' ? 'cancelled' : status === 'failed' ? 'error' : 'completed',
+  });
 }

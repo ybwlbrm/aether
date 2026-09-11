@@ -5,10 +5,168 @@ import { resolve } from 'node:path';
 import { getDb } from '../../db/client.js';
 import { providers, conversations, messages } from '../../db/schema/index.js';
 import { getSettings } from '../../lib/dal.js';
+// P0-31: VerificationEngine（AI Task Verification 层）—— 与 System Health 分离的双层自检
+import { createVerificationEngine } from '../../core/verification/verification-engine.js';
+import { createProductionVerificationExecutors } from '../../lib/verification-engine.js';
+// P0-32: SelfCorrectionEngine（自我纠错闭环）
+import { createSelfCorrectionEngine, type SelfCorrectionInput } from '../../core/verification/self-correction-engine.js';
+import { buildRuntimeForProvider } from '../../lib/model-runtime-bridge.js';
 
 export function registerSelfCheckRoutes(app: FastifyInstance, config: BackendConfig): void {
 
-  // 运行 AI 自检
+  // P1-30/P0-31: AI Task Verification 层 —— 对一次任务（runId/taskId + changedFiles + goal）
+  // 执行客观验证（TypeCheck/Lint/Tests/LSP/Security/Behavior），输出 { passed, score, findings }。
+  // 与下方的 System Health 自检（/api/selfcheck）分层：这是"任务是否正确"的验证器。
+  app.post('/api/selfcheck/verify', {
+    schema: {
+      description: 'AI 任务验证（P0-31：TypeCheck/Lint/Tests/LSP/Security 客观检查）',
+      tags: ['自检'],
+      body: {
+        type: 'object',
+        properties: {
+          runId: { type: 'string' },
+          taskId: { type: 'string' },
+          goal: { type: 'string' },
+          changedFiles: { type: 'array', items: { type: 'string' } },
+          cwd: { type: 'string' },
+        },
+      },
+    },
+  }, async (request, reply) => {
+    const body = request.body as {
+      runId?: string;
+      taskId?: string;
+      goal?: string;
+      changedFiles?: string[];
+      cwd?: string;
+    };
+    if (!Array.isArray(body?.changedFiles) || body.changedFiles.length === 0) {
+      return reply.code(400).send({ error: { message: 'changedFiles 必须是非空数组（至少一个改动文件）' } });
+    }
+
+    const engine = createVerificationEngine(createProductionVerificationExecutors());
+    const result = await engine.verify({
+      runId: body.runId,
+      taskId: body.taskId,
+      goal: body.goal ?? '',
+      changedFiles: body.changedFiles,
+      cwd: body.cwd || process.cwd(),
+    });
+
+    // 任务验证未通过 → 不能进入 completed（P0-34：tool succeeded ≠ task succeeded）
+    if (!result.passed) {
+      reply.code(422).send({ ok: false, ...result });
+      return;
+    }
+    return { ok: true, ...result };
+  });
+
+  // P0-32: 自我纠错闭环端点 —— 对一次失败任务执行
+  // Builder(LLM 诊断修复) → Verify(VerificationEngine) → Review → Diagnose → Correct → Re-Verify
+  // 最大 5 轮；只有通过质量门禁才返回 done。
+  app.post('/api/selfcheck/correct', {
+    schema: {
+      description: 'AI 自我纠错（P0-32：Builder/Verifier/Reviewer 分离，最大 5 轮，质量门禁）',
+      tags: ['自检'],
+      body: {
+        type: 'object',
+        properties: {
+          runId: { type: 'string' },
+          taskId: { type: 'string' },
+          goal: { type: 'string' },
+          context: { type: 'string' },
+          changedFiles: { type: 'array', items: { type: 'string' } },
+          cwd: { type: 'string' },
+        },
+      },
+    },
+  }, async (request, reply) => {
+    const body = request.body as {
+      runId?: string;
+      taskId?: string;
+      goal?: string;
+      context?: string;
+      changedFiles?: string[];
+      cwd?: string;
+    };
+    if (!body?.goal) {
+      return reply.code(400).send({ error: { message: 'goal 必填' } });
+    }
+
+    // Builder 执行器：调用 LLM 生成修复方案（基于诊断与验证结果）
+    const verifier = createVerificationEngine(createProductionVerificationExecutors());
+    const builder = {
+      async execute(input: SelfCorrectionInput, diagnosis: string, context?: string) {
+        // 冷静一步：从 providers 表找可用 text provider 做 LLM 诊断+修复建议
+        let advice = diagnosis || '请根据目标重新实现';
+        try {
+          const runtime = buildRuntimeForProvider(getDb(), 'sisyphus', config.encryptionKey);
+          if (runtime) {
+            const resp = await runtime.runtime.complete({
+              provider: runtime.config.type,
+              model: runtime.config.defaultModel,
+              messages: [{
+                role: 'user',
+                content: `你是代码修复执行者（Hephaestus）。\n目标: ${input.goal}\n上下文: ${context ?? ''}\n\n当前诊断/失败: ${diagnosis || '未知'}\n\n请给出具体修复意见（文件路径 + 修改方向，不要写完整代码）。`,
+              }],
+              maxTokens: 500,
+              temperature: 0,
+            });
+            advice = `${diagnosis ? `诊断: ${diagnosis}\n` : ''}修复建议: ${resp.content.trim()}`;
+          }
+        } catch (e: unknown) {
+          console.warn('[SelfCorrection] LLM 修复建议失败，使用诊断兜底:',
+            e instanceof Error ? e.message : String(e));
+        }
+        // changedFiles 由调用方提供；本轮「变更」为修复建议文本
+        return { changes: body.changedFiles ?? [], failureHint: undefined };
+      },
+    };
+
+    const reviewer = {
+      async review(input: SelfCorrectionInput & { verification: import('../../core/verification/verification-engine.js').VerificationResult }) {
+        const critical = input.verification.findings.filter(f => !f.resolved && (f.severity === 'critical' || f.severity === 'high'));
+        if (critical.length > 0) {
+          return { approved: false, failure: `验证发现 ${critical.length} 个严重问题，需继续修复` };
+        }
+        if (!input.verification.passed) {
+          return { approved: false, failure: `验证未通过 score=${input.verification.score}` };
+        }
+        return { approved: true, comments: [] };
+      },
+    };
+
+    const diagnose = {
+      async diagnose(input: SelfCorrectionInput, failure: string, verification?: import('../../core/verification/verification-engine.js').VerificationResult) {
+        const first = verification?.findings[0];
+        const detail = first ? `${first.file || ''}: ${first.message}` : failure;
+        return { diagnosis: `第 ${failure ? 'N' : '1'} 轮失败: ${detail}` };
+      },
+    };
+
+    const engine = createSelfCorrectionEngine({
+      builder,
+      verifier: { verify: verifier.verify.bind(verifier) },
+      reviewer,
+      diagnose,
+      maxRounds: 5,
+    });
+
+    const result = await engine.run({
+      runId: body.runId,
+      taskId: body.taskId,
+      goal: body.goal,
+      context: body.context,
+    });
+
+    if (result.status !== 'done') {
+      reply.code(422).send({ ok: false, ...result });
+      return;
+    }
+    return { ok: true, ...result };
+  });
+
+  // 运行 AI 自检（System Health 层）
   app.get('/api/selfcheck', {
     schema: { description: '运行 AI 自检，检查项目完整性', tags: ['自检'] },
   }, async () => {

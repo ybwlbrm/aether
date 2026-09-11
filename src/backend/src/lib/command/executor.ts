@@ -12,6 +12,22 @@ import {
 } from './constants.js';
 import { resolveWorkdir, isWorkdirSafe, truncateOutput } from './validator.js';
 import { executeBuiltinCommand } from './builtins.js';
+import { execFileSync } from 'node:child_process';
+
+/** Windows 下强制终止进程树（P1-21：cmd/powershell/npm/python 子进程不会自行退出） */
+function killProcessTree(pid: number): void {
+  try {
+    // taskkill /T（树）/F（强制）/PID —— 杀掉整个子进程树
+    execFileSync('taskkill', ['/PID', String(pid), '/T', '/F'], {
+      stdio: 'ignore',
+      windowsHide: true,
+      timeout: 5000,
+    });
+  } catch {
+    // 进程可能已退出；fallback 直接 kill
+    try { process.kill(pid); } catch { /* 已退出 */ }
+  }
+}
 
 /**
  * 执行 shell 命令并返回输出结果（错误以字符串返回，不抛异常）
@@ -22,6 +38,7 @@ import { executeBuiltinCommand } from './builtins.js';
  * @param allowedDirs      允许操作的工作目录列表
  * @param permissionLevel  权限级别（1=只读拒绝执行，2=受限执行，3=绕过路径限制）
  * @param defaultDir       相对路径的基准目录
+ * @param signal           P1-21: AbortSignal —— Run Cancel 时 kill 整个子进程树
  */
 export async function executeCommand(
   command: string,
@@ -30,6 +47,7 @@ export async function executeCommand(
   allowedDirs?: string[],
   permissionLevel?: number,
   defaultDir?: string,
+  signal?: AbortSignal,
 ): Promise<string> {
   try {
     const cmd = String(command || '').trim();
@@ -124,11 +142,23 @@ export async function executeCommand(
         let stdout = '';
         let stderr = '';
         let timedOut = false;
+        let abortedBySignal = false;
 
         const timer = setTimeout(() => {
           timedOut = true;
-          try { child.kill(); } catch { /* 进程可能已退出 */ }
+          killProcessTree(child.pid ?? 0);
         }, effectiveTimeout);
+
+        // P1-21: AbortSignal —— Run Cancel 时立即终止子进程树
+        const onAbort = () => {
+          abortedBySignal = true;
+          clearTimeout(timer);
+          killProcessTree(child.pid ?? 0);
+        };
+        if (signal) {
+          if (signal.aborted) onAbort();
+          else signal.addEventListener('abort', onAbort, { once: true });
+        }
 
         child.stdout?.on('data', (d: Buffer) => {
           if (stdout.length < MAX_OUTPUT_CHARS) stdout += d.toString();
@@ -139,11 +169,17 @@ export async function executeCommand(
 
         child.on('error', (err) => {
           clearTimeout(timer);
+          signal?.removeEventListener('abort', onAbort);
           rejectPromise(err);
         });
 
         child.on('close', (code) => {
           clearTimeout(timer);
+          signal?.removeEventListener('abort', onAbort);
+          if (abortedBySignal) {
+            resolvePromise('已停止：运行已取消（aborted），命令进程已终止');
+            return;
+          }
           if (timedOut) {
             resolvePromise(
               `错误: 命令执行超时（>${effectiveTimeout}ms），进程已被强制终止。\n` +
@@ -172,12 +208,25 @@ export async function executeCommand(
       let stdout = '';
       let stderr = '';
       let timedOut = false;
+      let abortedBySignal = false;
 
       // 自管定时器：区分「超时终止」与「正常退出」（spawn 自带 timeout 无法区分）
       const timer = setTimeout(() => {
         timedOut = true;
-        try { child.kill(); } catch { /* 进程可能已退出 */ }
+        // P1-21: 终止整个进程树（Windows 下子进程不会自行退出）
+        killProcessTree(child.pid ?? 0);
       }, effectiveTimeout);
+
+      // P1-21: AbortSignal —— Run Cancel 时立即终止子进程树
+      const onAbort = () => {
+        abortedBySignal = true;
+        clearTimeout(timer);
+        killProcessTree(child.pid ?? 0);
+      };
+      if (signal) {
+        if (signal.aborted) onAbort();
+        else signal.addEventListener('abort', onAbort, { once: true });
+      }
 
       child.stdout?.on('data', (d: Buffer) => {
         if (stdout.length < MAX_OUTPUT_CHARS) stdout += d.toString();
@@ -188,11 +237,17 @@ export async function executeCommand(
 
       child.on('error', (err) => {
         clearTimeout(timer);
+        signal?.removeEventListener('abort', onAbort);
         rejectPromise(err);
       });
 
       child.on('close', (code) => {
         clearTimeout(timer);
+        signal?.removeEventListener('abort', onAbort);
+        if (abortedBySignal) {
+          resolvePromise('已停止：运行已取消（aborted），命令进程已终止');
+          return;
+        }
         if (timedOut) {
           resolvePromise(
             `错误: 命令执行超时（>${effectiveTimeout}ms），进程已被强制终止。\n` +

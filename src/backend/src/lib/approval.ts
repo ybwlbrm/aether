@@ -13,7 +13,7 @@
  * Explicit Deny > Capability Deny > Approval > Explicit Allow > Default Deny
  */
 
-export type ApprovalDecision = 'approved' | 'rejected' | 'timeout';
+export type ApprovalDecision = 'approved' | 'rejected' | 'timeout' | 'aborted';
 
 export interface ApprovalRequest {
   /** 全局唯一 approval id */
@@ -40,7 +40,8 @@ export interface ApprovalToken {
 
 /**
  * 创建一次审批：立即触发 prompt（SSE 事件），等待 settle/timeout。
- * @returns 承诺：返回 { approved: boolean, decision }；被拒绝或超时 resolves false（不 throw）。
+ * P0-08 修复：支持 AbortSignal —— Run Cancel 时立即中断等待（不再等 timeout）。
+ * @returns 承诺：返回 { approved: boolean, decision }；被拒绝/超时/中止 resolves（不 throw）。
  */
 export function createApproval(opts: {
   id: string;
@@ -49,6 +50,8 @@ export function createApproval(opts: {
   /** 触发前端「需要确认」事件 */
   prompt: () => void;
   timeoutMs?: number;
+  /** P0-08: Run Cancel 信号 —— abort 时立即结束等待（decision=aborted） */
+  signal?: AbortSignal;
 }): { request: ApprovalRequest; token: ApprovalToken; promise: Promise<{ approved: boolean; decision: ApprovalDecision }> } {
   const timeoutMs = opts.timeoutMs ?? 60_000;
 
@@ -64,6 +67,24 @@ export function createApproval(opts: {
       cleanup = () => {};
     }, timeoutMs);
 
+    // P0-08: 监听 AbortSignal —— Run Cancel 时立即结束等待，不等 60s timeout
+    const onAbort = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      cleanup();
+      resolve({ approved: false, decision: 'aborted' });
+      cleanup = () => {};
+    };
+    if (opts.signal) {
+      if (opts.signal.aborted) {
+        // 已中止：立即以 aborted 结束（微任务中 resolve，保持调用方行为一致）
+        queueMicrotask(onAbort);
+      } else {
+        opts.signal.addEventListener('abort', onAbort, { once: true });
+      }
+    }
+
     settle = (d: 'approved' | 'rejected') => {
       if (settled) return;
       settled = true;
@@ -72,7 +93,10 @@ export function createApproval(opts: {
       cleanup = () => {};
       resolve({ approved: d === 'approved', decision: d });
     };
-    cleanup = () => clearTimeout(timer);
+    cleanup = () => {
+      clearTimeout(timer);
+      if (opts.signal) opts.signal.removeEventListener('abort', onAbort);
+    };
   });
 
   // 触发前端提示（在 promise 建立后立即发出）

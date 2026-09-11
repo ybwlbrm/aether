@@ -142,6 +142,9 @@ export const api = {
   getProviders: () => request<any[]>('/providers'),
   getProvider: (id: string) => request<any>(`/providers/${id}`),
   getProviderDetail: (id: string) => request<{ id: string; name: string; type: string; apiKey: string; baseUrl: string | null; models: string[]; capabilities: string[]; isDefault: boolean; createdAt: string; updatedAt: string }>(`/providers/${id}/detail`),
+  // P1-28 修复：获取明文 API Key 必须走统一 request client（自动附 Bearer Authorization，
+  // 不再手写裸 fetch 仅带 X-Requested-With —— 否则后端敏感写路径的认证可被绕过）
+  getProviderApiKey: (id: string) => request<{ apiKey: string }>(`/providers/${id}/apikey`, { method: 'POST', body: JSON.stringify({}) }),
   createProvider: (data: any) => request<any>('/providers', { method: 'POST', body: JSON.stringify(data) }),
   updateProvider: (id: string, data: any) => request<any>(`/providers/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
   deleteProvider: (id: string) => request<any>(`/providers/${id}`, { method: 'DELETE' }),

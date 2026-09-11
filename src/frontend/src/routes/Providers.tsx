@@ -113,12 +113,9 @@ const [testingId, setTestingId] = useState<string | null>(null);
     if (plaintextApiKey) { setShowApiKey(true); return; }
     setFetchingKey(true);
     try {
-      // P2-12 修复：改用 POST 请求（需 X-Requested-With CSRF header）获取明文 Key
-      const res = await fetch(`/api/providers/${detail.id}/apikey`, {
-        method: 'POST',
-        headers: { 'X-Requested-With': 'XMLHttpRequest' },
-      });
-      const data = await res.json();
+      // P1-28 修复：改用统一 api client（自动附 Bearer Authorization + X-Requested-With），
+      // 不再手写裸 fetch —— 后端敏感写路径（/api/providers/）要求认证，裸 fetch 可被绕过。
+      const data = await api.getProviderApiKey(detail.id);
       setPlaintextApiKey(data.apiKey || '');
       setShowApiKey(true);
     } catch (_e: unknown) { /* ignore - intentional */ }
@@ -130,11 +127,8 @@ const [testingId, setTestingId] = useState<string | null>(null);
     if (!detail) return;
     let keyToCopy = plaintextApiKey;
     if (!keyToCopy) {
-      const res = await fetch(`/api/providers/${detail.id}/apikey`, {
-        method: 'POST',
-        headers: { 'X-Requested-With': 'XMLHttpRequest' },
-      });
-      keyToCopy = (await res.json()).apiKey || '';
+      const data = await api.getProviderApiKey(detail.id);
+      keyToCopy = data.apiKey || '';
     }
     if (keyToCopy) {
       navigator.clipboard.writeText(keyToCopy);
