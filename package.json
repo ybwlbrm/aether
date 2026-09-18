@@ -27,8 +27,11 @@
                     "typecheck":  "tsc --noEmit -p src/shared \u0026\u0026 tsc --noEmit --composite false -p src/backend \u0026\u0026 tsc --noEmit --composite false -p src/frontend",
                     "clean":  "node -e \"const fs=require(\u0027fs\u0027); for (const d of [\u0027src/shared/dist\u0027,\u0027src/backend/dist\u0027,\u0027src/frontend/dist\u0027,\u0027src/mobile/dist\u0027,\u0027dist_electron\u0027]) fs.rmSync(d, { recursive: true, force: true }); for (const f of [\u0027tsconfig.tsbuildinfo\u0027,\u0027src/shared/tsconfig.tsbuildinfo\u0027,\u0027src/backend/tsconfig.tsbuildinfo\u0027,\u0027src/frontend/tsconfig.tsbuildinfo\u0027]) fs.rmSync(f, { force: true })\"",
                     "start":  "npm run start -w src/backend",
-                    "bundle:backend":  "node build/bundle-backend.js",
-                    "build:exe":  "node build/build-exe.js",
+                    "bundle:backend": "node build/bundle-backend.js",
+                    "build:exe": "node build/build-exe.js",
+                    "release:all": "node build/release-all.js",
+                    "release:sync": "node build/release-all.js --skip-build",
+                    "release:build": "node build/release-all.js --skip-sync",
                     "build:icon":  "node build/generate-icon.js \u0026\u0026 node build/gen-icon.js \u0026\u0026 node build/make-ico.js",
                     "build:liquid-map":  "node build/gen-liquid-map.js",
                     "electron:dev":  "electron ."
