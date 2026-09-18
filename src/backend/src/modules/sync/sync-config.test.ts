@@ -51,7 +51,7 @@ describe('sync-config pure logic', () => {
   // computeConfigFingerprint tests (P1-17)
   // ============================================================
 
-  it('computeConfigFingerprint: includes URL, Key, deviceId only', () => {
+  it('computeConfigFingerprint: 返回 HMAC-SHA256 截断值，绝不包含明文 Key', () => {
     const cfg: SyncConfig = {
       supabaseUrl: 'https://test.supabase.co',
       supabaseKey: 'test-key',
@@ -61,8 +61,13 @@ describe('sync-config pure logic', () => {
       userId: 'user-456',
     };
     const fp = computeConfigFingerprint(cfg);
-    // 指纹不应包含 deviceName/deviceType/userId
-    assert.equal(fp, 'https://test.supabase.co|test-key|device-123');
+    // 整改计划第 7 章：指纹必须是 HMAC-SHA256 截断值（16 hex），不包含明文 supabaseKey/URL
+    assert.match(fp, /^[0-9a-f]{16}$/, `指纹应为 16 位 hex，实际: ${fp}`);
+    assert.ok(!fp.includes('test-key'), '指纹不得包含明文 Key');
+    assert.ok(!fp.includes('test.supabase.co'), '指纹不得包含明文 URL');
+    // deviceName/deviceType/userId 不影响指纹
+    const fp2 = computeConfigFingerprint({ ...cfg, deviceName: 'X', deviceType: 'mobile', userId: 'u2' });
+    assert.equal(fp, fp2);
   });
 
   it('computeConfigFingerprint: changes when URL/Key/deviceId changes', () => {

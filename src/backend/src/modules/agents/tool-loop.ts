@@ -61,8 +61,10 @@ export async function runAgentToolLoop(ctx: ToolLoopContext): Promise<ToolLoopRe
   let lastToolResult = '';
   let toolCallCount = 0;
 
-  // 循环模式：loop 开启时持续执行直到任务完整完成（极大上限，防死循环）；否则 30 轮
-  let fcTurns = ctx.body.loop ? 500 : 30;
+  // 整改计划第 5 章（P1）：循环模式默认上限从 500 降到安全值 30 ——
+  // 防模型失控循环导致无界成本；高级值需经过 capability（本项目未启用）。
+  const LOOP_MAX_TURNS_DEFAULT = 30;
+  let fcTurns = ctx.body.loop ? LOOP_MAX_TURNS_DEFAULT : 30;
 
   // P0-01 收口：统一生产工具执行器（PolicyEngine 唯一裁决 + Approval 完整绑定 + Timeout + Cancel）
   // 在循环外构建一次（工具注册只做一遍），循环内复用。

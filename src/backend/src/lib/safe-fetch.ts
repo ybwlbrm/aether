@@ -95,6 +95,32 @@ export function isMetadataHostname(host: string): boolean {
 }
 
 /**
+ * 端口白名单（整改计划第 2 章，P0/P1）：所有出站 URL（含 MCP remote、web_fetch、
+ * 重定向每一跳）共用同一端口白名单，阻断对内网敏感端口（如 3306/5432/6379/9200
+ * 等数据库/缓存端口）的 SSRF 探针。仅放行常见 Web/本地 AI 服务端口。
+ *
+ * 默认端口（URL 未显式携带）按协议映射：http→80，https→443。
+ */
+export const ALLOWED_PORTS = new Set<number>([
+  80, 443,           // Web 标准端口
+  3000, 5173, 8080,  // 本地前端/开发端口（provider 常用）
+  11434, 1234,       // Ollama / LM Studio 本地 AI
+  8000, 8443,        // 常见 API 端口
+  9000, 9090,        // 常见服务端口
+]);
+
+/** 解析 URL 端口（未显式指定时按协议映射） */
+export function resolveUrlPort(u: URL): number {
+  if (u.port) return parseInt(u.port, 10);
+  return u.protocol === 'https:' ? 443 : 80;
+}
+
+/** 端口是否在共享白名单内 */
+export function isPortAllowed(port: number): boolean {
+  return ALLOWED_PORTS.has(port);
+}
+
+/**
  * 校验 URL 是否安全可 fetch
  *
  * @param raw 原始 URL 字符串
@@ -114,6 +140,11 @@ export function isSafeFetchUrl(raw: string): boolean {
     if (u.protocol !== 'http:' && u.protocol !== 'https:') return false;
 
     const host = u.hostname.toLowerCase();
+
+    // 注意：isSafeFetchUrl 是「provider/本地服务」场景 —— 允许回环/私网（本地 AI provider
+    // 可用任意端口，如 Ollama 11434 / LM Studio 1234 / 自定义端口），因此不做端口白名单。
+    // 端口白名单仅在公网抓取场景（isPublicFetchUrl / resolveAndValidateUrl publicOnly）强制，
+    // 阻断对内网数据库/缓存端口的 SSRF 探针。
 
     // Wave0-SS (P0-12): IPv6 字面量（含 ::1 / fc00:: / fe80:: / ::ffff:* / 公网字面量）
     // 一律拒绝 —— 消除 IPv6 绕过面。合法公网 IPv6 字面量场景罕见，
@@ -146,6 +177,7 @@ export function isSafeFetchUrl(raw: string): boolean {
  * Wave0-SS: 公网-only 校验 —— 用于"抓取任意 URL"场景（搜索结果 URL / web_fetch /
  * 下载器），此类场景不允许访问本机/内网服务（与 provider 场景不同：provider 允许
  * 本地 Ollama 等）。在 isSafeFetchUrl 基础上额外拒绝回环与私网 IPv4（IPv6 字面量已全拒）。
+ * 整改计划第 2 章：公网抓取场景强制端口白名单 —— 阻断对内网数据库/缓存端口的 SSRF 探针。
  */
 export function isPublicFetchUrl(raw: string): boolean {
   if (!isSafeFetchUrl(raw)) return false;
@@ -155,6 +187,8 @@ export function isPublicFetchUrl(raw: string): boolean {
     if (host === 'localhost' || host === 'localhost.localdomain') return false;
     const ip = parseIpv4(host);
     if (ip && isPrivateOrLoopback(ip)) return false;
+    // 端口白名单：仅放行常见 Web/API/本地 AI 端口，拒绝数据库/缓存/SSH 等内网服务端口
+    if (!isPortAllowed(resolveUrlPort(u))) return false;
     return true;
   } catch {
     return false;

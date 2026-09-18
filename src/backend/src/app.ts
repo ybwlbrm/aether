@@ -34,11 +34,13 @@ import { registerApprovalRoutes } from './modules/approvals/index.js';
 import { registerAuthRoutes } from './modules/auth/index.js';
 import { registerRunRoutes, registerRunEventsRoutes, registerRunStreamRoutes } from './modules/runs/index.js';
 import { closeAllMcpClients } from './lib/mcp-client.js';
-import { generateLocalAuthToken, verifyAuthToken } from './lib/auth-token.js';
+import { generateLocalAuthToken } from './lib/auth-token.js';
+import { installAuthGuard } from './lib/auth-guard.js';
 import { setProviderDataDir } from './lib/provider.js';
 import fastifyStatic from '@fastify/static';
 import { resolve } from 'node:path';
 import { existsSync, mkdirSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
 
 export async function buildApp(config?: BackendConfig) {
   const cfg = config || (await loadBackendConfig());
@@ -81,6 +83,15 @@ export async function buildApp(config?: BackendConfig) {
     return payload;
   });
 
+  // 整改计划第 9 章（P2）：correlation id —— 每个响应带 x-correlation-id，
+  // 前端错误提示可携带，排查时用同一 id 关联请求/日志/指标。
+  app.addHook('onRequest', async (request, reply) => {
+    const incoming = request.headers['x-correlation-id'];
+    const correlationId = typeof incoming === 'string' && incoming ? incoming : randomUUID();
+    (request as any).correlationId = correlationId;
+    reply.header('x-correlation-id', correlationId);
+  });
+
   // P0-1: CORS 严格白名单 — 反射任意 origin 等价于 *，恶意网页可远程接管本机服务
   // 仅允许配置的本地开发/生产前端 origin（可通过 ALLOWED_ORIGINS 环境变量覆盖，逗号分隔）
   const allowedOriginsSet = new Set(cfg.allowedOrigins);
@@ -106,53 +117,14 @@ export async function buildApp(config?: BackendConfig) {
     if (!hostPattern.test(host)) {
       return reply.code(403).send({ error: { message: 'Forbidden host' } });
     }
-    // P0-3 修复：Swagger UI (/docs) 的 POST 请求豁免 CSRF 检查 —
-    // 注释原意是 GET 豁免但代码只豁免了方法，导致 /docs 的 Try-it-out 全被 403
-    if (request.url.startsWith('/docs') || request.url === '/docs/') return;
-    // Oracle-5: CSRF 防护 — 所有状态变更请求必须带 X-Requested-With header
-    // 浏览器表单提交无法附带自定义 header（需 CORS preflight），因此可有效防 CSRF
-    const method = request.method.toUpperCase();
-    if (['POST', 'PUT', 'DELETE', 'PATCH'].includes(method)) {
-      const xrw = request.headers['x-requested-with'];
-      if (!xrw || xrw !== 'XMLHttpRequest') {
-        return reply.code(403).send({ error: { message: 'CSRF check failed: missing X-Requested-With header' } });
-      }
-    }
-    // 本地认证 token 校验 — 敏感端点强制要求 Authorization: Bearer <token>
-    // Wave0-AM (P1-31/P1-32): 按「路由分类」而非「HTTP 方法」决定敏感度。
-    //   - sensitiveWritePaths: 状态变更敏感（工具执行/安全设置/provider/导入/审批/
-    //     权限设置/同步配置上传/工作流/MCP/测试）—— 非 GET 即需 token
-    //   - sensitiveReadPaths: 数据泄露面（全量导出 / 云数据下载 / 审批列表）——
-    //     GET 同样需要 token（"GET=安全"假设不成立）
-    const sensitiveWritePaths = [
-      '/api/terminal/execute',
-      '/api/settings/security',
-      '/api/providers/',
-      '/api/import/all',
-      '/api/workflows/',
-      '/api/mcp/servers/',
-      '/api/testing/run',
-      '/api/permissions/',
-      '/api/approvals/',
-      '/api/sync/config',
-      '/api/sync/upload',
-    ];
-    const sensitiveReadPaths = [
-      '/api/export/all',
-      '/api/sync/download',
-      '/api/approvals/',
-    ];
-    const matchesSensitive = (list: string[], url: string): boolean =>
-      list.some(p => url === p || (p.endsWith('/') && url.startsWith(p)));
-    const needsAuthWrite = method !== 'GET' && matchesSensitive(sensitiveWritePaths, request.url);
-    const needsAuthRead = matchesSensitive(sensitiveReadPaths, request.url);
-    if (needsAuthWrite || needsAuthRead) {
-      const authHeader = request.headers.authorization;
-      if (!verifyAuthToken(authHeader)) {
-        return reply.code(401).send({ error: { message: 'Unauthorized: invalid or missing auth token' } });
-      }
-    }
   });
+  // 默认拒绝鉴权（整改计划第 1 章，P0）：
+  // - 所有非 GET/HEAD 路由缺 Bearer 一律 401（conversations/agents/projects-exec/media/
+  //   documents/toolbox/skills/runs/selfcheck/export/sync/backgrounds/knowledge/...）
+  // - 健康检查、静态资源、显式登录/本地 bootstrap（/api/auth/token）才允许匿名
+  // - 敏感读路径（export/all、sync/download、approvals）GET 同样需 token
+  // - CSRF X-Requested-With 检查保留（但不作为身份验证）
+  installAuthGuard(app);
   // Swagger UI 仅在非生产环境或显式启用时注册（SEC-020）
   const enableSwagger = process.env.NODE_ENV !== 'production' || cfg.enableSwagger === true;
   if (enableSwagger) {

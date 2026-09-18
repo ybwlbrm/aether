@@ -1,7 +1,7 @@
 import { useState, useRef } from 'react';
 import { Download, Upload } from 'lucide-react';
 import { confirm as confirmDialog } from '../../components/ui/confirm-dialog';
-import { api } from '../../api/client';
+import { api, authHeaders } from '../../api/client';
 
 // P2-3: 从 Settings.tsx 拆分出的数据管理组件
 export function DataManage() {
@@ -92,7 +92,7 @@ export function DataManage() {
         // 导入后端数据
         const res = await fetch('/api/import/all', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+          headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest', ...authHeaders() },
           body: JSON.stringify(data.backend || {}),
         });
         if (!res.ok) {

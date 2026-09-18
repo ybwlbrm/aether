@@ -30,6 +30,8 @@ export interface ToolLoopConfig {
   supportsThinking: boolean;
   db: any;
   body: any;
+  /** 整改计划第 5 章（P1）：循环预算（缺省用 defaultLoopBudget(maxTurns)） */
+  budget?: LoopBudget;
 }
 
 export interface ToolLoopResult {
@@ -41,6 +43,37 @@ export interface ToolLoopResult {
   endedNormally: boolean;
   aiError: string | null;
   toolCallCount: number;
+  /** 整改计划第 5 章（P1）：预算耗尽原因（'turns' | 'duration' | 'tokens' | 'tool_calls' | 'cost' | null） */
+  budgetExceeded: 'turns' | 'duration' | 'tokens' | 'tool_calls' | 'cost' | null;
+  /** 已用轮数（前端循环 UI 显示） */
+  turnsUsed: number;
+  /** 已用时长 ms（前端循环 UI 显示） */
+  elapsedMs: number;
+}
+
+/** 整改计划第 5 章（P1）：循环预算对象 —— 超过任一预算即停止并写 budget_exceeded */
+export interface LoopBudget {
+  /** 最大轮数（默认 30；循环模式同值，防失控） */
+  maxTurns: number;
+  /** 最大总时长 ms（0=不限） */
+  maxDurationMs: number;
+  /** 最大总 token（0=不限） */
+  maxTokens: number;
+  /** 最大工具调用数（0=不限；内部仍有硬上限 50） */
+  maxToolCalls: number;
+  /** 最大估算费用元（0=不限） */
+  maxCostCny: number;
+}
+
+/** 构造默认预算（可在 chat-handler 中覆盖） */
+export function defaultLoopBudget(maxTurns: number): LoopBudget {
+  return {
+    maxTurns,
+    maxDurationMs: 0,     // 默认不限时长
+    maxTokens: 0,         // 默认不限 token
+    maxToolCalls: 50,     // 与 MAX_TOOL_CALLS_PER_REQUEST 对齐
+    maxCostCny: 0,        // 默认不限费用
+  };
 }
 
 /**
@@ -74,7 +107,13 @@ export async function executeToolLoop(
     supportsThinking,
     db,
     body,
+    budget: budgetOverride,
   } = config;
+
+  // 整改计划第 5 章（P1）：循环预算 —— 超过轮数/时长/token/工具调用/费用任一预算即停止
+  const budget = budgetOverride ?? defaultLoopBudget(configMaxTurns);
+  const loopStartedAt = Date.now();
+  let turnsUsed = 0;
 
   // PF-02: 硬性工具调用总预算，防止失控成本
   const MAX_TOOL_CALLS_PER_REQUEST = 50;
@@ -87,6 +126,8 @@ export async function executeToolLoop(
   let lastToolResult = '';
   let endedNormally = false;
   let aiError: string | null = null;
+  // 整改计划第 5 章（P1）：预算耗尽原因（null=未耗尽）
+  let budgetExceeded: ToolLoopResult['budgetExceeded'] = null;
 
   let maxTurns = configMaxTurns;
 
@@ -115,6 +156,29 @@ export async function executeToolLoop(
   });
 
   while (maxTurns-- > 0) {
+    turnsUsed++;
+    // 整改计划第 5 章（P1）：轮数预算 —— 超过即停止（不再请求模型）
+    if (budget.maxTurns > 0 && turnsUsed > budget.maxTurns) {
+      budgetExceeded = 'turns';
+      aiContent = `⚠️ 已达到轮数上限（${budget.maxTurns} 轮），本次请求停止执行。`;
+      endedNormally = false;
+      break;
+    }
+    // 时长预算
+    if (budget.maxDurationMs > 0 && Date.now() - loopStartedAt > budget.maxDurationMs) {
+      budgetExceeded = 'duration';
+      aiContent = `⚠️ 已达到时长预算（${(budget.maxDurationMs / 1000).toFixed(0)} 秒），本次请求停止执行。`;
+      endedNormally = false;
+      break;
+    }
+    // token 预算（每轮模型调用前检查累计 usage）
+    if (budget.maxTokens > 0 && usageTotal.total_tokens > budget.maxTokens) {
+      budgetExceeded = 'tokens';
+      aiContent = `⚠️ 已达到 token 预算（${budget.maxTokens.toLocaleString()}），本次请求停止执行。`;
+      endedNormally = false;
+      break;
+    }
+
     // inbox 指令（steer/followup）：运行中用户补充的指令 → drain 为 user 消息注入下一轮
     const directives = drainDirectives(conversationId);
     for (const d of directives) {
@@ -235,10 +299,13 @@ export async function executeToolLoop(
 
       // 执行每个工具
       for (const tc of currentToolCalls) {
-        // PF-02: 工具调用预算检查 — 超过 50 次则优雅终止
+        // PF-02: 工具调用预算检查 — 超过上限则优雅终止
         toolCallCount++;
-        if (toolCallCount > MAX_TOOL_CALLS_PER_REQUEST) {
-          const budgetMsg = `⚠️ 已达到工具调用上限 (${MAX_TOOL_CALLS_PER_REQUEST} 次)，本次请求停止执行。如需继续，请发送新消息。`;
+        // 整改计划第 5 章（P1）：工具调用预算 —— 统一使用 budget.maxToolCalls（默认 50）
+        const toolBudgetLimit = budget.maxToolCalls > 0 ? budget.maxToolCalls : MAX_TOOL_CALLS_PER_REQUEST;
+        if (toolCallCount > toolBudgetLimit) {
+          budgetExceeded = 'tool_calls';
+          const budgetMsg = `⚠️ 已达到工具调用上限 (${toolBudgetLimit} 次)，本次请求停止执行。如需继续，请发送新消息。`;
           sseSend('message', JSON.stringify({ content: budgetMsg }));
           eventBus.emit(runContext.sessionId, 'agent.message.delta', {
             taskId: runContext.taskId,
@@ -343,7 +410,9 @@ export async function executeToolLoop(
       }
 
       // PF-02: 若工具调用预算耗尽，跳出外层 while 循环
-      if (toolCallCount > MAX_TOOL_CALLS_PER_REQUEST) {
+      const toolBudgetLimit = budget.maxToolCalls > 0 ? budget.maxToolCalls : MAX_TOOL_CALLS_PER_REQUEST;
+      if (toolCallCount > toolBudgetLimit) {
+        budgetExceeded = 'tool_calls';
         break;
       }
     } else {
@@ -355,6 +424,11 @@ export async function executeToolLoop(
     }
   }
 
+  // 轮数自然耗尽（maxTurns 递减到 0 且未正常结束）→ 视为轮数预算耗尽
+  if (!endedNormally && !budgetExceeded && turnsUsed >= budget.maxTurns) {
+    budgetExceeded = 'turns';
+  }
+
   return {
     aiContent,
     streamedContent,
@@ -364,5 +438,8 @@ export async function executeToolLoop(
     endedNormally,
     aiError,
     toolCallCount,
+    budgetExceeded,
+    turnsUsed,
+    elapsedMs: Date.now() - loopStartedAt,
   };
 }

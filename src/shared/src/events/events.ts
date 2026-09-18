@@ -41,7 +41,8 @@ export type RunEndReason =
   | 'error'
   | 'aborted'
   | 'max_turns'
-  | 'completed';
+  | 'completed'
+  | 'budget_exceeded';
 
 /** 任务结束原因 */
 export type TaskEndReason =
@@ -51,7 +52,8 @@ export type TaskEndReason =
   | 'error'
   | 'aborted'
   | 'max_turns'
-  | 'completed';
+  | 'completed'
+  | 'budget_exceeded';
 
 /** Agent 状态 */
 export type AgentStatusValue =

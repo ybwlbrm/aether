@@ -4,7 +4,7 @@ import { Outlet, useLocation, useNavigate } from 'react-router-dom';
 import { Sidebar } from './Sidebar';
 import { CommandPalette } from './CommandPalette';
 import { LiquidGlassFilter } from './LiquidGlassFilter';
-import { api } from '../api/client';
+import { api, authHeaders } from '../api/client';
 import { requestNotificationPermission } from '../lib/notifications';
 import { useAppStore } from '../store/app';
 import { Maximize2, Minimize2, Trash2, MessageSquare } from 'lucide-react';
@@ -193,7 +193,7 @@ export function Layout() {
       // 同步删除 Supabase 记录
       await fetch('/api/sync/delete-conversation', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+        headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest', ...authHeaders() },
         body: JSON.stringify({ conversationId: id }),
       }).catch(() => {});
       loadConversations();
@@ -424,10 +424,25 @@ export function Layout() {
     return () => document.removeEventListener('fullscreenchange', handler);
   }, []);
 
+  // 整改计划第 8 章（P1/P2）：背景激活状态 —— data-bg-active 与 data-glass-enabled 分离。
+  // data-bg-active=true 表示当前有背景（单图或轮播）；玻璃开关由 data-glass-enabled 单独控制，
+  // 保证 8 主题 × 2 状态（有/无背景）对比度一致。
+  const bgActive = !!(customBg || (slideEnabled && slideImages.length > 0));
+  useEffect(() => {
+    const root = document.documentElement;
+    if (bgActive) root.setAttribute('data-bg-active', 'true');
+    else root.removeAttribute('data-bg-active');
+    // 从 localStorage 恢复玻璃开关（data-glass-enabled 语义）
+    const glassEnabled = localStorage.getItem('glassEnabled') !== 'false';
+    if (glassEnabled) root.setAttribute('data-glass-enabled', 'true');
+    else root.removeAttribute('data-glass-enabled');
+  }, [bgActive]);
+
   return (
     <div
       className="min-h-screen"
       data-custom-bg={customBg ? 'true' : undefined}
+      data-bg-active={bgActive ? 'true' : undefined}
       style={{
         background: !slideEnabled ? 'var(--bg-base)' : undefined,
         backgroundImage: !slideEnabled ? 'var(--bg-gradient)' : undefined,

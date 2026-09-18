@@ -6,6 +6,7 @@ import type { ConvertOption } from './Toolbox/types';
 import { ToolboxList } from './Toolbox/ToolboxList';
 import { ToolboxProcess } from './Toolbox/ToolboxProcess';
 import { convertOptions, categories, catOf } from './Toolbox/constants';
+import { authHeaders } from '../api/client';
 
 export function Toolbox() {
   const [selected, setSelected] = useState<ConvertOption | null>(null);
@@ -116,7 +117,7 @@ export function Toolbox() {
           if (enc === 'gbk' || enc === 'big5' || enc === 'gb18030') {
             const res = await fetch('/api/toolbox/encode', {
               method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
+              headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest', ...authHeaders() },
               body: JSON.stringify({ op: encodeDirection === 'encode' ? 'encode-text' : 'decode-text', input, encoding: enc, format: fmt }),
             });
             const data = await res.json();
@@ -209,7 +210,7 @@ export function Toolbox() {
           color: utilityInput.trim().startsWith('#') ? 'hex-rgb' : 'rgb-hex',
         };
         const r = await fetch('/api/toolbox/utility', {
-          method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+          method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest', ...authHeaders() },
           body: JSON.stringify({ op: opMap[selected.op || ''] || 'base64-encode', input: utilityInput }),
         });
         const data = await r.json();
@@ -238,7 +239,7 @@ export function Toolbox() {
           if (height) options.height = Number(height);
         }
         res = await fetch('/api/toolbox/convert', {
-          method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+          method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest', ...authHeaders() },
           body: JSON.stringify({ files: fileData, targetFormat, options }),
         });
         res = await res.json();
@@ -250,7 +251,7 @@ export function Toolbox() {
         else setResult('转换完成！');
       } else if (selected.kind === 'pdf-compress') {
         res = await fetch('/api/toolbox/pdf-compress', {
-          method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+          method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest', ...authHeaders() },
           body: JSON.stringify({ files: fileData }),
         });
         res = await res.json();
@@ -258,7 +259,7 @@ export function Toolbox() {
         else setError(res?.error || '压缩失败，请检查文件格式或稍后重试');
       } else if (selected.kind === 'unlock') {
         res = await fetch('/api/toolbox/unlock-music', {
-          method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+          method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest', ...authHeaders() },
           body: JSON.stringify({ file: fileData[0] }),
         });
         res = await res.json();
@@ -266,7 +267,7 @@ export function Toolbox() {
         else setError(res?.error || '解密失败，请检查文件是否为有效的 ncm 格式');
       } else if (selected.kind === 'pdf-operate') {
         res = await fetch('/api/toolbox/pdf-operate', {
-          method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+          method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest', ...authHeaders() },
           body: JSON.stringify({ operation: selected.op, files: fileData, text: watermarkText }),
         });
         res = await res.json();
@@ -274,7 +275,7 @@ export function Toolbox() {
         else setError(res?.error || 'PDF 处理失败，请检查文件是否为有效的 PDF 格式');
       } else if (selected.kind === 'pdf-read') {
         res = await fetch('/api/toolbox/pdf-read', {
-          method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+          method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest', ...authHeaders() },
           body: JSON.stringify({ op: selected.op, file: fileData[0] }),
         });
         res = await res.json();
@@ -283,7 +284,7 @@ export function Toolbox() {
         else setError(res?.error || 'PDF 读取失败，请检查文件是否为有效的 PDF 格式');
       } else if (selected.kind === 'pdf-to-docx') {
         res = await fetch('/api/toolbox/pdf-to-docx', {
-          method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+          method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest', ...authHeaders() },
           body: JSON.stringify({ file: fileData[0] }),
         });
         res = await res.json();
@@ -292,7 +293,7 @@ export function Toolbox() {
       } else if (selected.kind === 'video-extract') {
         // 视频提取音频（ffmpeg）
         res = await fetch('/api/toolbox/video-extract', {
-          method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+          method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest', ...authHeaders() },
           body: JSON.stringify({ files: fileData, targetFormat }),
         });
         res = await res.json();
@@ -306,7 +307,7 @@ export function Toolbox() {
       } else if (selected.kind === 'youtube-download') {
         // YouTube 下载（yt-dlp）
         res = await fetch('/api/toolbox/youtube-download', {
-          method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+          method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest', ...authHeaders() },
           body: JSON.stringify({ url: utilityInput.trim(), format: targetFormat, quality }),
         });
         res = await res.json();

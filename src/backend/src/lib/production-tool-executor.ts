@@ -286,9 +286,11 @@ export function createProductionToolExecutor(opts: ProductionToolExecutorOptions
           return { name: funcName, args, result: `已停止：${reason}`, error: reason, durationMs: Date.now() - start };
         }
         // 用户已批准：直接调用底层工具执行（绕过 policy/approval，保留 timeout/cancel）
+        // 整改计划第 5 章：使用受控字段 internalApproved（而非 metadata.approvedByUser，
+        // 后者可被外部伪造绕过 PolicyEngine —— 多 Agent handoff 共享同一审批链）
         const approvedContext: ToolContext = {
           ...context,
-          metadata: { ...context.metadata, approvedByUser: true },
+          internalApproved: true,
         };
         const approvedResult = await executor.execute(funcName, args, approvedContext);
         switch (approvedResult.kind) {

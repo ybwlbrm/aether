@@ -2,6 +2,7 @@ import { useState, useRef, useEffect, useCallback } from 'react';
 import { motion } from 'framer-motion';
 import { Terminal as TerminalIcon, Play, Trash2, Clock, ChevronRight } from 'lucide-react';
 import { PageHeader } from '../components/PageHeader';
+import { authHeaders } from '../api/client';
 
 interface CommandEntry {
   id: string;
@@ -69,7 +70,7 @@ export function Terminal() {
     try {
       const res = await fetch('/api/terminal/execute', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+        headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest', ...authHeaders() },
         body: JSON.stringify({ command: cmd }),
       });
       const data = await res.json();

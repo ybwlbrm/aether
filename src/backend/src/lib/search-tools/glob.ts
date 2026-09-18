@@ -3,13 +3,21 @@ import { resolve, relative, sep } from 'node:path';
 import {
   GLOB_SKIP_DIRS,
   GLOB_HARD_LIMIT,
+  SENSITIVE_FILE_BASENAMES,
+  SENSITIVE_FILE_PATTERNS,
 } from './constants.js';
 import { isPathSafe, resolveSearchPath } from './path-utils.js';
 import { globToRegExp } from './glob-utils.js';
 
+/** 整改计划第 8 章（P1/P2）：判断文件是否命中敏感排除规则（basename 精确 + 路径模式） */
+function isSensitiveFile(fullPath: string, name: string): boolean {
+  if (SENSITIVE_FILE_BASENAMES.has(name.toLowerCase())) return true;
+  return SENSITIVE_FILE_PATTERNS.some((re) => re.test(fullPath.replace(/\\/g, '/')));
+}
+
 /**
  * glob — 按文件名/glob 模式递归搜索文件
- * 返回换行分隔的匹配文件绝对路径列表
+ * 整改计划第 8 章（P1/P2）：结果返回相对路径（不泄露绝对路径）；排除敏感文件
  */
 export function executeGlob(
   pattern: string,
@@ -52,10 +60,12 @@ export function executeGlob(
         if (lst.isDirectory()) {
           walk(fullPath, depth + 1);
         } else if (lst.isFile()) {
-          // 以 '/' 分隔的相对路径参与匹配（跨平台统一）
+          // 整改计划第 8 章：跳过敏感文件（数据库/配置/密钥/证书）
+          if (isSensitiveFile(fullPath, name)) continue;
+          // 以 '/' 分隔的相对路径参与匹配（跨平台统一）；返回相对路径而非绝对路径
           const relPath = relative(rootDir, fullPath).split(sep).join('/');
           if (pathRegex.test(relPath) || (basenameRegex && basenameRegex.test(name))) {
-            results.push(fullPath);
+            results.push(relPath);
             if (results.length >= GLOB_HARD_LIMIT) { truncated = true; return; }
           }
         }

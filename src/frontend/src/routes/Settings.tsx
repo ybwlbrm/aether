@@ -2,7 +2,7 @@ import { useEffect, useState, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Settings as SettingsIcon, Palette, Save, Image, Trash2, Plus, FolderOpen, FileText, Star, Check, Cloud, Upload, Download, RefreshCw, Link2, Unlink, Wrench, Search, BookOpen, Workflow, FolderKanban, Database, KeyRound, Globe, Activity, Shield, Compass } from 'lucide-react';
 import { useSafeTimeout } from '../hooks/useSafeTimeout';
-import { api } from '../api/client';
+import { api, authHeaders } from '../api/client';
 import { PageHeader } from '../components/PageHeader';
 import { confirm as confirmDialog } from '../components/ui/confirm-dialog';
 import { Tabs, TabList, TabTrigger } from '../components/ui/tabs';
@@ -153,7 +153,7 @@ function SyncSettings() {
   useEffect(() => {
     // 优先从后端恢复已保存的同步配置（重启后 Key 不丢失的核心修复）
     fetch('/api/sync/config', {
-      headers: { 'X-Requested-With': 'XMLHttpRequest' },
+      headers: { 'X-Requested-With': 'XMLHttpRequest', ...authHeaders() },
     }).then(r => r.json()).then((res: any) => {
       // P0-8 修复：后端不再回传明文 supabaseKey（凭证），只返回 hasKey。
       // URL 从后端恢复，Key 从本地 sessionStorage/localStorage 兜底。
@@ -266,7 +266,7 @@ function SyncSettings() {
     try {
       await fetch('/api/sync/disconnect', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+        headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest', ...authHeaders() },
         body: JSON.stringify({}),
       });
     } catch { /* ignore */ }

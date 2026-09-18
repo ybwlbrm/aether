@@ -38,6 +38,8 @@ export const messages = sqliteTable('messages', {
   toolResults: text('tool_results'), // JSON
   /** 推理内容（thinking 模式截获的 reasoning_content），多轮对话防"砖化"需要回传 */
   reasoningContent: text('reasoning_content'), // JSON string
+  /** 整改计划第 4 章（P1）：会话内稳定序号 —— 加载按 (created_at, seq) 稳定排序 */
+  seq: integer('seq').notNull().default(0),
   createdAt: text('created_at').notNull(),
 });
 

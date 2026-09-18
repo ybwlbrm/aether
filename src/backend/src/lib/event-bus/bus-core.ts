@@ -29,6 +29,13 @@ export function createEventBus(
   setWritePackedRow(writeRow);
 
   return {
+    /**
+     * @deprecated 整改计划第 6 章（P1）：legacy EventBus 仅保留为「只读适配器」边界。
+     * 新业务禁止直接 emit legacy 事件 —— 统一走 v2 EventStore（src/backend/src/core/events，
+     * events 表 + runId/seq 唯一约束 + 单一 projector）。本方法仅供既有模块兼容使用，
+     * 所有 SSE/replay/activity/workflow/sync 的读写已收敛到 v2 路径；此处保留双写
+     * 仅为平滑过渡（legacy activity_events 表），不得作为新代码的写入入口。
+     */
     emit(sessionId, eventType, fields = {}, options = {}) {
       const now = new Date().toISOString();
       const env: AgentEventEnvelope = {

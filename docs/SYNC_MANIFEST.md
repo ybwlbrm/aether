@@ -14,7 +14,7 @@
 | COMMON | electron/main.js（P1-17/18/19 修复） | ✅ 已同步 |
 | COMMON | android/app/build.gradle（versionCode 2 / versionName 2.0.0） | ✅ 已同步 |
 | COMMON | data/supabase-schema.sql、supabase-fix-rls.sql（RLS 安全架构） | ✅ 已同步 |
-| COMMON | docs/audit/（Baseline + AUDIT-FINDINGS + FIX-PLAN） | ✅ 已同步 |
+| PRIVATE_ONLY | 审计报告（AUDIT-REPORT.md / FINAL-ACCEPTANCE-MATRIX.md / PROJECT-MANIFEST.md / PRIVATE-CHANGESET.md / baseline-private.json / docs/audit/）— 已于 2026-09-18 删除，不再跟踪 | ⛔ 已删除 |
 | OPEN_SOURCE_ONLY | LICENSE | ✅ 保留开源版 |
 | PRIVATE_ONLY | data/（个人数据库/配置）、qa/（截图/SSE）、日志、签名密钥（*.jks/keystore.properties）、构建产物（dist*/build 产物/APK/EXE）、docs/architecture/BASELINE-2.0.md | ⛔ 未同步 |
 

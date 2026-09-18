@@ -225,7 +225,7 @@ npm run build:apk   # 需 JDK 21 + Android SDK
 > Supabase 同步是**可选功能**，仅当你需要 Android 远程控制时启用。
 
 1. 在 Supabase 控制台创建项目
-2. 在 **SQL Editor** 依次执行部署脚本（在 `docs/sql/` 目录）：
+2. 在 **SQL Editor** 依次执行部署脚本（在 `data/` 目录）：
    - `supabase-schema.sql` — 建表（devices / conversations_sync / messages_sync / remote_commands 等）
    - `supabase-fix-rls.sql` — 行级安全策略（RLS）
 3. 桌面端 **设置 → 同步**：填入 Supabase URL 与 Key
@@ -380,8 +380,7 @@ npm run release:build               # 跳过同步：仅打包 + 发布本地产
 ├── electron/            # Electron 主进程（启动/托盘/健康检查/恢复）
 ├── build/               # 打包脚本（bundle-backend / build-exe）
 ├── docs/
-│   ├── audit/           # 审计报告（Baseline / Findings / FixPlan / FINAL×4）
-│   ├── sql/             # Supabase 部署脚本（schema + RLS）
+│   ├── architecture/    # 架构基线文档
 │   └── SYNC_MANIFEST.md # 自用版 ↔ 开源版同步清单
 └── package.json         # workspace 根
 ```
@@ -399,7 +398,7 @@ npm run release:build               # 跳过同步：仅打包 + 发布本地产
 | Setup 装到自定义目录出错 | 已改为动态路径解析，任意目录克隆均可用 |
 | 想换语言 | 设置 → 界面 → 多语言切换 |
 | 数据在哪里 | `data/` 目录（数据库 + 配置），备份迁移整个目录即可 |
-| 手机连不上电脑 | 确认 Supabase 项目已执行 `docs/sql/` 两个脚本，且两端登录同一账号 |
+| 手机连不上电脑 | 确认 Supabase 项目已执行 `data/` 下两个脚本，且两端登录同一账号 |
 
 ---
 

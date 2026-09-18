@@ -9,11 +9,19 @@ import type { FastifyInstance } from 'fastify';
 import { getDb } from '../../db/client.js';
 import { providers, agentConfigs, conversations } from '../../db/schema/index.js';
 import { encrypt } from '../../lib/crypto.js';
+import { generateLocalAuthToken, getLocalAuthToken } from '../../lib/auth-token.js';
 
 let app: FastifyInstance;
 let baseUrl = '';
 let listenPort = 0;
 let convId = '';
+/** 整改计划第 1 章（P0）：auth-guard 默认拒绝 —— 测试请求必须携带 Bearer token */
+let authToken = '';
+
+/** 附加 Authorization 的请求头 */
+function authHeaders(extra: Record<string, string> = {}): Record<string, string> {
+  return { ...extra, Authorization: `Bearer ${authToken}` };
+}
 
 async function collectSse(url: string, init: RequestInit): Promise<{ eventName: string; data: any }[]> {
   const res = await fetch(url, init);
@@ -47,7 +55,12 @@ async function collectSse(url: string, init: RequestInit): Promise<{ eventName: 
 before(async () => {
   const dir = mkdtempSync(join(tmpdir(), 'pacc-oitest-'));
   const cfg = makeTestConfig(dir);
+  // 整改计划第 1 章：auth-guard 默认拒绝 —— 测试请求必须携带 Bearer token。
+  // 注意：buildApp() 内部会调用 generateLocalAuthToken() 重新生成 token，
+  // 因此必须在 buildApp 之后读取（否则拿到的是被覆盖前的旧 token，全部 401）。
   app = await buildApp(cfg);
+  authToken = getLocalAuthToken() || '';
+  assert.ok(authToken, 'buildApp 后应能读取本地认证 token');
   listenPort = await listenTestApp(app as never, cfg);
   baseUrl = await startMockProvider();
   const now = new Date().toISOString();
@@ -85,7 +98,7 @@ describe('agents/orchestrate 端点 — translate 管线 + agent.output.* 事件
   it('超级模式：子 Agent 过程 agent.message.delta 与最终 agent.output.delta 分离，task.completed 带 endReason', async () => {
     const events = await collectSse(`http://127.0.0.1:${listenPort}/api/agents/orchestrate`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+      headers: authHeaders({ 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' }),
       body: JSON.stringify({
         prompt: '简单问题 [scenario:text]',
         conversationId: convId,
@@ -101,7 +114,7 @@ describe('agents/orchestrate 端点 — translate 管线 + agent.output.* 事件
   it('tools 场景：fc 循环组装工具调用并执行（mock 只发 tool_calls，走 executeTool 需要真实工具 → 在无文件场景会以错误结果收尾，但不炸流）', async () => {
     const events = await collectSse(`http://127.0.0.1:${listenPort}/api/agents/orchestrate`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+      headers: authHeaders({ 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' }),
       body: JSON.stringify({
         prompt: '调用工具看看 [scenario:tools]',
         conversationId: convId,
@@ -118,7 +131,7 @@ describe('agents/orchestrate 端点 — translate 管线 + agent.output.* 事件
   it('truncated 场景：断流不静默 — 应有 error 事件或 task.failed', async () => {
     const events = await collectSse(`http://127.0.0.1:${listenPort}/api/agents/orchestrate`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+      headers: authHeaders({ 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' }),
       body: JSON.stringify({
         prompt: '截断你吧 [scenario:truncated]',
         conversationId: convId,

@@ -46,8 +46,17 @@ export interface ToolContext {
   /**
    * Arbitrary structured extensions carried through tool execution
    * (e.g. legacy session config for the adapter layer). Transport-agnostic.
+   *
+   * 安全边界（整改计划第 5 章）：metadata 是「不可信」的 —— 客户端/Agent 可任意注入，
+   * 因此绝不允许通过 metadata 传递 `approvedByUser` 等特权标记。审批通过状态使用
+   * 受控字段 `internalApproved`（由 ToolExecutor/生产执行器内部设置，外部无法伪造）。
    */
   metadata?: Record<string, unknown>;
+  /**
+   * 受控内部审批标记（整改计划第 5 章）：仅由生产执行器在真实 ApprovalGrant 消费后设置。
+   * 外部 metadata 中的 `approvedByUser` 一律忽略 —— 禁止通过 metadata 任意赋权。
+   */
+  internalApproved?: boolean;
 }
 
 /**

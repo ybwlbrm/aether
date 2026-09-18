@@ -24,7 +24,25 @@ jobs:
           cache: npm
 
       - name: Install deps
-        run: npm ci --no-audit --no-fund
+        # 整改计划第 11 章（P0/P1）：干净 runner 用 --ignore-scripts（禁用依赖安装脚本，
+        # 防止供应链攻击在 CI 执行任意代码）；lockfile 校验由 npm ci 隐式完成
+        # （lockfile 与 package.json 不同步会直接失败）
+        run: npm ci --ignore-scripts --no-audit --no-fund
+
+      - name: Verify lockfile consistency
+        # 整改计划第 11 章：lockfile 与 package.json 显式校验（workspaces 必须含全部 4 个子包）
+        run: |
+          node -e "
+            const lock = require('./package-lock.json');
+            const pkg = require('./package.json');
+            const lockWs = (lock.packages[''] && lock.packages[''].workspaces) || [];
+            const pkgWs = pkg.workspaces || [];
+            const missing = pkgWs.filter(w => !lockWs.includes(w));
+            const verOk = lock.packages[''].version === pkg.version;
+            if (missing.length > 0) { console.error('lockfile missing workspaces:', missing); process.exit(1); }
+            if (!verOk) { console.error('lockfile version mismatch:', lock.packages[''].version, 'vs', pkg.version); process.exit(1); }
+            console.log('LOCKFILE OK: workspaces=' + lockWs.join(',') + ' version=' + pkg.version);
+          "
 
       - name: Build shared
         run: npm run build -w src/shared
@@ -42,12 +60,25 @@ jobs:
         run: npm run build
 
   security-scan:
-    name: Security Scan (secrets + sensitive patterns)
+    name: Security Scan (secrets + sensitive patterns + audit)
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install deps (for audit)
+        run: npm ci --ignore-scripts --no-audit --no-fund
+
+      # 整改计划第 11 章（P0/P1）：安全关 —— npm audit 阻断已知高危依赖
+      - name: npm audit (high/critical blocker)
+        run: npm audit --audit-level=high || (echo "NPM AUDIT FAILED — 存在高危/严重漏洞"; exit 1)
 
       - name: Scan for secrets / service-role keys / private artifacts
         run: |

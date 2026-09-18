@@ -35,6 +35,11 @@ const cachedTools = new Map<string, McpToolDef[]>();
 const cachedToolsAt = new Map<string, number>();
 const CACHE_TTL_MS = 30_000; // 30 秒内不重新加载
 
+// 整改计划第 2 章（P0/P1）：callTool 并发信号量 + 连接 TTL
+const MAX_CONCURRENT_CALLS = 8; // 单进程最大并发 MCP 调用（防失控扇出）
+let activeCalls = 0;
+const CONNECTION_TTL_MS = 15 * 60_000; // 15 分钟未使用的连接将被关闭回收
+
 function parseCommand(cmd: string | null): string[] {
   if (!cmd) return [];
   try {
@@ -149,8 +154,45 @@ export async function listMcpTools(getServerEntries: () => McpServerEntry[]): Pr
   return allTools;
 }
 
-/** 调用 MCP 工具（不再自动注入 confirm:true — 用户须显式确认写操作） */
-export async function callMcpTool(serverName: string, toolName: string, args: any, getServerEntries: () => McpServerEntry[], permissionLevel?: number): Promise<string> {
+/** 关闭单个 MCP server 的连接（整改计划第 2 章：update/disable/delete 时关旧 transport） */
+export async function closeMcpServer(id: string): Promise<void> {
+  const entry = connectedClients.get(id);
+  if (!entry) return;
+  const { client, transport } = entry;
+  try { await client.close(); } catch (_e: unknown) { console.warn('[MCP] close client 失败:', _e); }
+  try { (transport as any).close?.(); } catch (_e: unknown) { console.warn('[MCP] close transport 失败:', _e); }
+  connectedClients.delete(id);
+  cachedTools.delete(id);
+  cachedToolsAt.delete(id);
+  lastActivityAt.delete(id);
+}
+
+/** 连接最后活动时间（TTL 回收用） */
+const lastActivityAt = new Map<string, number>();
+
+/** 回收超时未使用的连接（调用方在 callTool 前可周期性调用；返回关闭的连接数） */
+export function reapIdleMcpConnections(): number {
+  const now = Date.now();
+  const expired: string[] = [];
+  for (const [id, last] of lastActivityAt) {
+    if (now - last > CONNECTION_TTL_MS) expired.push(id);
+  }
+  for (const id of expired) void closeMcpServer(id);
+  return expired.length;
+}
+
+/**
+ * 调用 MCP 工具（整改计划第 2 章：AbortSignal 支持 + 并发上限）。
+ * 不再自动注入 confirm:true — 用户须显式确认写操作。
+ */
+export async function callMcpTool(
+  serverName: string,
+  toolName: string,
+  args: any,
+  getServerEntries: () => McpServerEntry[],
+  permissionLevel?: number,
+  signal?: AbortSignal,
+): Promise<string> {
   // P1-16 修复：Level 1（只读）模式下阻止所有 MCP 工具调用（MCP 工具可执行任意代码）
   // Level 3（超级）绕过所有限制
   if (permissionLevel === 1) {
@@ -158,37 +200,58 @@ export async function callMcpTool(serverName: string, toolName: string, args: an
   }
   const server = getServerEntries().find(s => s.enabled && s.name === serverName);
   if (!server) return `错误: MCP 服务器 "${serverName}" 未找到或未启用`;
+  // 整改计划第 2 章：并发上限 —— 超过限制直接拒绝，防止 MCP 工具失控扇出
+  if (activeCalls >= MAX_CONCURRENT_CALLS) {
+    return `错误: MCP 并发调用已达上限（${MAX_CONCURRENT_CALLS}），请稍后重试`;
+  }
+  activeCalls += 1;
   try {
     // P1-2: MCP 服务器不可达时 connectServer/callTool 可能永久挂起 — 用 Promise.race 加 60s 超时兜底，
     // 超时后 reject，由下方 catch 统一转为错误字符串返回给调用方
     let timeoutTimer: ReturnType<typeof setTimeout> | undefined;
-    const result = await Promise.race([
-      (async () => {
-        const { client } = await connectServer(server);
-        // P0-3: 不再自动注入 confirm:true — AI 调用写操作工具需经用户确认
-        // 调用方（agents/conversations）应通过 SSE 事件回传确认请求给前端
-        const callArgs = { ...(args || {}) };
-        return client.callTool({
-          name: toolName,
-          arguments: callArgs,
-        });
-      })().finally(() => { if (timeoutTimer !== undefined) clearTimeout(timeoutTimer); }),
-      new Promise<never>((_, reject) => {
-        timeoutTimer = setTimeout(() => reject(new Error('MCP 工具调用超时：60 秒内无响应')), 60_000);
-      }),
-    ]);
-    // result.content 是 [{type:'text', text}, ...]
-    if (result && (result as any).content) {
-      const text = (result as any).content
-        .filter((c: any) => c.type === 'text')
-        .map((c: any) => c.text)
-        .join('\n');
-      if (text) return text.slice(0, 4000);
+    let abortReject: ((e: Error) => void) | null = null;
+    const onAbort = () => abortReject?.(new Error('aborted'));
+    if (signal) {
+      if (signal.aborted) return `工具调用已取消`;
+      signal.addEventListener('abort', onAbort, { once: true });
     }
-    if ((result as any).isError) return `工具执行报错: ${JSON.stringify(result).slice(0, 800)}`;
-    return JSON.stringify(result).slice(0, 4000);
+    try {
+      const result = await Promise.race([
+        (async () => {
+          const { client } = await connectServer(server);
+          lastActivityAt.set(server.id, Date.now());
+          // P0-3: 不再自动注入 confirm:true — AI 调用写操作工具需经用户确认
+          // 调用方（agents/conversations）应通过 SSE 事件回传确认请求给前端
+          const callArgs = { ...(args || {}) };
+          return client.callTool({
+            name: toolName,
+            arguments: callArgs,
+          });
+        })().finally(() => { if (timeoutTimer !== undefined) clearTimeout(timeoutTimer); }),
+        new Promise<never>((_, reject) => {
+          abortReject = reject;
+          timeoutTimer = setTimeout(() => reject(new Error('MCP 工具调用超时：60 秒内无响应')), 60_000);
+        }),
+      ]);
+      lastActivityAt.set(server.id, Date.now());
+      // result.content 是 [{type:'text', text}, ...]
+      if (result && (result as any).content) {
+        const text = (result as any).content
+          .filter((c: any) => c.type === 'text')
+          .map((c: any) => c.text)
+          .join('\n');
+        if (text) return text.slice(0, 4000);
+      }
+      if ((result as any).isError) return `工具执行报错: ${JSON.stringify(result).slice(0, 800)}`;
+      return JSON.stringify(result).slice(0, 4000);
+    } finally {
+      if (signal) signal.removeEventListener('abort', onAbort);
+    }
   } catch (e: unknown) {
+    if (signal?.aborted) return `工具调用已取消`;
     return `工具调用失败: ${(e instanceof Error ? e.message : String(e))}`;
+  } finally {
+    activeCalls -= 1;
   }
 }
 

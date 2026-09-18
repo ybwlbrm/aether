@@ -7,8 +7,13 @@ import assert from 'node:assert/strict';
 import {
   createPendingApproval,
   decideApproval,
+  consumeApproval,
   listPendingApprovals,
+  getApprovalGrant,
+  __setGrantExpiresAtForTest,
   clearPendingApprovals,
+  hashToolArgs,
+  DEFAULT_ISSUER,
 } from './approvals-center.js';
 
 describe('lib/approvals-center', () => {
@@ -228,6 +233,79 @@ describe('lib/approvals-center', () => {
       const result = await promise;
       assert.equal(result.approved, false);
       assert.equal(result.decision, 'timeout');
+    });
+  });
+
+  describe('ApprovalGrant 持久化字段（整改计划第 1 章，P0）', () => {
+    test('grant 含 grantId/runId/taskId/toolName/argsHash/issuer/expiresAt/consumedAt', () => {
+      const { id } = createPendingApproval({
+        toolName: 'write_file',
+        args: { path: 'a.txt', content: 'hello' },
+        prompt: () => {},
+        runId: 'run-xyz',
+        taskId: 'task-xyz',
+        issuer: 'local',
+      });
+      const grant = getApprovalGrant(id);
+      assert.ok(grant, 'grant 应存在');
+      assert.equal(grant!.grantId, id);
+      assert.equal(grant!.runId, 'run-xyz');
+      assert.equal(grant!.taskId, 'task-xyz');
+      assert.equal(grant!.toolName, 'write_file');
+      assert.equal(grant!.argsHash, hashToolArgs({ path: 'a.txt', content: 'hello' }));
+      assert.equal(grant!.issuer, 'local');
+      assert.ok(grant!.expiresAt > Date.now(), 'expiresAt 应在未来');
+      assert.equal(grant!.consumedAt, null, '创建时未消费');
+    });
+
+    test('默认 issuer 为 local（DEFAULT_ISSUER）', () => {
+      const { id } = createPendingApproval({ toolName: 't', args: {}, prompt: () => {} });
+      assert.equal(getApprovalGrant(id)!.issuer, DEFAULT_ISSUER);
+    });
+  });
+
+  describe('consumeApproval 原子消费（整改计划第 1 章，P0）', () => {
+    test('同一 grant 重放 → 第二次 ALREADY_CONSUMED（不允许重复批准）', () => {
+      const { id } = createPendingApproval({ toolName: 't', args: {}, prompt: () => {} });
+      const first = consumeApproval(id, 'approved');
+      assert.equal(first.ok, true);
+      const replay = consumeApproval(id, 'rejected');
+      assert.equal(replay.ok, false);
+      assert.equal(replay.code, 'ALREADY_CONSUMED', '重放必须拒绝');
+    });
+
+    test('跨会话/跨标签页重复批准 → ALREADY_CONSUMED', () => {
+      const { id } = createPendingApproval({ toolName: 't', args: {}, prompt: () => {} });
+      assert.equal(consumeApproval(id, 'approved', 'remote:mobile').ok, true);
+      const second = consumeApproval(id, 'approved', 'local');
+      assert.equal(second.ok, false);
+      assert.equal(second.code, 'ALREADY_CONSUMED');
+    });
+
+    test('过期 grant → EXPIRED', () => {
+      const { id } = createPendingApproval({ toolName: 't', args: {}, prompt: () => {}, timeoutMs: 60_000 });
+      // 强制将内部 grant 标记为过期（模拟超时竞态窗口）
+      assert.equal(__setGrantExpiresAtForTest(id, Date.now() - 1000), true);
+      const res = consumeApproval(id, 'approved');
+      assert.equal(res.ok, false);
+      assert.equal(res.code, 'EXPIRED');
+    });
+
+    test('不存在的 grant → NOT_FOUND', () => {
+      const res = consumeApproval('apr-does-not-exist', 'approved');
+      assert.equal(res.ok, false);
+      assert.equal(res.code, 'NOT_FOUND');
+    });
+
+    test('成功消费后记录 consumedAt 与 decision，且从列表移除', async () => {
+      const { id, promise } = createPendingApproval({ toolName: 't', args: { a: 1 }, prompt: () => {} });
+      const res = consumeApproval(id, 'approved', 'local');
+      assert.equal(res.ok, true);
+      assert.ok(res.grant.consumedAt !== null, 'consumedAt 应被记录');
+      assert.equal(res.grant.decision, 'approved');
+      assert.equal(listPendingApprovals().length, 0, '消费后从 pending 列表移除');
+      const result = await promise;
+      assert.equal(result.approved, true);
     });
   });
 });

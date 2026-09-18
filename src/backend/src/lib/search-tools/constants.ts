@@ -77,6 +77,38 @@ export const FORBIDDEN_PATH_PATTERNS = [
   '.git',
 ];
 
+// 整改计划第 8 章（P1/P2）：本地搜索默认排除的敏感文件（basename 精确匹配）
+// —— 数据库 / 同步配置 / 加密密钥 / token/key/cookie/证书 / 构建产物
+export const SENSITIVE_FILE_BASENAMES = new Set([
+  // 数据库与同步配置
+  'pacc.db', 'pacc-test.db', 'sync-config.json',
+  // 加密密钥与凭据
+  '.encryption_key', '.encryption_key.backup', 'keystore.properties',
+  // 凭据/token/证书
+  'credentials.json', 'credentials', 'id_rsa', 'id_ed25519', 'id_dsa',
+  '.npmrc', '.pypirc', '.netrc', '.env', '.env.local', '.env.production',
+  'service-account.json', 'service_account.json',
+  // 证书
+  'cert.pem', 'key.pem', 'certificate.pem', 'chain.pem', 'fullchain.pem', 'privkey.pem',
+]);
+
+/** 敏感文件后缀（正则匹配文件路径）—— token/key/cookie/证书/私钥模式 */
+export const SENSITIVE_FILE_PATTERNS = [
+  /\.(pem|key|p12|pfx|jks|keystore|cer|crt|der)$/i,        // 证书/密钥
+  /\.(env|secret|secrets)$/i,                                // 环境变量/机密
+  /(^|[\\/])\.(env|git-credentials|docker\/(config\.json|config\.json\.lock))$/i,
+  /token|apikey|api_key|secret|password|credential/i,        // 名称含凭据关键字的文件
+  /(^|[\\/])(pacc\.db|sync-config\.json|\.encryption_key.*)$/i,
+];
+
+/** 敏感内容脱敏 —— 匹配 key/token/password 等模式的行替换为占位符 */
+export const SENSITIVE_CONTENT_PATTERNS = [
+  /(sk-[a-zA-Z0-9]{20,})/g,                          // OpenAI 风格 key
+  /(['"])?(api[_-]?key|apikey|token|password|secret|authorization)(['"]?)\s*[:=]\s*['"]?[A-Za-z0-9_\-\.]{16,}['"]?/gi,
+  /Bearer\s+[A-Za-z0-9\-._~+\/]+=*/g,                // Bearer token
+  /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g, // 私钥块
+];
+
 export const GREP_SKIP_DIRS = new Set(['node_modules', '.git', 'dist']);
 export const GLOB_SKIP_DIRS = new Set(['node_modules', '.git']);
 export const GREP_MAX_DEPTH = 5;

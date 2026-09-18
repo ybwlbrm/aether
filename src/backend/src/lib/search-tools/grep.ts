@@ -1,19 +1,44 @@
 import { readdirSync, readFileSync, existsSync, statSync, lstatSync } from 'node:fs';
-import { resolve, sep } from 'node:path';
+import { resolve, relative, sep } from 'node:path';
 import {
   GREP_SKIP_DIRS,
   GREP_MAX_DEPTH,
   GREP_MAX_FILE_SIZE,
   GREP_HARD_LIMIT,
   GREP_LINE_PREVIEW,
+  SENSITIVE_FILE_BASENAMES,
+  SENSITIVE_FILE_PATTERNS,
+  SENSITIVE_CONTENT_PATTERNS,
 } from './constants.js';
 import { isPathSafe, resolveSearchPath } from './path-utils.js';
 import { compileIncludeFilter } from './glob-utils.js';
 import { isTextFile } from './text-utils.js';
 
+/** 整改计划第 8 章（P1/P2）：判断文件是否命中敏感排除规则（basename 精确 + 路径模式） */
+function isSensitiveFile(fullPath: string, name: string): boolean {
+  if (SENSITIVE_FILE_BASENAMES.has(name.toLowerCase())) return true;
+  return SENSITIVE_FILE_PATTERNS.some((re) => re.test(fullPath.replace(/\\/g, '/')));
+}
+
+/** 整改计划第 8 章（P1/P2）：对 snippet 做敏感内容脱敏（key/token/password/私钥 → 占位符） */
+export function redactSensitive(line: string): string {
+  let out = line;
+  for (const re of SENSITIVE_CONTENT_PATTERNS) {
+    out = out.replace(re, (match, ..._g) => {
+      // 私钥块整块替换
+      if (/PRIVATE KEY/.test(match)) return '[REDACTED_PRIVATE_KEY]';
+      // 常见 key/token：保留键名，值脱敏
+      if (/^-----BEGIN/.test(match) || /sk-[a-zA-Z0-9]{20,}/.test(match)) return '[REDACTED_KEY]';
+      const keyPart = match.match(/^(['"]?)(api[_-]?key|apikey|token|password|secret|authorization)\1/i)?.[0] ?? '';
+      return keyPart ? `${keyPart}=[REDACTED]` : '[REDACTED]';
+    });
+  }
+  return out;
+}
+
 /**
  * grep — 使用正则表达式递归搜索文件内容
- * 返回格式：`filepath:line: matched text`
+ * 整改计划第 8 章（P1/P2）：返回相对路径（不泄露绝对路径）；排除敏感文件；snippet 脱敏
  */
 export function executeGrep(
   pattern: string,
@@ -49,8 +74,11 @@ export function executeGrep(
     /** 在单个文件中执行正则匹配 */
     const searchFile = (fullPath: string): void => {
       if (truncated) return;
-      if (includeMatcher && !includeMatcher(fullPath.split(sep).pop() || '')) return;
-      if (!isTextFile(fullPath.split(sep).pop() || '')) return;
+      const basename = fullPath.split(sep).pop() || '';
+      // 整改计划第 8 章：跳过敏感文件（数据库/配置/密钥/证书）
+      if (isSensitiveFile(fullPath, basename)) return;
+      if (includeMatcher && !includeMatcher(basename)) return;
+      if (!isTextFile(basename)) return;
       let stat;
       try { stat = statSync(fullPath); } catch { return; }
       if (!stat.isFile() || stat.size > GREP_MAX_FILE_SIZE) return;
@@ -61,7 +89,10 @@ export function executeGrep(
         for (let i = 0; i < lines.length; i++) {
           regex.lastIndex = 0;
           if (regex.test(lines[i])) {
-            matches.push(`${fullPath}:${i + 1}: ${lines[i].trim().slice(0, GREP_LINE_PREVIEW)}`);
+            // 相对路径 + 脱敏 snippet
+            const relPath = relative(rootDir, fullPath).split(sep).join('/');
+            const snippet = redactSensitive(lines[i].trim().slice(0, GREP_LINE_PREVIEW));
+            matches.push(`${relPath}:${i + 1}: ${snippet}`);
             if (matches.length >= limit) { truncated = true; return; }
           }
         }

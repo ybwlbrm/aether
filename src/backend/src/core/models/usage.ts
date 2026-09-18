@@ -27,6 +27,7 @@ export interface UsageRecord {
 
 /**
  * Aggregated usage totals.
+ * 整改计划第 9 章（P2）：统一 inputTokens/outputTokens/totalTokens/cachedTokens/reasoningTokens schema。
  */
 export interface UsageTotals {
   /** Total input/prompt tokens */
@@ -35,6 +36,10 @@ export interface UsageTotals {
   outputTokens: number;
   /** Total tokens (input + output) */
   totalTokens: number;
+  /** 缓存命中的输入 token（部分 provider 上报；无则 0） */
+  cachedTokens?: number;
+  /** 推理 token（部分 provider 单独计数；无则 0） */
+  reasoningTokens?: number;
 }
 
 /**
@@ -73,15 +78,21 @@ export class UsageTracker {
       ? this.records.filter((r) => r.runId === runId)
       : this.records;
 
-    return filtered.reduce(
+    const totals = filtered.reduce(
       (acc, record) => {
         acc.inputTokens += record.usage.inputTokens ?? 0;
         acc.outputTokens += record.usage.outputTokens ?? 0;
         acc.totalTokens += record.usage.totalTokens ?? (record.usage.inputTokens ?? 0) + (record.usage.outputTokens ?? 0);
+        if (record.usage.cachedTokens != null) acc.cachedTokens = (acc.cachedTokens ?? 0) + record.usage.cachedTokens;
+        if (record.usage.reasoningTokens != null) acc.reasoningTokens = (acc.reasoningTokens ?? 0) + record.usage.reasoningTokens;
         return acc;
       },
-      { inputTokens: 0, outputTokens: 0, totalTokens: 0 }
+      { inputTokens: 0, outputTokens: 0, totalTokens: 0 } as UsageTotals
     );
+    // 缺失字段不输出 undefined 空键
+    if (totals.cachedTokens === 0) delete totals.cachedTokens;
+    if (totals.reasoningTokens === 0) delete totals.reasoningTokens;
+    return totals;
   }
 
   /**
@@ -128,8 +139,12 @@ export function aggregateUsage(usages: TokenUsage[]): TokenUsage {
       if (usage.reasoningTokens != null) {
         acc.reasoningTokens = (acc.reasoningTokens ?? 0) + usage.reasoningTokens;
       }
+      // 整改计划第 9 章：cachedTokens 累加
+      if (usage.cachedTokens != null) {
+        acc.cachedTokens = (acc.cachedTokens ?? 0) + usage.cachedTokens;
+      }
       return acc;
     },
-    { inputTokens: 0, outputTokens: 0, totalTokens: 0 }
+    { inputTokens: 0, outputTokens: 0, totalTokens: 0 } as TokenUsage
   );
 }

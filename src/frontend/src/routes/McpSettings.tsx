@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { PageHeader } from '../components/PageHeader';
-import { api } from '../api/client';
+import { api, authHeaders } from '../api/client';
 import { Server, Plus, Trash2, Play, Power, PowerOff, ExternalLink, Terminal, Download, BookOpen, CheckCircle2, XCircle, Eye } from 'lucide-react';
 import { confirm as confirmDialog } from '../components/ui/confirm-dialog';
 import { useAutosaveDraft } from '../hooks/useAutosaveDraft';
@@ -134,7 +134,7 @@ export function McpSettings() {
     setImporting(true);
     setImportResult(null);
     try {
-      const res = await (await fetch('/api/mcp/import', { method: 'POST', headers: { 'X-Requested-With': 'XMLHttpRequest' } })).json();
+      const res = await (await fetch('/api/mcp/import', { method: 'POST', headers: { 'X-Requested-With': 'XMLHttpRequest', ...authHeaders() } })).json();
       const msg = `✅ 导入成功: ${res.imported?.join(', ') || '无'}` + (res.errors?.length ? `\n❌ 错误: ${res.errors.join(', ')}` : '');
       setImportResult(msg);
       load();

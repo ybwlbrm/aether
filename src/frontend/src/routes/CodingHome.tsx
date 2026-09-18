@@ -2,6 +2,7 @@ import { useState, useRef, useEffect, useCallback, useMemo, memo } from 'react';
 import { useLocation } from 'react-router-dom';
 import { motion } from 'framer-motion';
 import { api } from '../api/client';
+import { authHeaders } from '../api/client';
 import { Send, Plus, Trash2, Mic, X, MessageSquare, XCircle } from 'lucide-react';
 import { useAppStore } from '../store/app';
 import { confirm as confirmDialog } from '../components/ui/confirm-dialog';
@@ -132,6 +133,8 @@ export function CodingHome() {
   const [loopMode, setLoopMode] = useState(false);
   const [retryInfo, setRetryInfo] = useState<{ attempt: number; maxRetries: number; status: number; delay: number } | null>(null);
   const [workspacePath, setWorkspacePath] = useState<string>('');
+  // 整改计划第 5 章（P1）：循环模式指标 —— 已用轮数/时长/工具调用（从 task.completed/failed metadata 读取）
+  const [loopMetrics, setLoopMetrics] = useState<{ turnsUsed: number; elapsedMs: number; toolCalls: number; budgetExceeded: string | null } | null>(null);
   // S2 修复：输入框上方思考横条实时内容（流式推理），无内容时隐藏
   const [liveReasoning, setLiveReasoning] = useState<string>('');
   // 模型选择器：当前选中的 provider 与 model（默认使用 defaultProviders.text）
@@ -141,6 +144,22 @@ export function CodingHome() {
   const providerInitialized = useRef(false);
 const currentConvRef = useRef<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
+
+  // 整改计划第 3 章（P0）：setActiveConversation — 同步 state + ref（+ 中断旧请求）。
+  // 原实现仅 setState，currentConvRef 由 useEffect 延迟同步；新建对话后立即 doSend 时
+  // ref 尚未更新 → doSend 内 currentConvRef.current !== convId 守卫丢弃首条消息的所有 SSE 事件。
+  const setActiveConversation = useCallback((id: string | null) => {
+    currentConvRef.current = id;
+    // 中断旧会话的 in-flight 请求（切换/新建/删除时取消旧轮询与流）
+    if (abortRef.current) {
+      try { abortRef.current.abort(); } catch { /* ignore */ }
+      abortRef.current = null;
+    }
+    // 递增轮询请求代次，丢弃过期响应
+    msgPollReqIdRef.current += 1;
+    activityPollReqIdRef.current += 1;
+    setCurrentConvId(id);
+  }, []);
   // Oracle 修复：rAF 卸载清理 — 防止组件卸载后 setMessages 警告
   const mountedRef = useRef(true);
   useEffect(() => () => { mountedRef.current = false; }, []);
@@ -161,8 +180,9 @@ const plusRef = useRef<HTMLDivElement>(null);
 
   // FE-DUP-01: 使用共享 useMessagePolling hook 替代内联轮询
   // 统一消息轮询逻辑：合并消息、token 统计、生成状态、reasoning 提取
+  // 整改计划第 3 章（P0）：显式状态机 {idle,polling,error,retrying} + AbortController + retry
   const notifiedRef = useRef(false);
-  useMessagePolling({
+  const { pollStatus: msgPollStatus, pollErrorInfo: msgPollErrorInfo, retry: retryPolling } = useMessagePolling({
     conversationId: currentConvId,
     enabled: !!currentConvId,
     intervalMs: 1000,
@@ -241,7 +261,7 @@ useEffect(() => {
     if (params.get('new') === 'true') {
       window.history.replaceState({}, '', '/command-center');
       sessionStorage.removeItem('aether_pending_remote');
-      setCurrentConvId(null);
+      setActiveConversation(null);
       setMessages([]);
       setCurrentConvTokenTotal(0);
       setStreamTokens(null);
@@ -309,7 +329,7 @@ useEffect(() => {
         try {
           const conv = await api.getConversation(convId);
           if (cancelled) return;
-          setCurrentConvId(convId);
+          setActiveConversation(convId);
           setMessages((conv.messages || []).map((m: any) => ({
             id: m.id, role: m.role, content: m.content, createdAt: m.createdAt,
           })));
@@ -451,7 +471,7 @@ useEffect(() => {
   // 原实现提前创建的空对话会出现在侧栏列表中，用户点击后看到的是空白无消息的对话。
   const handleNew = () => {
     setPlusMenuOpen(false);
-    setCurrentConvId(null);
+    setActiveConversation(null);
     setMessages([]);
     setCurrentConvTokenTotal(0);
     setStreamTokens(null);
@@ -465,7 +485,7 @@ const handleSelectConv = async (id: string) => {
       const conv = await api.getConversation(id);
       // 守卫：若已发起新的加载请求，丢弃当前响应
       if (reqId !== loadReqIdRef.current) return;
-      setCurrentConvId(id);
+      setActiveConversation(id);
       setMessages((conv.messages || []).map((m: any) => {
         let reasoning: string | undefined;
         if (m.toolResults) {
@@ -508,7 +528,7 @@ const handleSelectConv = async (id: string) => {
     // 同时检查 agents 端
     fetch('/api/agents/cancel', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+      headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest', ...authHeaders() },
       body: JSON.stringify({ conversationId: currentConvId }),
     }).then(r => r.json()).then(data => {
       if (!cancelled && data.success === false && data.message === '没有正在进行的生成') {
@@ -525,10 +545,10 @@ const handleSelectConv = async (id: string) => {
       // 同步删除 Supabase 记录（手机端同步）
       await fetch('/api/sync/delete-conversation', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+        headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest', ...authHeaders() },
         body: JSON.stringify({ conversationId: id }),
       }).catch(() => {}); // 后端未配置同步时静默忽略
-      if (currentConvId === id) { setCurrentConvId(null); setMessages([]); setCurrentConvTokenTotal(0); }
+      if (currentConvId === id) { setActiveConversation(null); setMessages([]); setCurrentConvTokenTotal(0); }
       load();
     } catch (e: unknown) { alert('Delete failed: ' + (e instanceof Error ? e.message : String(e))); }
   };
@@ -550,7 +570,10 @@ const handleSelectConv = async (id: string) => {
       // 纯图片发送时用默认标题
       const convTitle = content || '图片消息';
       const conv = await api.createConversation({ title: convTitle.slice(0, 30), providerId: dp.id, model });
-      setCurrentConvId(conv.id);
+      // 整改计划第 3 章（P0）：创建成功后立即同步 currentConvRef ——
+      // 原实现仅 setState，ref 由 useEffect 延迟同步；紧跟的 doSend 内
+      // currentConvRef.current !== convId 守卫会丢弃首条消息的所有 SSE 事件。
+      setActiveConversation(conv.id);
       // 修复：创建新对话后立即刷新对话列表，否则新对话不会出现在侧栏中
       load();
       window.dispatchEvent(new CustomEvent('conversations-changed'));
@@ -565,6 +588,7 @@ const handleSelectConv = async (id: string) => {
     setRetryInfo(null);
     setStreamTokens(null);
     setLiveReasoning(''); // S2：新一轮发送清空思考横条
+    setLoopMetrics(null); // 整改计划第 5 章：新一轮清空循环指标
     // 分离图片和其他文件
     const imageAttachments = (attachments || []).filter(a => a.dataUrl.startsWith('data:image/'));
     const fileAttachments = (attachments || []).filter(a => !a.dataUrl.startsWith('data:image/'));
@@ -634,6 +658,15 @@ await streamOrchestrate(
                   const ev = event.ev;
                   // 统一协议事件 → Activity Store（过程区：任务卡/工具/Agent 状态）
                   useActivityStore.getState().appendEvent(convId, ev);
+                  // 整改计划第 5 章（P1）：循环模式指标 —— 终态事件携带 turnsUsed/elapsedMs/toolCalls
+                  if ((ev.eventType === 'task.completed' || ev.eventType === 'task.failed') && ev.metadata && typeof ev.metadata.turnsUsed === 'number') {
+                    setLoopMetrics({
+                      turnsUsed: Number(ev.metadata.turnsUsed),
+                      elapsedMs: Number(ev.metadata.elapsedMs || 0),
+                      toolCalls: Number(ev.metadata.toolCalls || 0),
+                      budgetExceeded: ev.metadata.budgetExceeded ? String(ev.metadata.budgetExceeded) : null,
+                    });
+                  }
                   // ask-user 审批：Level 1 敏感工具需用户确认 → 弹确认框并把决定回传
                   if (ev.eventType === 'task.ask-confirm' && ev.metadata?.approvalId) {
                     const apId = String(ev.metadata.approvalId);
@@ -896,7 +929,7 @@ await streamConversation(
           try {
             const res = await fetch('/api/conversations/stt', {
               method: 'POST',
-              headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+              headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest', ...authHeaders() },
               body: JSON.stringify({ audio: base64 }),
             });
             if (res.ok) {
@@ -1056,6 +1089,12 @@ await streamConversation(
           {hasMessages && currentConvTokenTotal > 0 && <span>⚡ 对话累计: {currentConvTokenTotal.toLocaleString()} tokens</span>}
           {hasMessages && currentConvTokenTotal === 0 && !sending && <span>⚡ 对话累计: 暂无数据</span>}
           {streamTokens && <span>· 本次: {streamTokens.total_tokens.toLocaleString()} tokens</span>}
+          {/* 整改计划第 5 章（P1）：循环模式指标 —— 已用轮数/时长/工具调用 */}
+          {loopMode && loopMetrics && !sending && (
+            <span style={{ color: 'var(--color-warning)' }} title={loopMetrics.budgetExceeded ? `预算耗尽: ${loopMetrics.budgetExceeded}` : undefined}>
+              ♾️ {loopMetrics.turnsUsed} 轮 · {(loopMetrics.elapsedMs / 1000).toFixed(1)}s · {loopMetrics.toolCalls} 次工具{loopMetrics.budgetExceeded ? ' · ⚠️ 预算耗尽' : ''}
+            </span>
+          )}
           {workspacePath && <span>📁 <span style={{ maxWidth: 120, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', display: 'inline-block' }}>{workspacePath}</span></span>}
         </div>
         <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
@@ -1126,6 +1165,18 @@ await streamConversation(
           <button onClick={() => { setLoadError(null); load(); }} style={{ marginLeft: 8, background: 'none', border: 'none', color: 'inherit', cursor: 'pointer', textDecoration: 'underline' }}>重试</button>
         </div>
       )}
+      {/* 整改计划第 3 章（P0）：轮询失败显式状态机 —— 重试按钮调用 poll()（而非 load()） */}
+      {(msgPollStatus === 'error' || msgPollStatus === 'retrying') && msgPollErrorInfo && (
+        <div style={{ width: '100%', maxWidth: 720, padding: '8px 16px', marginBottom: 8, borderRadius: 8, background: 'rgba(245,158,11,0.1)', border: '1px solid rgba(245,158,11,0.3)', color: 'var(--color-warning)', fontSize: 13, textAlign: 'center' }}>
+          {msgPollStatus === 'error' ? '⚠️ 消息轮询失败' : '🔄 消息轮询重试中'}：{msgPollErrorInfo.message}
+          {msgPollErrorInfo.lastSuccessAt && <span style={{ opacity: 0.7 }}>（最后成功 {new Date(msgPollErrorInfo.lastSuccessAt).toLocaleTimeString()}）</span>}
+          {msgPollStatus === 'error' && (
+            <button onClick={() => { setLoadError(null); retryPolling(); }} style={{ marginLeft: 8, background: 'none', border: 'none', color: 'inherit', cursor: 'pointer', textDecoration: 'underline' }}>
+              立即重试
+            </button>
+          )}
+        </div>
+      )}
       {!hasMessages ? (
         <div style={{ width: '100%', maxWidth: 840, padding: '0 24px' }}>
           <motion.div initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.5 }}>
@@ -1139,7 +1190,23 @@ await streamConversation(
           </motion.div>
         </div>
       ) : (
-        <div ref={messageListRef} onScroll={handleScroll} aria-live="polite" aria-atomic="true" style={{ width: '100%', maxWidth: 840, padding: '0 24px', paddingBottom: 120, overflowY: 'auto', maxHeight: 'calc(100vh - 180px)' }}>
+        <div ref={messageListRef} onScroll={handleScroll} aria-live="polite" aria-atomic="true" style={{ width: '100%', maxWidth: 840, padding: '0 24px', paddingBottom: 120, overflowY: 'auto', maxHeight: 'calc(100vh - 180px)', overflowAnchor: 'none', position: 'relative' }}>
+          {/* 整改计划第 4 章（P1）：用户上滑阅读时提供"回到底部"按钮（仅用户离开底部时显示） */}
+          {userScrolledUp && (
+            <button
+              onClick={() => { setUserScrolledUp(false); const el = messageListRef.current; if (el) el.scrollTop = el.scrollHeight; }}
+              style={{
+                position: 'sticky', top: 8, zIndex: 5, display: 'block', margin: '0 auto 8px',
+                fontSize: 12, padding: '4px 14px', borderRadius: 99, cursor: 'pointer',
+                background: 'var(--bg-surface)', color: 'var(--color-accent)',
+                border: '1px solid var(--border-primary)', boxShadow: '0 2px 12px rgba(0,0,0,0.3)',
+              }}
+              title="回到最新消息"
+              aria-label="回到底部"
+            >
+              ⬇ 回到底部
+            </button>
+          )}
           {messages.map((msg, i) => {
             const isLastAssistant = msg.role === 'assistant' && (i === messages.length - 1 || messages[i + 1]?.role === 'user');
             return (

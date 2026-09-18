@@ -70,6 +70,11 @@ import { ActivityStream } from '../components/activity/ActivityStream';
 
 export function Chat() {
   const [providers, setProviders] = useState<any[]>([]);
+  // 整改计划第 8 章（P1）：Provider 选择按 providerId（原实现用 conversationId 匹配
+  // provider.id —— conversationId 是 UUID，永远匹配不上，导致 selectedProvider 恒为 null）
+  const [chatSelectedProvider, setChatSelectedProvider] = useState<any>(null);
+  // 标记是否已初始化默认 provider（防止 load 覆盖用户手动选择）
+  const chatProviderInitRef = useRef(false);
   const [listCollapsed, setListCollapsed] = useState(false);
   const [mode, setMode] = useState<'normal' | 'super'>('normal');
   const [deepThinking, setDeepThinking] = useState(false);
@@ -90,6 +95,20 @@ export function Chat() {
   const initDoneRef = useRef(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
+  // 整改计划第 3 章（P0）：setActiveConversation — 同步 state + ref（+ 中断旧请求 + 递增轮询代次）。
+  // 原实现仅 setState，currentConvRef 由 useEffect 延迟同步；新建对话后立即发送时
+  // ref 尚未更新 → useStreamSend 内 currentConvRef.current !== convId 守卫丢弃首条消息 SSE 事件。
+  const setActiveConversation = useCallback((id: string | null) => {
+    currentConvRef.current = id;
+    if (abortRef.current) {
+      try { abortRef.current.abort(); } catch { /* ignore */ }
+      abortRef.current = null;
+    }
+    msgPollReqIdRef.current += 1;
+    activityPollReqIdRef.current += 1;
+    setCurrentConv(id);
+  }, []);
+
   // useConversations hook
   const {
     conversations,
@@ -102,11 +121,11 @@ export function Chat() {
     setConversations,
   } = useConversations({
     onSelect: (id) => {
-      setCurrentConv(id);
+      setActiveConversation(id);
       loadMessages(id);
     },
     onCreate: (conv) => {
-      setCurrentConv(conv.id);
+      setActiveConversation(conv.id);
       setMessages([]);
       setCurrentConvTokenTotal(0);
     },
@@ -120,10 +139,12 @@ export function Chat() {
   const [liveReasoning, setLiveReasoning] = useState<string>('');
   const [retryInfo, setRetryInfo] = useState<{ attempt: number; maxRetries: number; status: number; delay: number } | null>(null);
   const [streamTokens, setStreamTokens] = useState<{ prompt_tokens: number; completion_tokens: number; total_tokens: number } | null>(null);
+  // 整改计划第 5 章（P1）：循环模式指标 —— 已用轮数/时长/工具调用（从 task.completed/failed metadata 读取）
+  const [loopMetrics, setLoopMetrics] = useState<{ turnsUsed: number; elapsedMs: number; toolCalls: number; budgetExceeded: string | null } | null>(null);
 
   const loadMessages = useCallback(async (id: string) => {
     const reqId = ++msgPollReqIdRef.current;
-    setCurrentConv(id);
+    setActiveConversation(id);
     setStreamTokens(null);
     setRetryInfo(null);
     setLoadError(null);
@@ -165,7 +186,7 @@ export function Chat() {
     deepThinking,
     webSearch,
     loopMode,
-    selectedProvider: providers.find(p => p.id === currentConv) || null,
+    selectedProvider: chatSelectedProvider,
     selectedModel: undefined,
     attachments: [],
     onSendStart: () => {
@@ -174,6 +195,7 @@ export function Chat() {
       setRetryInfo(null);
       setStreamTokens(null);
       setLiveReasoning('');
+      setLoopMetrics(null); // 整改计划第 5 章：新一轮清空循环指标
     },
     onSendEnd: (success) => {
       if (success) {
@@ -194,7 +216,8 @@ export function Chat() {
   });
 
   // useMessagePolling hook
-  useMessagePolling({
+  // 整改计划第 3 章（P0）：显式状态机 {idle,polling,error,retrying} + AbortController + retry
+  const { pollStatus: msgPollStatus, pollErrorInfo: msgPollErrorInfo, retry: retryPolling } = useMessagePolling({
     conversationId: currentConv,
     enabled: !!currentConv,
     intervalMs: 2000,
@@ -213,6 +236,25 @@ export function Chat() {
     getLastSeq: (convId) => useActivityStore.getState().getLastSeq(convId),
   });
 
+  // 整改计划第 5 章（P1）：循环模式指标 —— 从 activityStore 终态事件（task.completed/failed）读取
+  useEffect(() => {
+    if (!currentConv) { setLoopMetrics(null); return; }
+    const events = useActivityStore.getState().getEvents(currentConv);
+    // 从最新事件往回找终态事件
+    for (let i = events.length - 1; i >= 0; i--) {
+      const ev = events[i];
+      if ((ev.eventType === 'task.completed' || ev.eventType === 'task.failed') && ev.metadata && typeof ev.metadata.turnsUsed === 'number') {
+        setLoopMetrics({
+          turnsUsed: Number(ev.metadata.turnsUsed),
+          elapsedMs: Number(ev.metadata.elapsedMs || 0),
+          toolCalls: Number(ev.metadata.toolCalls || 0),
+          budgetExceeded: ev.metadata.budgetExceeded ? String(ev.metadata.budgetExceeded) : null,
+        });
+        return;
+      }
+    }
+  }, [currentConv, sending]);
+
   // Unified initialization
   useEffect(() => {
     if (initDoneRef.current) return;
@@ -221,7 +263,16 @@ export function Chat() {
     loadConversations();
     requestNotificationPermission();
 
-    api.getProviders().then((data: any[]) => setProviders(Array.isArray(data) ? data : [])).catch(() => {});
+    api.getProviders().then((data: any[]) => {
+      const list = Array.isArray(data) ? data : [];
+      setProviders(list);
+      // 整改计划第 8 章（P1）：默认选择 text 能力的第一个 provider（按 providerId 记录）
+      if (!chatProviderInitRef.current && list.length > 0) {
+        const textProv = list.find((p: any) => p.capabilities?.includes?.('text')) || list[0];
+        setChatSelectedProvider(textProv);
+        chatProviderInitRef.current = true;
+      }
+    }).catch(() => {});
     api.getWorkspace().then((res: any) => setWorkspacePath(res?.defaultDir || '')).catch(() => {});
     api.getPermissions().then((res: any) => setPermissionLevel(res?.level ?? 2)).catch(() => {});
 
@@ -244,7 +295,7 @@ export function Chat() {
         const model = Array.isArray(dp.models) && dp.models[0] ? dp.models[0] : (dp.defaultModel || 'gpt-4o');
         try {
           const conv = await api.createConversation({ title: q.slice(0, 30), providerId: dp.id, model });
-          setCurrentConv(conv.id);
+          setActiveConversation(conv.id);
           const res = await api.sisyphusReply({ prompt: q, conversationId: conv.id, providerId: dp.id, model });
           if (res?.conversationId) {
             await loadMessages(res.conversationId);
@@ -269,14 +320,41 @@ export function Chat() {
   useEffect(() => { currentConvRef.current = currentConv; }, [currentConv]);
   useEffect(() => { mountedRef.current = true; return () => { mountedRef.current = false; }; }, []);
 
+  // 整改计划第 4 章（P1）：用户滚动意图锁 —— 用户手动上滑则停止自动滚底
+  const messageListRef = useRef<HTMLDivElement>(null);
+  const [userScrolledUp, setUserScrolledUp] = useState(false);
+  const isNearBottom = useCallback(() => {
+    const el = messageListRef.current;
+    if (!el) return true;
+    return el.scrollHeight - el.scrollTop - el.clientHeight < 100;
+  }, []);
+  const handleScroll = useCallback(() => {
+    setUserScrolledUp(!isNearBottom());
+  }, [isNearBottom]);
+  // 用户发送/接收新消息时视为主动回到底部
+  const scrollToBottom = useCallback(() => {
+    setUserScrolledUp(false);
+    const el = messageListRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, []);
+
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages, sending]);
+    // 整改计划第 4 章（P1）：只让消息列表容器负责滚动 ——
+    // 用户上滑阅读历史时不得被新 token/轮询/状态变化拉回底部；
+    // 仅当用户处于底部附近（或主动点了"回到底部"）才自动滚动。
+    if (userScrolledUp) return;
+    const el = messagesEndRef.current;
+    if (el) {
+      // 使用同一容器的 scrollTop/scrollHeight（scrollIntoView 会滚动祖先，行为不可控）
+      const container = el.parentElement;
+      if (container) container.scrollTop = container.scrollHeight;
+    }
+  }, [messages, sending, userScrolledUp]);
 
   const handleDelete = useCallback(async (id: string) => {
     await handleDeleteConversation(id);
     if (currentConv === id) {
-      setCurrentConv(null);
+      setActiveConversation(null);
       setMessages([]);
       setCurrentConvTokenTotal(0);
     }
@@ -404,13 +482,42 @@ export function Chat() {
         <div className="flex-1 flex flex-col min-h-0">
           {currentConv ? (
             <div style={{ padding: '16px', display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0 }}>
-              <div className="flex-1 overflow-y-auto min-h-0" style={{ display: 'flex', flexDirection: 'column', gap: 16, padding: '8px 8px 16px' }} aria-live="polite" aria-atomic="true">
+              <div ref={messageListRef} onScroll={handleScroll} className="flex-1 overflow-y-auto min-h-0" style={{ display: 'flex', flexDirection: 'column', gap: 16, padding: '8px 8px 16px', overflowAnchor: 'none', position: 'relative' }} aria-live="polite" aria-atomic="true">
+                {/* 整改计划第 4 章（P1）：用户上滑阅读时提供"回到底部"按钮 */}
+                {userScrolledUp && (
+                  <button
+                    onClick={scrollToBottom}
+                    style={{
+                      position: 'sticky', bottom: 8, alignSelf: 'center', zIndex: 5,
+                      fontSize: '12px', padding: '4px 14px', borderRadius: 99, cursor: 'pointer',
+                      background: 'var(--bg-surface)', color: 'var(--color-accent)',
+                      border: '1px solid var(--border-primary)', boxShadow: '0 2px 12px rgba(0,0,0,0.3)',
+                      transition: 'opacity 0.2s',
+                    }}
+                    title="回到最新消息"
+                    aria-label="回到底部"
+                  >
+                    ⬇ 回到底部
+                  </button>
+                )}
                 {loadError && (
                   <div className="flex flex-col items-center justify-center py-12" style={{ gap: 12 }}>
                     <div style={{ fontSize: '13px', color: 'var(--color-danger)' }}>⚠️ 消息加载失败: {loadError}</div>
                     <button className="btn btn-ghost" onClick={() => currentConv && loadMessages(currentConv)} style={{ fontSize: '13px' }}>
                       重试
                     </button>
+                  </div>
+                )}
+                {/* 整改计划第 3 章（P0）：轮询失败显式状态机 —— 重试按钮调用 poll()（而非 load()） */}
+                {(msgPollStatus === 'error' || msgPollStatus === 'retrying') && msgPollErrorInfo && (
+                  <div className="flex items-center justify-center" style={{ gap: 8, padding: '6px 0', fontSize: '12px', color: 'var(--color-warning)' }}>
+                    {msgPollStatus === 'error' ? '⚠️ 消息轮询失败' : '🔄 消息轮询重试中'}：{msgPollErrorInfo.message}
+                    {msgPollErrorInfo.lastSuccessAt && <span style={{ opacity: 0.7 }}>（最后成功 {new Date(msgPollErrorInfo.lastSuccessAt).toLocaleTimeString()}）</span>}
+                    {msgPollStatus === 'error' && (
+                      <button className="btn btn-ghost" onClick={() => { setLoadError(null); retryPolling(); }} style={{ fontSize: '12px', padding: '2px 10px' }}>
+                        立即重试
+                      </button>
+                    )}
                   </div>
                 )}
                 {!loadError && messageList.map((msg, i) => {
@@ -449,6 +556,12 @@ export function Chat() {
                      <span>📖 上下文: {contextTokens > 0 ? `${contextTokens.toLocaleString()} tokens` : `${messages.length} 条消息`}</span>
                      <span>⚡ 对话累计: {hasTokenData ? `${currentConvTokenTotal.toLocaleString()} tokens` : '暂无数据'}</span>
                      {streamTokens && <span>· 本次: {streamTokens.total_tokens.toLocaleString()} tokens</span>}
+                     {/* 整改计划第 5 章（P1）：循环模式指标 —— 已用轮数/时长/工具调用 */}
+                     {loopMode && loopMetrics && !sending && (
+                       <span style={{ color: 'var(--color-warning)' }} title={loopMetrics.budgetExceeded ? `预算耗尽: ${loopMetrics.budgetExceeded}` : undefined}>
+                         ♾️ {loopMetrics.turnsUsed} 轮 · {(loopMetrics.elapsedMs / 1000).toFixed(1)}s · {loopMetrics.toolCalls} 次工具{loopMetrics.budgetExceeded ? ' · ⚠️ 预算耗尽' : ''}
+                       </span>
+                     )}
                    </div>
                 <div className="flex items-center gap-2" style={{ fontSize: '11px', color: 'var(--text-tertiary)' }}>
                   {workspacePath && <span className="flex items-center gap-1">📁 <span className="truncate" style={{ maxWidth: 120, display: 'inline-block' }}>{workspacePath}</span></span>}

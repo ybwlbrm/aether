@@ -41,7 +41,11 @@ export function registerConversationRoutes(app: FastifyInstance, config: Backend
     const { id } = request.params as { id: string };
     const conv = db.select().from(conversations).where(eq(conversations.id, id)).get();
     if (!conv) throw AppError.notFound('对话', id);
-    const msgs = db.select().from(messages).where(eq(messages.conversationId, id)).orderBy(messages.createdAt).all();
+    // 整改计划第 4 章（P1）：稳定排序 (created_at, seq) —— 同毫秒消息顺序确定，杜绝乱序
+    const msgs = db.select().from(messages)
+      .where(eq(messages.conversationId, id))
+      .orderBy(messages.createdAt, messages.seq)
+      .all();
     // PF-01: 直接使用 conversations.token_total 列
     return { ...conv, messages: msgs, tokenTotal: conv.tokenTotal ?? 0 };
   });

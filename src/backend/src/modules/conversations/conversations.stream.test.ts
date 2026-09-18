@@ -9,11 +9,19 @@ import type { FastifyInstance } from 'fastify';
 import { getDb } from '../../db/client.js';
 import { providers } from '../../db/schema/index.js';
 import { encrypt } from '../../lib/crypto.js';
+import { generateLocalAuthToken, getLocalAuthToken } from '../../lib/auth-token.js';
 
 let app: FastifyInstance;
 let baseUrl = '';
 let providerId = '';
 let listenPort = 0;
+/** 整改计划第 1 章（P0）：auth-guard 默认拒绝 —— 测试请求必须携带 Bearer token */
+let authToken = '';
+
+/** 附加 Authorization 的请求头 */
+function authHeaders(extra: Record<string, string> = {}): Record<string, string> {
+  return { ...extra, Authorization: `Bearer ${authToken}` };
+}
 
 /** SSE 响应收集 */
 async function collectSse(url: string, init: RequestInit): Promise<{ eventName: string; data: any }[]> {
@@ -49,7 +57,12 @@ async function collectSse(url: string, init: RequestInit): Promise<{ eventName: 
 before(async () => {
   const dir = mkdtempSync(join(tmpdir(), 'pacc-itest-'));
   const cfg = makeTestConfig(dir);
+  // 整改计划第 1 章：auth-guard 默认拒绝 —— 测试请求必须携带 Bearer token。
+  // 注意：buildApp() 内部会调用 generateLocalAuthToken() 重新生成 token，
+  // 因此必须在 buildApp 之后读取（否则拿到的是被覆盖前的旧 token，全部 401）。
   app = await buildApp(cfg);
+  authToken = getLocalAuthToken() || '';
+  assert.ok(authToken, 'buildApp 后应能读取本地认证 token');
   listenPort = await listenTestApp(app as never, cfg);
   baseUrl = await startMockProvider();
   // 注册 provider（指向 mock）
@@ -76,7 +89,7 @@ describe('conversations 端点 — translate 管线集成', () => {
     // 创建对话
     const convRes = await fetch(`http://127.0.0.1:${listenPort}/api/conversations`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+      headers: authHeaders({ 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' }),
       body: JSON.stringify({ title: 'itest', providerId, model: 'mock-model' }),
     });
     assert.equal(convRes.status, 200);
@@ -84,7 +97,7 @@ describe('conversations 端点 — translate 管线集成', () => {
 
     const events = await collectSse(`http://127.0.0.1:${listenPort}/api/conversations/${conv.id}/messages`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+      headers: authHeaders({ 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' }),
       body: JSON.stringify({ content: '测试一下' }),
     });
 
@@ -104,13 +117,13 @@ describe('conversations 端点 — translate 管线集成', () => {
   it('S5b: reasoning 流（thinking 输入作为首条 user 消息触发 mock reasoning 场景）', async () => {
     const convRes = await fetch(`http://127.0.0.1:${listenPort}/api/conversations`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+      headers: authHeaders({ 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' }),
       body: JSON.stringify({ title: 'itest-r', providerId, model: 'mock-model' }),
     });
     const conv = await convRes.json() as { id: string };
     const events = await collectSse(`http://127.0.0.1:${listenPort}/api/conversations/${conv.id}/messages`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+      headers: authHeaders({ 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' }),
       body: JSON.stringify({ content: '带着推理 [scenario:reasoning]' }),
     });
     const names = events.map((e) => e.eventName);
@@ -122,13 +135,13 @@ describe('conversations 端点 — translate 管线集成', () => {
   it('S5c: args-bad 场景 — 工具参数非法 JSON 降级为文本，流不炸', async () => {
     const convRes = await fetch(`http://127.0.0.1:${listenPort}/api/conversations`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+      headers: authHeaders({ 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' }),
       body: JSON.stringify({ title: 'itest-bad', providerId, model: 'mock-model' }),
     });
     const conv = await convRes.json() as { id: string };
     const events = await collectSse(`http://127.0.0.1:${listenPort}/api/conversations/${conv.id}/messages`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+      headers: authHeaders({ 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' }),
       body: JSON.stringify({ content: '执行工具 [scenario:args-bad]' }),
     });
     const names = events.map((e) => e.eventName);

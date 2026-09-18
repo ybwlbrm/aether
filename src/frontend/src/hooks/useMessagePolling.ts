@@ -1,7 +1,18 @@
-import { useEffect, useRef, useCallback } from 'react';
+import { useEffect, useRef, useCallback, useState } from 'react';
 import { api } from '../api/client';
 import { fetchEvents } from '../api/streamClient';
 import { useActivityStore } from '../store/activityStore';
+
+/** 整改计划第 3 章（P0）：轮询显式状态机 */
+export type PollStatus = 'idle' | 'polling' | 'error' | 'retrying';
+
+/** 轮询错误详情（含类型 / 最后成功时间 / 下次重试倒计时） */
+export interface PollErrorInfo {
+  message: string;
+  type: 'message' | 'activity';
+  lastSuccessAt: number | null;
+  retryInMs: number;
+}
 
 export interface Message {
   id: string;
@@ -53,7 +64,16 @@ export interface UseMessagePollingOptions {
  * - FE-RACE-01: Separate request ID refs for message vs activity polling
  * - FE-ERR-06: Expose polling errors via onPollError callback
  */
-export function useMessagePolling(options: UseMessagePollingOptions) {
+export interface UseMessagePollingReturn {
+  /** 轮询显式状态机（整改计划第 3 章：{idle,polling,error,retrying}） */
+  pollStatus: PollStatus;
+  /** 轮询错误详情（含类型/最后成功时间/重试倒计时） */
+  pollErrorInfo: PollErrorInfo | null;
+  /** 立即重试：取消旧 interval、递增请求代次、调用 poll()（而非 load()） */
+  retry: () => void;
+}
+
+export function useMessagePolling(options: UseMessagePollingOptions): UseMessagePollingReturn {
   const {
     conversationId,
     enabled = true,
@@ -72,6 +92,16 @@ export function useMessagePolling(options: UseMessagePollingOptions) {
   } = options;
 
   const notifiedRef = useRef(false);
+  // 整改计划第 3 章：显式状态机 + AbortController（组件卸载/会话切换/重试时取消旧请求）
+  const [pollStatus, setPollStatus] = useState<PollStatus>('idle');
+  const [pollErrorInfo, setPollErrorInfo] = useState<PollErrorInfo | null>(null);
+  const abortRef = useRef<AbortController | null>(null);
+  const activityAbortRef = useRef<AbortController | null>(null);
+  const lastSuccessAtRef = useRef<number | null>(null);
+  const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pollErrorCountRef = useRef(0);
+  // retry 触发主轮询 effect 重启（interval 重建）
+  const [restartKey, setRestartKey] = useState(0);
 
   const poll = useCallback(async () => {
     const convId = conversationId;
@@ -80,8 +110,15 @@ export function useMessagePolling(options: UseMessagePollingOptions) {
     const reqId = ++msgPollReqIdRef.current;
     if (mountedRef && !mountedRef.current) return;
 
+    // 整改计划第 3 章：每个 poll 用独立 AbortController（卸载/切换/重试时取消）
+    if (abortRef.current) { try { abortRef.current.abort(); } catch { /* ignore */ } }
+    const controller = new AbortController();
+    abortRef.current = controller;
+    setPollStatus('polling');
+
     try {
-      const conv = await api.getConversation(convId);
+      const conv = await api.getConversation(convId, controller.signal);
+      if (controller.signal.aborted) return;
       if (mountedRef && !mountedRef.current) return;
       if (reqId !== msgPollReqIdRef.current) return; // FE-04/FE-08: discard stale
       if (currentConvRef.current !== convId) return; // FE-04: conversation switched
@@ -136,8 +173,10 @@ export function useMessagePolling(options: UseMessagePollingOptions) {
       try {
         const statusRes = await fetch(`/api/conversations/${convId}/status`, {
           headers: { 'X-Requested-With': 'XMLHttpRequest' },
+          signal: controller.signal,
         });
         const status = await statusRes.json();
+        if (controller.signal.aborted) return;
         if (reqId !== msgPollReqIdRef.current) return;
         if (currentConvRef.current !== convId) return;
 
@@ -162,11 +201,28 @@ export function useMessagePolling(options: UseMessagePollingOptions) {
           }
         } catch { /* ignore */ }
       }
+
+      // 整改计划第 3 章：成功 → 记录最后成功时间并复位状态机
+      lastSuccessAtRef.current = Date.now();
+      pollErrorCountRef.current = 0;
+      setPollStatus('idle');
+      setPollErrorInfo(null);
+      if (abortRef.current === controller) abortRef.current = null;
     } catch (e) {
+      if (controller.signal.aborted) return; // 主动取消（卸载/切换/重试）不算错误
       // FE-ERR-06: 不再静默吞错，通过回调向上层暴露
       if (e instanceof Error) {
         onPollError?.(e, 'message');
+        pollErrorCountRef.current += 1;
+        setPollStatus(pollErrorCountRef.current >= 3 ? 'error' : 'retrying');
+        setPollErrorInfo({
+          message: e.message,
+          type: 'message',
+          lastSuccessAt: lastSuccessAtRef.current,
+          retryInMs: intervalMs,
+        });
       }
+      if (abortRef.current === controller) abortRef.current = null;
     }
   }, [
     conversationId,
@@ -179,6 +235,7 @@ export function useMessagePolling(options: UseMessagePollingOptions) {
     msgPollReqIdRef,
     mountedRef,
     onPollError,
+    intervalMs,
   ]);
 
   const pollActivity = useCallback(async () => {
@@ -190,9 +247,15 @@ export function useMessagePolling(options: UseMessagePollingOptions) {
     const reqId = ++activityRef.current;
     if (mountedRef && !mountedRef.current) return;
 
+    // 整改计划第 3 章：活动轮询同样使用 AbortController
+    if (activityAbortRef.current) { try { activityAbortRef.current.abort(); } catch { /* ignore */ } }
+    const controller = new AbortController();
+    activityAbortRef.current = controller;
+
     try {
       const lastSeq = getLastSeq(convId);
-      const events = await fetchEvents(convId, lastSeq);
+      const events = await fetchEvents(convId, lastSeq, controller.signal);
+      if (controller.signal.aborted) return;
       if (mountedRef && !mountedRef.current) return;
       if (reqId !== activityRef.current) return;
       if (currentConvRef.current !== convId) return;
@@ -200,13 +263,35 @@ export function useMessagePolling(options: UseMessagePollingOptions) {
       if (events.length > 0) {
         useActivityStore.getState().appendEvents(convId, events);
       }
+      if (activityAbortRef.current === controller) activityAbortRef.current = null;
     } catch (e) {
+      if (controller.signal.aborted) return; // 主动取消不算错误
       // FE-ERR-06: 活动轮询错误也暴露出去
       if (e instanceof Error) {
         onPollError?.(e, 'activity');
+        pollErrorCountRef.current += 1;
+        setPollStatus(pollErrorCountRef.current >= 3 ? 'error' : 'retrying');
+        setPollErrorInfo((prev) => ({
+          message: e.message,
+          type: 'activity',
+          lastSuccessAt: prev?.lastSuccessAt ?? lastSuccessAtRef.current,
+          retryInMs: 2000,
+        }));
       }
+      if (activityAbortRef.current === controller) activityAbortRef.current = null;
     }
   }, [conversationId, pollActivityEvents, getLastSeq, currentConvRef, activityPollReqIdRef, msgPollReqIdRef, mountedRef, onPollError]);
+
+  // 整改计划第 3 章：retry —— 取消旧 interval、递增请求代次、立即调用 poll()（而非 load()）
+  const retry = useCallback(() => {
+    if (retryTimerRef.current) { clearTimeout(retryTimerRef.current); retryTimerRef.current = null; }
+    pollErrorCountRef.current = 0;
+    setPollErrorInfo(null);
+    setPollStatus('retrying');
+    // 强制重启主轮询 interval（通过递增一个"重启代次"状态触发 effect 重新执行）
+    setRestartKey((k) => k + 1);
+    void poll();
+  }, [poll]);
 
   // Main message polling
   useEffect(() => {
@@ -222,8 +307,14 @@ export function useMessagePolling(options: UseMessagePollingOptions) {
 
     runPoll();
     const interval = setInterval(runPoll, intervalMs);
-    return () => { cancelled = true; clearInterval(interval); };
-  }, [conversationId, enabled, intervalMs, poll]);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+      // 整改计划第 3 章：卸载/会话切换时取消 in-flight 请求
+      if (abortRef.current) { try { abortRef.current.abort(); } catch { /* ignore */ } abortRef.current = null; }
+      if (activityAbortRef.current) { try { activityAbortRef.current.abort(); } catch { /* ignore */ } activityAbortRef.current = null; }
+    };
+  }, [conversationId, enabled, intervalMs, poll, restartKey]);
 
   // Activity events polling (Chat.tsx)
   useEffect(() => {
@@ -239,5 +330,7 @@ export function useMessagePolling(options: UseMessagePollingOptions) {
     runPollActivity();
     const interval = setInterval(runPollActivity, 2000);
     return () => { cancelled = true; clearInterval(interval); };
-  }, [conversationId, pollActivityEvents, pollActivity]);
+  }, [conversationId, pollActivityEvents, pollActivity, restartKey]);
+
+  return { pollStatus, pollErrorInfo, retry };
 }

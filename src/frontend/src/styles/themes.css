@@ -139,3 +139,48 @@
   --status-busy: #fbbf24;
   --status-offline: rgba(0, 0, 0, 0.15);
 }
+
+/* ============================================================
+   整改计划第 8 章（P1/P2）：data-bg-active 对比度 token
+   data-bg-active=true（有背景图/轮播）时，保证文字/边框/卡片可读性。
+   与 data-glass-enabled（玻璃开关）分离：有背景且未开玻璃时，
+   卡片/输入框获得更实的底色兜底，避免背景透出导致对比度不足。
+   ============================================================ */
+[data-bg-active="true"][data-theme="dark"],
+[data-bg-active="true"]:root {
+  /* 文字对比度提升（背景图可能偏亮） */
+  --text-primary: rgba(255, 255, 255, 0.96);
+  --text-secondary: rgba(255, 255, 255, 0.72);
+  --text-tertiary: rgba(255, 255, 255, 0.52);
+  /* 无玻璃时的实底兜底（保证对比度） */
+  --bg-surface: rgba(12, 14, 20, 0.72);
+  --bg-surface-hover: rgba(255, 255, 255, 0.1);
+  --bg-elevated: rgba(10, 12, 18, 0.92);
+  --bg-overlay: rgba(0, 0, 0, 0.68);
+  --border-primary: rgba(255, 255, 255, 0.12);
+  --border-secondary: rgba(255, 255, 255, 0.06);
+  --card-bg: rgba(14, 16, 22, 0.72);
+  --card-border: rgba(255, 255, 255, 0.14);
+  --card-hover-bg: rgba(22, 26, 34, 0.8);
+  --input-bg: rgba(14, 16, 22, 0.72);
+  --input-border: rgba(255, 255, 255, 0.14);
+}
+
+[data-bg-active="true"][data-theme="light"] {
+  /* 浅色主题 + 背景图：文字加深保证可读 */
+  --text-primary: rgba(0, 0, 0, 0.92);
+  --text-secondary: rgba(0, 0, 0, 0.72);
+  --text-tertiary: rgba(0, 0, 0, 0.55);
+  /* 无玻璃时浅色实底兜底 */
+  --bg-surface: rgba(255, 255, 255, 0.78);
+  --bg-surface-hover: rgba(0, 0, 0, 0.06);
+  --bg-elevated: rgba(255, 255, 255, 0.92);
+  --bg-overlay: rgba(0, 0, 0, 0.32);
+  --border-primary: rgba(0, 0, 0, 0.1);
+  --border-secondary: rgba(0, 0, 0, 0.05);
+  --card-bg: rgba(255, 255, 255, 0.82);
+  --card-border: rgba(0, 0, 0, 0.1);
+  --card-hover-bg: rgba(255, 255, 255, 0.9);
+  --input-bg: rgba(255, 255, 255, 0.85);
+  --input-border: rgba(0, 0, 0, 0.1);
+}

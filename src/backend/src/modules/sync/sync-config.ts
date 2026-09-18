@@ -6,6 +6,8 @@ import { resolve } from 'node:path';
 import { getDb, saveDb } from '../../db/client.js';
 import { conversations, messages } from '../../db/schema/index.js';
 import { eq, desc } from 'drizzle-orm';
+import { createHmac } from 'node:crypto';
+import { encrypt, decrypt, isEncrypted } from '../../lib/crypto.js';
 
 // ============================================================
 // 同步配置管理
@@ -42,31 +44,59 @@ export function buildOwnershipFilters(cfg: SyncConfig | null): OwnershipFilters 
 }
 
 /**
- * 计算配置指纹：用于检测 URL/Key/deviceId 变化，触发重新注册
- * 仅包含影响身份/连接的字段，排除 deviceName/deviceType 等非关键字段
+ * 计算配置指纹（整改计划第 7 章，P1）：
+ * 改用 HMAC-SHA256 截断值 —— 日志/指纹绝不打印原始 Key、URL。
+ * 仅 URL/Key/deviceId 变化会导致指纹变化（deviceName/deviceType/userId 不影响身份连接）。
+ * 指纹 = HMAC-SHA256(appSecret, `${url}|${key}|${deviceId}`) 前 16 hex。
  */
+const FINGERPRINT_HMAC_KEY = 'aether-sync-config-fingerprint-v1';
+
 export function computeConfigFingerprint(cfg: SyncConfig | null): string {
   if (!cfg) return 'none';
-  return `${cfg.supabaseUrl}|${cfg.supabaseKey}|${cfg.deviceId}`;
+  const data = `${cfg.supabaseUrl}|${cfg.supabaseKey}|${cfg.deviceId}`;
+  return createHmac('sha256', FINGERPRINT_HMAC_KEY).update(data).digest('hex').slice(0, 16);
 }
 
 const SYNC_CONFIG_FILE = 'sync-config.json';
 
+/**
+ * 加载同步配置（整改计划第 7 章，P1）：优先读取加密格式（enc:iv:tag:ciphertext），
+ * 兼容旧版明文文件（向后迁移）。加密格式用 AES-256-GCM（encryptionKey 派生密钥）。
+ */
 export function loadSyncConfig(config: BackendConfig): SyncConfig | null {
   try {
     const path = resolve(config.dataDir, SYNC_CONFIG_FILE);
     if (existsSync(path)) {
-      return JSON.parse(readFileSync(path, 'utf-8'));
+      const raw = readFileSync(path, 'utf-8').trim();
+      if (!raw) return null;
+      if (isEncrypted(raw)) {
+        const plain = decrypt(raw, config.encryptionKey);
+        return JSON.parse(plain) as SyncConfig;
+      }
+      // 旧版明文格式：兼容读取（下次 persist 时自动加密落盘）
+      return JSON.parse(raw) as SyncConfig;
     }
-  } catch { /* ignore */ }
+  } catch (e: unknown) {
+    // 解密失败（密钥变更等）不崩溃，返回 null 让上层提示重新配置
+    console.warn('[Sync] sync-config.json 读取失败:', e instanceof Error ? e.message : String(e));
+  }
   return null;
 }
 
+/**
+ * 持久化同步配置（整改计划第 7 章，P1）：AES-256-GCM 加密落盘（OS secret store 不可用时加密文件等价）。
+ * 日志/磁盘绝不出现明文 supabaseKey。
+ */
 export function persistSyncConfig(cfg: SyncConfig | null, config: BackendConfig): void {
   try {
     const path = resolve(config.dataDir, SYNC_CONFIG_FILE);
-    if (cfg) writeFileSync(path, JSON.stringify(cfg, null, 2), { mode: 0o600 });
-  } catch { /* ignore */ }
+    if (cfg) {
+      const encrypted = encrypt(JSON.stringify(cfg), config.encryptionKey);
+      writeFileSync(path, encrypted, { mode: 0o600 });
+    }
+  } catch (e: unknown) {
+    console.warn('[Sync] sync-config.json 写入失败:', e instanceof Error ? e.message : String(e));
+  }
 }
 
 let syncConfig: SyncConfig | null = null;

@@ -8,6 +8,7 @@ import { spawn } from 'node:child_process';
 import { readFileSync, existsSync } from 'node:fs';
 import { resolve, basename } from 'node:path';
 import { homedir } from 'node:os';
+import { closeMcpServer } from '../../lib/mcp-client.js';
 
 // P0-6: MCP 命令白名单 — 只允许常见的 MCP server 启动命令
 const MCP_ALLOWED_COMMANDS = new Set([
@@ -170,6 +171,10 @@ export function registerMcpRoutes(app: FastifyInstance, _config: BackendConfig):
     if (body.headers !== undefined) updateData.headers = JSON.stringify(body.headers);
 
     db.update(mcpServers).set(updateData).where(eq(mcpServers.id, id)).run();
+    // 整改计划第 2 章（P0）：更新后关闭旧 transport —— 旧连接携带过期命令/URL/凭据，
+    // 若不关闭，后续 callTool 仍走旧连接（Map key 为 id，旧 entry 残留）。
+    // 关闭后下次 connectServer 自动用新配置重建。
+    await closeMcpServer(id);
     return db.select().from(mcpServers).where(eq(mcpServers.id, id)).get();
   });
 
@@ -179,6 +184,8 @@ export function registerMcpRoutes(app: FastifyInstance, _config: BackendConfig):
   }, async (request) => {
     const { id } = request.params as { id: string };
     db.delete(mcpServers).where(eq(mcpServers.id, id)).run();
+    // 整改计划第 2 章（P0）：删除时同步关闭已连接 transport（防 MCP 子进程泄漏）
+    await closeMcpServer(id);
     return { success: true };
   });
 

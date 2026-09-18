@@ -435,7 +435,7 @@ export async function processRemoteCommand(
 
     let aiContentFinal = '';
     let usageTotal = { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 };
-    let maxTurns = remoteLoop ? 500 : 30; // 循环模式：loop 开启时持续执行直到任务完整完成；否则 30 轮
+    let maxTurns = remoteLoop ? 30 : 30; // 整改计划第 5 章（P1）：循环模式默认上限从 500 降到安全值 30
     let lastErr: string = '';
     let streamMsgId: string = ''; // 流式消息 ID，在循环外定义，最终使用
     let lastToolResult = ''; // 最近一次工具执行结果，用于去重

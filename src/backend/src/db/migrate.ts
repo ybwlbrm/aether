@@ -1,5 +1,5 @@
 import initSqlJs from 'sql.js';
-import { readFileSync, writeFileSync, existsSync, renameSync, unlinkSync, openSync, closeSync, fsyncSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync, renameSync, unlinkSync, openSync, closeSync, fsyncSync, copyFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import type { BackendConfig } from '../config/index.js';
@@ -47,9 +47,55 @@ function openDatabase(SQL: Awaited<ReturnType<typeof initSqlJs>>, dbPath: string
 }
 
 /**
+ * 整改计划第 7 章（P1）：启动时完整性校验。
+ * PRAGMA integrity_check 返回 'ok' 表示完整；非 'ok' 视为损坏，备份并重建。
+ */
+function verifyIntegrity(db: any, dbPath: string, SQL: Awaited<ReturnType<typeof initSqlJs>>): any {
+  try {
+    const res = db.exec('PRAGMA integrity_check');
+    const status = res.length > 0 && res[0].values.length > 0 ? String(res[0].values[0][0]) : 'ok';
+    if (status === 'ok') return db;
+    console.error(`[DB] integrity_check 异常: ${status} — 备份损坏库并重建`);
+    try {
+      const bakPath = `${dbPath}.corrupt.${Date.now()}`;
+      renameSync(dbPath, bakPath);
+      console.error(`[DB] 已备份到 ${bakPath}`);
+    } catch (_e: unknown) {
+      console.error('[DB] 损坏库备份失败，直接重建');
+    }
+    return new SQL.Database();
+  } catch {
+    // integrity_check 本身执行失败 → 视为损坏
+    try {
+      const bakPath = `${dbPath}.corrupt.${Date.now()}`;
+      renameSync(dbPath, bakPath);
+      console.error(`[DB] integrity_check 执行失败，已备份到 ${bakPath}`);
+    } catch (_e: unknown) { /* ignore */ }
+    return new SQL.Database();
+  }
+}
+
+/**
+ * 整改计划第 7 章（P1）：迁移前创建 .bak 快照（rename 后 fsync 目录语义尽力而为）。
+ * 迁移失败时可从 .bak 恢复。仅在源库存在时创建，且不覆盖已有 .bak。
+ */
+function backupBeforeMigration(dbPath: string): string | null {
+  if (!existsSync(dbPath)) return null;
+  const bakPath = `${dbPath}.bak`;
+  if (existsSync(bakPath)) return null; // 已有备份则不覆盖（保留上一次成功态）
+  try {
+    copyFileSync(dbPath, bakPath);
+    return bakPath;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * P0-21: SQLite cannot alter a FK constraint in place, so the table must be
  * rebuilt. Copies every existing column (projected by name, tolerant of older
  * DBs missing columns), then swaps the new table in.
+ * 整改计划第 7 章：rebuildTable 包在事务中执行 —— 任一语句失败，外层 ROLLBACK 回滚。
  */
 function rebuildTable(db: any, table: string, createSql: string): void {
   const colsResult = db.exec(`PRAGMA table_info(${table})`);
@@ -70,9 +116,23 @@ function rebuildTable(db: any, table: string, createSql: string): void {
 /** 创建所有表 */
 export async function runMigrations(config: BackendConfig): Promise<void> {
   const SQL = await initSqlJs();
-  const db = openDatabase(SQL, config.dbPath);
+  let db = openDatabase(SQL, config.dbPath);
 
   db.run('PRAGMA foreign_keys = ON');
+  // 整改计划第 7 章（P1）：启动完整性校验 —— 迁移前先确认库未损坏
+  db = verifyIntegrity(db, config.dbPath, SQL);
+
+  // 整改计划第 7 章（P1）：迁移前 .bak 快照（迁移失败可从备份恢复）
+  const bakPath = backupBeforeMigration(config.dbPath);
+
+  // 整改计划第 7 章（P1）：所有迁移包在单事务中 —— 任一版本失败整体回滚，
+  // 不留下"部分迁移"的中间状态（rebuildTable 的 DROP/INSERT/ALTER 同样受保护）。
+  // 注意：SQLite 不允许在事务内修改 PRAGMA foreign_keys（no-op），
+  // 因此 v13 表重建期间需要的 FK 关闭在 BEGIN 之前全局执行，迁移结束后恢复。
+  const fkOnBefore = (db.exec('PRAGMA foreign_keys')[0].values[0][0] as number) === 1;
+  db.run('PRAGMA foreign_keys = OFF');
+  try {
+    db.run('BEGIN TRANSACTION');
 
   const createTables = `
     CREATE TABLE IF NOT EXISTS providers (
@@ -341,9 +401,8 @@ export async function runMigrations(config: BackendConfig): Promise<void> {
   // provider，故该列从 NOT NULL 变为可空）。
   // SQLite 不支持直接修改 FK 约束，此处对全部 7 张含 FK 的表做重建（数据全量保留）。
   if (currentVersion < 13) {
-    // 重建期间关闭 FK 校验：DROP 父级表时子级行可能仍引用它；结束前恢复原值。
-    const fkOn = (db.exec('PRAGMA foreign_keys')[0].values[0][0] as number) === 1;
-    db.run('PRAGMA foreign_keys = OFF');
+    // 整改计划第 7 章：FK 开关已由 runMigrations 外层全局处理（BEGIN 前关闭，迁移后恢复），
+    // 此处不再切换（SQLite 事务内 PRAGMA foreign_keys 为 no-op）。
 
     // conversations: provider_id 可空 + ON DELETE SET NULL
     rebuildTable(db, 'conversations', `CREATE TABLE conversations (
@@ -357,10 +416,12 @@ export async function runMigrations(config: BackendConfig): Promise<void> {
     )`);
 
     // messages: conversation_id ON DELETE CASCADE
+    // 整改计划第 4 章（P1）：新库直接带 seq 列（会话内稳定序号）
     rebuildTable(db, 'messages', `CREATE TABLE messages (
       id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
       role TEXT NOT NULL, content TEXT NOT NULL,
-      tool_calls TEXT, tool_results TEXT, reasoning_content TEXT, created_at TEXT NOT NULL
+      tool_calls TEXT, tool_results TEXT, reasoning_content TEXT,
+      seq INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL
     )`);
 
     // workflow_runs: workflow_id ON DELETE CASCADE
@@ -429,7 +490,6 @@ export async function runMigrations(config: BackendConfig): Promise<void> {
     )`);
     db.run(`CREATE UNIQUE INDEX IF NOT EXISTS idx_events_run_seq ON events(run_id, seq)`);
 
-    db.run(`PRAGMA foreign_keys = ${fkOn ? 'ON' : 'OFF'}`);
     db.run(`INSERT INTO schema_version (version, applied_at) VALUES (13, ?)`, [new Date().toISOString()]);
   }
 
@@ -448,10 +508,36 @@ export async function runMigrations(config: BackendConfig): Promise<void> {
     db.run(`INSERT INTO schema_version (version, applied_at) VALUES (14, ?)`, [new Date().toISOString()]);
   }
 
+  // 版本 15 (整改计划第 4 章，P1): messages 表新增 seq 列 —
+  // 会话内稳定序号，加载按 (created_at, seq) 稳定排序（避免同毫秒消息顺序不稳定）
+  if (currentVersion < 15) {
+    const msgCols = db.exec('PRAGMA table_info(messages)');
+    const hasSeq = msgCols.length > 0
+      && msgCols[0].values.some((row: unknown[]) => row[1] === 'seq');
+    if (!hasSeq) {
+      db.run("ALTER TABLE messages ADD COLUMN seq INTEGER NOT NULL DEFAULT 0");
+    }
+    db.run(`INSERT INTO schema_version (version, applied_at) VALUES (15, ?)`, [new Date().toISOString()]);
+  }
+
+  // 整改计划第 7 章（P1）：所有迁移成功 → 提交单事务
+  db.run('COMMIT');
+  // 恢复迁移前的 FK 开关（SQLite 事务内不可修改，故在此恢复）
+  db.run(`PRAGMA foreign_keys = ${fkOnBefore ? 'ON' : 'OFF'}`);
+
   // 保存到文件（原子写，防止强杀损坏主库）
   const data = db.export();
   const buffer = Buffer.from(data);
   atomicWrite(config.dbPath, buffer);
 
   db.close();
+  } catch (e: unknown) {
+    // 整改计划第 7 章（P1）：迁移失败 → 回滚整个事务，并从 .bak 恢复（若有）
+    try { db.run('ROLLBACK'); } catch (_e: unknown) { /* ignore - intentional */ }
+    if (bakPath) {
+      try { renameSync(bakPath, config.dbPath); } catch (_e: unknown) { /* ignore - intentional */ }
+    }
+    try { db.close(); } catch (_e: unknown) { /* ignore - intentional */ }
+    throw e;
+  }
 }

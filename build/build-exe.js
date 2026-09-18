@@ -233,10 +233,11 @@ async function main() {
     fs.copyFileSync(iconSrc, path.join(resourcesDir, 'icon.png'));
   }
 
-  // 复制 package.json
+  // 复制 package.json（版本号从根 package.json 读取，保持 2.0.0 一致）
+  const rootPkg = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf-8'));
   const pkg = {
     name: 'aether',
-    version: '1.0.0',
+    version: rootPkg.version || '2.0.0',
     main: 'electron/main.js',
     private: true,
   };

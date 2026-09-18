@@ -1,4 +1,5 @@
 import type { AgentEventEnvelope } from '@pacc/shared';
+import { getAuthToken } from './client';
 
 const BASE = '/api';
 
@@ -188,7 +189,7 @@ export async function streamConversation(
 ): Promise<void> {
   const res = await fetch(`${BASE}/conversations/${conversationId}/messages`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+    headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest', ...(getAuthToken() ? { Authorization: `Bearer ${getAuthToken()}` } : {}) },
     body: JSON.stringify({
       content,
       images: opts?.images,
@@ -221,7 +222,7 @@ export async function streamOrchestrate(
 ): Promise<void> {
   const res = await fetch(`${BASE}/agents/orchestrate`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+    headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest', ...(getAuthToken() ? { Authorization: `Bearer ${getAuthToken()}` } : {}) },
     body: JSON.stringify(body),
     signal,
   });
@@ -236,14 +237,17 @@ export async function streamOrchestrate(
 
 /**
  * 回放 / 增量 catch-up：拉取某会话 afterSeq 之后的事件（刷新/断线恢复）
+ * 整改计划第 3 章（P0）：支持 AbortSignal —— 组件卸载/会话切换/重试时取消旧请求
  */
 export async function fetchEvents(
   conversationId: string,
   afterSeq?: number,
+  signal?: AbortSignal,
 ): Promise<AgentEventEnvelope[]> {
   const query = afterSeq != null ? `?afterSeq=${afterSeq}` : '';
   const res = await fetch(`${BASE}/conversations/${conversationId}/events${query}`, {
     headers: { 'X-Requested-With': 'XMLHttpRequest' },
+    signal,
   });
   if (!res.ok) {
     const err = await res.json().catch(() => ({ error: { message: '网络错误' } }));

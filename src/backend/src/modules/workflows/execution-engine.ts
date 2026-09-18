@@ -198,15 +198,22 @@ export async function executeWorkflow(opts: ExecuteWorkflowOptions): Promise<Exe
 
 // 需要导入的依赖
 import { eq } from 'drizzle-orm';
-import { workflowRuns } from '../../db/schema/index.js';
+import { workflowRuns, runs } from '../../db/schema/index.js';
 import { RunLifecycleManager } from '../../core/runtime/index.js';
+import { runInTransaction, saveDb } from '../../db/client.js';
 import { randomUUID } from 'node:crypto';
 
+/**
+ * 整改计划第 10 章（P1）：在同一事务内原子创建 runs 与 workflow_runs。
+ * 任一失败整体回滚 —— 不允许"runs 创建失败仅 warning 后继续"（会产生 orphan workflowRun）。
+ * 失败时抛出，由调用方（executeWorkflow）统一走 failed 分支。
+ */
 async function createWorkflowRunInternal(workflowId: string, firstNodeId: string | undefined, db: any, saveDb: (config: any) => void, config: any) {
   const runId = randomUUID();
   const now = new Date().toISOString();
-  // P0-04/P0-05 收口：Workflow 也进入统一 Run 架构（runs 表 + RunLifecycleManager 状态机）
-  try {
+  runInTransaction(config, () => {
+    // P0-04/P0-05 收口：Workflow 也进入统一 Run 架构（runs 表 + RunLifecycleManager 状态机）
+    // 整改计划第 10 章：runs 行创建失败 → 抛出（触发整体回滚），不再吞错继续
     const lifecycle = new RunLifecycleManager(db);
     lifecycle.createAndStart({
       runId,
@@ -215,19 +222,44 @@ async function createWorkflowRunInternal(workflowId: string, firstNodeId: string
       rootAgentId: 'workflow',
       metadata: { workflowId, firstNodeId },
     });
-  } catch (e: unknown) {
-    // workflowRuns 表是工作流自有记录，runs 行创建失败不应阻断工作流执行，但需记录
-    console.warn('[Workflow] runs 行创建失败（不影响工作流执行）:',
-      e instanceof Error ? e.message : String(e));
-  }
-  db.insert(workflowRuns).values({
-    id: runId,
-    workflowId,
-    status: 'running',
-    currentNodeId: firstNodeId,
-    results: '{}',
-    startedAt: now,
-  }).run();
+    db.insert(workflowRuns).values({
+      id: runId,
+      workflowId,
+      status: 'running',
+      currentNodeId: firstNodeId,
+      results: '{}',
+      startedAt: now,
+    }).run();
+  });
   saveDb(config);
   return { runId, now };
+}
+
+/**
+ * 整改计划第 10 章（P1）：启动时 orphan repair ——
+ * 找出 workflow_runs 中 status='running' 但 runs 表无对应行（或 runs 已是终态）的
+ * orphan 记录，标记为 failed（error='orphan repair'）。返回修复数量。
+ */
+export function repairOrphanWorkflowRuns(db: any, config: any): number {
+  try {
+    const orphan = (db.select().from(workflowRuns)
+      .where(eq(workflowRuns.status, 'running')).all() as Array<{ id: string }>)
+      .filter((wr) => {
+        const run = db.select().from(runs).where(eq(runs.id, wr.id)).get() as { status: string } | undefined;
+        // runs 行缺失，或 runs 已是终态（completed/failed/cancelled/interrupted）→ orphan
+        return !run || !['running', 'waiting', 'created'].includes(run.status);
+      });
+    for (const wr of orphan) {
+      db.update(workflowRuns).set({
+        status: 'failed',
+        error: 'orphan repair: runs 记录缺失或已终止',
+        completedAt: new Date().toISOString(),
+      }).where(eq(workflowRuns.id, wr.id)).run();
+    }
+    if (orphan.length > 0) saveDb(config);
+    return orphan.length;
+  } catch (e) {
+    console.warn('[Workflow] orphan repair 执行失败:', e instanceof Error ? e.message : String(e));
+    return 0;
+  }
 }

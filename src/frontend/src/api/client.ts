@@ -27,6 +27,14 @@ export function getAuthToken(): string | null {
   return authToken;
 }
 
+/**
+ * 默认拒绝鉴权（整改计划第 1 章，P0）：后端所有非 GET/HEAD 路由缺 Bearer 一律 401。
+ * 供页面内直接 fetch 的写请求复用：返回应附加的 Authorization 头。
+ */
+export function authHeaders(): Record<string, string> {
+  return authToken ? { Authorization: `Bearer ${authToken}` } : {};
+}
+
 async function request<T>(path: string, options?: RequestInit & { timeout?: number }): Promise<T> {
   // 仅当有请求体时才设置 Content-Type: application/json，
   // 否则 Fastify 会因空 JSON body 报 400/415 错误。
@@ -41,22 +49,19 @@ async function request<T>(path: string, options?: RequestInit & { timeout?: numb
   const signal = options?.signal ? mergeSignals(options.signal, controller.signal) : controller.signal;
   // 确保所有请求都带 X-Requested-With（CSRF 防护要求）
   headers['X-Requested-With'] = 'XMLHttpRequest';
-  // 敏感端点需要 Authorization header（终端执行、安全设置、provider key、导入导出等）
-  // Wave0-AM: 与后端 Auth Matrix 对齐（permissions/approvals/sync 为新增敏感写路径）
-  const sensitivePaths = [
-    '/terminal/execute',
-    '/settings/security',
-    '/providers/',
-    '/import/all',
+  // 默认拒绝鉴权（整改计划第 1 章，P0）：后端所有非 GET/HEAD 路由缺 Bearer 一律 401。
+  // 因此所有非 GET 请求必须附加 Authorization；GET 仅对敏感读路径（导出/下载/审批）附加。
+  const method = (options?.method ?? 'GET').toUpperCase();
+  const isReadMethod = method === 'GET' || method === 'HEAD';
+  const sensitiveReadPaths = [
     '/export/all',
-    '/permissions/',
+    '/sync/download',
     '/approvals/',
-    '/sync/config',
-    '/sync/upload',
   ];
-  const needsAuth = sensitivePaths.some(p =>
+  const isSensitiveRead = sensitiveReadPaths.some(p =>
     path === p || (p.endsWith('/') && path.startsWith(p))
   );
+  const needsAuth = !isReadMethod || isSensitiveRead;
   if (needsAuth && authToken) {
     headers['Authorization'] = `Bearer ${authToken}`;
   }
@@ -152,7 +157,8 @@ export const api = {
 
   // Conversations
   getConversations: () => request<any[]>('/conversations'),
-  getConversation: (id: string) => request<any>(`/conversations/${id}`),
+  // 整改计划第 3 章（P0）：轮询支持 AbortController —— 组件卸载/会话切换/重试时取消旧请求
+  getConversation: (id: string, signal?: AbortSignal) => request<any>(`/conversations/${id}`, { signal }),
   updateConversation: (id: string, data: { title: string }) => request<any>(`/conversations/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
   createConversation: (data: any) => request<any>('/conversations', { method: 'POST', body: JSON.stringify(data) }),
   sendMessage: (id: string, data: any) => request<any>(`/conversations/${id}/messages`, { method: 'POST', body: JSON.stringify(data) }),

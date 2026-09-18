@@ -1,6 +1,6 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type { BackendConfig } from '../../config/index.js';
-import { getDb, saveDb } from '../../db/client.js';
+import { getDb, saveDb, runInTransaction } from '../../db/client.js';
 import { conversations, messages, providers, mcpServers } from '../../db/schema/index.js';
 import { eq, desc, sql } from 'drizzle-orm';
 import { randomUUID } from 'node:crypto';
@@ -28,6 +28,7 @@ import { runCancellationRegistry } from '../../lib/run-cancellation-registry.js'
 // P0-02/P0-04/P0-05: 统一 Run 上下文 + RunLifecycleManager（普通 Chat 与 Super 模式同构）
 import { createRunContext } from '../../core/runtime/index.js';
 import { RunLifecycleManager } from '../../core/runtime/index.js';
+import { getWorkspaceContext } from '../../core/workspace/workspace-context.js';
 import { fetchWithRetry } from '../../lib/fetch-retry.js';
 import { initSseHeaders, createSseSender, startSseHeartbeat, clearSseHeartbeat, sendSseError, sendSseDone, endSseResponse } from './sse-stream.js';
 import { processCompaction, executeForceSummary } from './compaction.js';
@@ -37,6 +38,17 @@ interface ChatHandlerContext {
   app: FastifyInstance;
   config: BackendConfig;
   db: ReturnType<typeof getDb>;
+}
+
+/** 整改计划第 5 章（P1）：预算耗尽标签（供 BUDGET_EXCEEDED 错误消息） */
+function budgetLabel(kind: 'turns' | 'duration' | 'tokens' | 'tool_calls' | 'cost'): string {
+  switch (kind) {
+    case 'turns': return '轮数';
+    case 'duration': return '时长';
+    case 'tokens': return 'Token';
+    case 'tool_calls': return '工具调用';
+    case 'cost': return '费用';
+  }
 }
 
 /**
@@ -111,9 +123,18 @@ export async function handleSendMessage(
       contentToStore += '\n\n' + fileInfos.map((fp, i) => `[上传文件: ${body.files![i].name}](${fp})`).join('\n');
     }
   }
-  db.insert(messages).values({
-    id: userMsgId, conversationId: id, role: 'user', content: contentToStore, createdAt: now,
-  }).run();
+  // 整改计划第 4 章（P1）：用户消息 + 会话 generating 标记在同一事务写入
+  runInTransaction(config, () => {
+    // 会话内稳定序号（created_at, seq 稳定排序基础）
+    const seqResult = db.select({ maxSeq: sql<number>`COALESCE(MAX(${messages.seq}), 0)` })
+      .from(messages).where(eq(messages.conversationId, id)).get();
+    const nextSeq = (seqResult?.maxSeq ?? 0) + 1;
+    db.insert(messages).values({
+      id: userMsgId, conversationId: id, role: 'user', content: contentToStore, seq: nextSeq, createdAt: now,
+    }).run();
+    // 会话持久化：标记对话正在生成（与用户消息同事务）
+    db.update(conversations).set({ generationStatus: 'generating', updatedAt: now }).where(eq(conversations.id, id)).run();
+  });
 
   // 同步用户消息到 Supabase（手机端实时可见电脑端发送的消息）
   syncMessageToSupabase(id, { id: userMsgId, role: 'user', content: contentToStore, createdAt: now });
@@ -175,8 +196,8 @@ export async function handleSendMessage(
     () => saveDb(config),
   );
 
-  // 会话持久化：标记对话正在生成
-  db.update(conversations).set({ generationStatus: 'generating', updatedAt: now }).where(eq(conversations.id, id)).run();
+  // 会话持久化：标记对话正在生成（已在上方用户消息事务中执行，此处不再重复）
+  // db.update(conversations).set({ generationStatus: 'generating', updatedAt: now }).where(eq(conversations.id, id)).run();
 
   // 任务开始事件
   eventBus.emit(runContext.sessionId, 'task.started', {
@@ -194,6 +215,10 @@ export async function handleSendMessage(
   let reasoningContent = '';
   let usageTotal = { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 };
   let lastToolResult = '';
+  // 整改计划第 5 章（P1）：预算耗尽标记 —— 提升到 try 外部（终态写入/SSE 事件需要）
+  let budgetExceeded: 'turns' | 'duration' | 'tokens' | 'tool_calls' | 'cost' | null = null;
+  // 整改计划第 5 章（P1）：循环 UI 指标 —— 已用轮数/时长/工具调用（随终态事件推给前端）
+  let loopMetrics: { turnsUsed: number; elapsedMs: number; toolCalls: number; budgetExceeded: string | null } | null = null;
   let endedNormally = false;
   let aiError: string | null = null;
   try {
@@ -214,13 +239,14 @@ export async function handleSendMessage(
     // 注入 active memories 到 system prompt（使用 Sisyphus 人设而非 generic prompt）
     // 传入用户消息内容作为 context，按关键词召回相关记忆
     const memories = await getActiveMemoriesFormatted(body.content);
-    // 解析 allowedDirs（getSettings 已顶部 import，无需 dynamic import）
+    // 整改计划第 2 章：统一 WorkspaceContext 作为 allowedDirs/defaultDir 唯一来源，
+    // 不再自行回退到 settings.allowedDirs[0] / process.cwd()
+    const workspaceCtx = await getWorkspaceContext(config);
+    const allowedDirs = workspaceCtx.allowedDirs;
+    const defaultDir = workspaceCtx.defaultDir;
+    const permLevel = workspaceCtx.permissionLevel;
+    // tool-loop 仍需要完整 settings 对象（用于其余配置透传），但目录/权限以 WorkspaceContext 为准
     const settings = await getSettings();
-    const allowedDirs = Array.isArray(settings.allowedDirs) && settings.allowedDirs.length > 0
-      ? settings.allowedDirs
-      : [process.cwd()];
-    const defaultDir = settings.defaultDir || allowedDirs[0] || process.cwd();
-    const permLevel = settings.permissionLevel ?? 2;
     // 权限级别决定文件操作范围描述（Level 3 = 全局访问）
     const fileScopeDesc = permLevel === 3
       ? `- 当前为 Level 3（超级）权限：**可以访问整个文件系统的任何路径**，无目录限制，包括 C 盘、D 盘任意目录、用户目录等
@@ -356,9 +382,12 @@ ${fileAttachmentsHint}
         }
       }
 
-      // Function calling 循环：最多 10 轮
+      // Function calling 循环（整改计划第 5 章，P1）：
+      // 默认上限从 500 降到可配置安全值 30 —— 循环模式同样受安全上限约束，
+      // 防止模型失控循环导致无界成本。高级值需经过 capability（本项目未启用）。
+      const LOOP_MAX_TURNS_DEFAULT = 30;
       const baseUrl = provider.baseUrl.replace(/\/$/, '');
-      let maxTurns = body.loop ? 500 : 30; // 循环模式：loop 开启时持续执行直到任务完整完成；否则 30 轮
+      let maxTurns = body.loop ? LOOP_MAX_TURNS_DEFAULT : 30;
 
       // 加载 MCP 工具（与文件工具合并）— 统一走 tool-registry 的 buildAllTools（消除重复实现）
       const getMcpServers = () => db.select().from(mcpServers).all() as any[];
@@ -385,7 +414,7 @@ ${fileAttachmentsHint}
         mcpTools,
         getMcpServers,
         allowedDirs,
-        permissionLevel: settings.permissionLevel ?? 2,
+        permissionLevel: workspaceCtx.permissionLevel,
         defaultDir,
         settings,
         deepThinking: body.deepThinking,
@@ -403,6 +432,16 @@ ${fileAttachmentsHint}
       lastToolResult = toolLoopResult.lastToolResult;
       endedNormally = toolLoopResult.endedNormally;
       aiError = toolLoopResult.aiError;
+      // 整改计划第 5 章（P1）：预算耗尽 —— 超过轮数/时长/token/工具调用/费用任一预算即停止，
+      // 写 budget_exceeded 错误码，不再继续请求模型
+      budgetExceeded = toolLoopResult.budgetExceeded;
+      // 整改计划第 5 章（P1）：循环 UI 指标 —— 已用轮数/时长/工具调用（随终态事件推给前端）
+      loopMetrics = {
+        turnsUsed: toolLoopResult.turnsUsed,
+        elapsedMs: toolLoopResult.elapsedMs,
+        toolCalls: toolLoopResult.toolCallCount,
+        budgetExceeded: toolLoopResult.budgetExceeded,
+      };
 
       // maxTurns 耗尽后的兜底处理 — 这些变量在 while 循环内声明，循环外不可见
       // 用 aiContent 是否为空判断，不引用循环内变量
@@ -487,31 +526,46 @@ ${fileAttachmentsHint}
 
   // A2 修复：AI 失败且无任何内容时，不插入空白 assistant 消息（避免空气泡）。
   // 有部分内容时仍保存（保留流式过程中已产出的文本）。
+  // 整改计划第 4 章（P1）：AI 消息 + token_total + generationStatus（含流中断 partial content + interrupted）
+  // 在同一 SQLite 事务中写入 —— 三者要么全部落库，要么全部回滚；stream-truncated/error 写 partial content + interrupted。
   if (!(aiError && aiContent.length === 0)) {
-    db.insert(messages).values({
-      id: aiMsgId, conversationId: id, role: 'assistant', content: aiContent,
-      toolResults: toolResultsStr,
-      // thinking 模式：落库 reasoning_content，多轮对话回放时回传 provider（防会话"砖化"）
-      reasoningContent: reasoningContent || null,
-      createdAt: new Date().toISOString(),
-    }).run();
+    runInTransaction(config, () => {
+      // 会话内稳定序号（created_at, seq 稳定排序基础）
+      const seqResult = db.select({ maxSeq: sql<number>`COALESCE(MAX(${messages.seq}), 0)` })
+        .from(messages).where(eq(messages.conversationId, id)).get();
+      const nextSeq = (seqResult?.maxSeq ?? 0) + 1;
+      db.insert(messages).values({
+        id: aiMsgId, conversationId: id, role: 'assistant', content: aiContent,
+        toolResults: toolResultsStr,
+        seq: nextSeq,
+        // thinking 模式：落库 reasoning_content，多轮对话回放时回传 provider（防会话"砖化"）
+        reasoningContent: reasoningContent || null,
+        createdAt: new Date().toISOString(),
+      }).run();
 
-    // PF-01: 增量维护 conversations.token_total，避免后续全表聚合
-    if (usageTotal.total_tokens > 0) {
-      db.update(conversations)
-        .set({ tokenTotal: sql`${conversations.tokenTotal} + ${usageTotal.total_tokens}`, updatedAt: new Date().toISOString() })
-        .where(eq(conversations.id, id))
-        .run();
-    }
+      // PF-01: 增量维护 conversations.token_total，避免后续全表聚合
+      if (usageTotal.total_tokens > 0) {
+        db.update(conversations)
+          .set({ tokenTotal: sql`${conversations.tokenTotal} + ${usageTotal.total_tokens}`, updatedAt: new Date().toISOString() })
+          .where(eq(conversations.id, id))
+          .run();
+      }
+
+      // 整改计划第 4 章：流中断（aiError）→ 写 interrupted + partial content；正常 → idle
+      db.update(conversations).set({ generationStatus: aiError ? 'interrupted' : 'idle', updatedAt: now }).where(eq(conversations.id, id)).run();
+    });
 
     // 同步 AI 回复到 Supabase（手机端实时可见）
     syncMessageToSupabase(id, {
       id: aiMsgId, role: 'assistant', content: aiContent,
       toolResults: toolResultsStr, createdAt: new Date().toISOString(),
     });
+  } else {
+    // 无内容失败：仍标记 interrupted（同事务原子性）
+    runInTransaction(config, () => {
+      db.update(conversations).set({ generationStatus: 'interrupted', updatedAt: now }).where(eq(conversations.id, id)).run();
+    });
   }
-
-  db.update(conversations).set({ generationStatus: aiError ? 'interrupted' : 'idle', updatedAt: now }).where(eq(conversations.id, id)).run();
 
   // L3: 自动生成对话标题 — 从用户第一条消息提取（截断到 30 字符）
   const existingConv = db.select().from(conversations).where(eq(conversations.id, id)).get();
@@ -547,8 +601,22 @@ ${fileAttachmentsHint}
       content: aiError,
       endReason: 'error',
     });
+  } else if (budgetExceeded) {
+    // 整改计划第 5 章（P1）：预算耗尽 → 写 budget_exceeded 错误码（前端显示恢复动作）
+    const budgetMsg = `已达到${budgetLabel(budgetExceeded)}预算，任务停止执行（可停止或发送新消息继续）。`;
+    sseSend('error', JSON.stringify({ message: budgetMsg, code: 'BUDGET_EXCEEDED', budgetExceeded }));
+    eventBus.emit(runContext.sessionId, 'task.failed', {
+      taskId: runContext.taskId,
+      agentId: runContext.agentId,
+      agentType: runContext.agentType,
+      status: 'error',
+      content: budgetMsg,
+      endReason: 'budget_exceeded',
+      metadata: { code: 'BUDGET_EXCEEDED', budgetExceeded, ...loopMetrics },
+    });
   } else {
     // 任务完成事件（统一协议）— 结束原因：中止→aborted；正常文本→completed；轮次耗尽→max_turns
+    // 整改计划第 5 章（P1）：终态事件携带循环指标（轮数/时长/工具调用）供前端循环 UI 显示
     eventBus.emit(runContext.sessionId, 'task.completed', {
       taskId: runContext.taskId,
       agentId: runContext.agentId,
@@ -556,6 +624,7 @@ ${fileAttachmentsHint}
       status: 'completed',
       content: '完成',
       endReason: clientAbort.signal.aborted ? 'aborted' : endedNormally ? 'completed' : 'max_turns',
+      metadata: { ...loopMetrics },
     });
   }
 
@@ -566,6 +635,13 @@ ${fileAttachmentsHint}
       runLifecycle.transition(runContext.taskId, 'fail', {
         error: aiError,
         endReason: 'error',
+        totalTokens: usageTotal.total_tokens || 0,
+      });
+    } else if (budgetExceeded) {
+      // 预算耗尽 → fail（endReason: budget_exceeded）
+      runLifecycle.transition(runContext.taskId, 'fail', {
+        error: `BUDGET_EXCEEDED:${budgetExceeded}`,
+        endReason: 'budget_exceeded',
         totalTokens: usageTotal.total_tokens || 0,
       });
     } else if (clientAbort.signal.aborted) {

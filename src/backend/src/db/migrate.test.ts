@@ -221,9 +221,9 @@ describe('runMigrations — v10/v11/v12 (Aether 2.0 Runtime tables)', () => {
       await runMigrationsReal(makeConfig(dbPath, dir));
 
       const db = openDb(dbPath);
-      // schema_version 最大值应为 14 (v10-v14)
+      // schema_version 最大值应为 15 (v10-v15)
       const ver = db.exec('SELECT MAX(version) FROM schema_version');
-      assert.equal(ver[0].values[0][0], 14, 'schema_version should be 14');
+      assert.equal(ver[0].values[0][0], 15, 'schema_version should be 15');
 
       // 三张新表存在
       const tables = db.exec("SELECT name FROM sqlite_master WHERE type='table' AND name IN ('runs','tasks','events')");
@@ -292,10 +292,10 @@ describe('runMigrations — v10/v11/v12 (Aether 2.0 Runtime tables)', () => {
       // 运行真实迁移
       await runMigrationsReal(makeConfig(dbPath, dir));
 
-      // 验证：schema_version 达到 14
+      // 验证：schema_version 达到 15
       const db2 = openDb(dbPath);
       const ver = db2.exec('SELECT MAX(version) FROM schema_version');
-      assert.equal(ver[0].values[0][0], 14, 'schema_version should be 14 after upgrade');
+      assert.equal(ver[0].values[0][0], 15, 'schema_version should be 15 after upgrade');
 
       // 预存数据完好
       const prov = db2.exec("SELECT id, name FROM providers WHERE id = 'prov-1'");
@@ -359,7 +359,7 @@ describe('runMigrations — v10/v11/v12 (Aether 2.0 Runtime tables)', () => {
 
       const db = openDb(dbPath);
       const ver = db.exec('SELECT MAX(version) FROM schema_version');
-      assert.equal(ver[0].values[0][0], 14, 'schema_version should still be 14 after second run');
+      assert.equal(ver[0].values[0][0], 15, 'schema_version should still be 15 after second run');
       db.close();
     } finally {
       rmSync(dir, { recursive: true, force: true });

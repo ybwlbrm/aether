@@ -33,6 +33,8 @@ export interface TokenUsage {
   totalTokens?: number;
   /** 推理 token（部分 provider 单独计数） */
   reasoningTokens?: number;
+  /** 缓存命中的输入 token（整改计划第 9 章：统一 cachedTokens 字段） */
+  cachedTokens?: number;
 }
 
 /** 内容块（block-end 携带的完成态） */

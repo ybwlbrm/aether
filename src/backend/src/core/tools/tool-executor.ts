@@ -168,7 +168,9 @@ export class ToolExecutor {
     }
 
     // 已批准标记（P0-08：审批通过后的二次执行直接放行，不再走 legacy ToolPolicy）
-    const approvedByUser = (context.metadata as Record<string, unknown> | undefined)?.approvedByUser === true;
+    // 整改计划第 5 章：只信任受控字段 internalApproved —— 外部通过 metadata 注入
+    // approvedByUser 一律忽略（禁止 metadata 任意赋权；多 Agent handoff 共享同一审批链）。
+    const approvedByUser = context.internalApproved === true;
     if (!approvedByUser && this.#policy) {
       const legacyPolicyResult = this.#policy.evaluate(toolName);
       if (legacyPolicyResult.action === 'deny') {

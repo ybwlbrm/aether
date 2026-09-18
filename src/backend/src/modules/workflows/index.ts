@@ -1,13 +1,14 @@
 import type { FastifyInstance } from 'fastify';
 import type { BackendConfig } from '../../config/index.js';
 import { getAllWorkflows, createWorkflow, getWorkflowById, updateWorkflow, deleteWorkflow, getWorkflowRuns } from './store.js';
-import { executeWorkflow } from './execution-engine.js';
+import { executeWorkflow, repairOrphanWorkflowRuns } from './execution-engine.js';
 import { executeNode } from './node-executors.js';
 import { aiCreateWorkflow } from './ai-creator.js';
 import type { WorkflowNode, WorkflowEdge } from './types.js';
 // Aether 2.0 v2 Event Runtime (FIX-5): workflow lifecycle events (§57) into
 // the events table so run replay / SSE stream see them.
 import { emitV2Event, ensureRunRow, mapWorkflowEventType } from '../../lib/event-store-runtime.js';
+import { getDb, saveDb } from '../../db/client.js';
 
 // 重新导出类型和核心函数，保持向后兼容
 export type { WorkflowNode, WorkflowEdge };
@@ -15,6 +16,14 @@ export { executeNode, executeWorkflow, aiCreateWorkflow };
 
 /** 注册所有工作流路由 */
 export function registerWorkflowRoutes(app: FastifyInstance, config: BackendConfig): void {
+  // 整改计划第 10 章（P1）：启动时 orphan repair —— 把 workflow_runs 中
+  // 引用的 runs 记录缺失/已终止的孤儿行标记为 failed（不阻塞启动）
+  try {
+    repairOrphanWorkflowRuns(getDb(), config);
+  } catch (e: unknown) {
+    console.warn('[Workflow] 启动 orphan repair 跳过（DB 未就绪或失败）:', e instanceof Error ? e.message : String(e));
+  }
+
   // 获取所有工作流
   app.get('/api/workflows', {
     schema: { description: '获取所有工作流', tags: ['工作流'] },
