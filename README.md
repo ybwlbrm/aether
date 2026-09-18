@@ -333,6 +333,33 @@ npm run lint           # Lint
 | `npm run build:apk` | Android APK（需 JDK 21 + Android SDK） |
 | `npm run build:exe` | 便携版（`dist_exe/`）+ NSIS 安装包（`dist_electron/`） |
 
+### 一键打包 + 同步上传（推荐）
+
+> 修改代码后，统一使用 `build/release-all.js` 完成 **打包 → 同步开源版 → 发布 GitHub** 全流程。
+
+```bash
+npm run release:all                 # 全流程：打包(exe/setup/apk) + 同步开源版 + 上传 GitHub
+npm run release:sync                # 跳过打包：仅同步 + 发布（代码已改完时最快）
+npm run release:build               # 跳过同步：仅打包 + 发布本地产物
+```
+
+**脚本自动完成：**
+
+1. **打包**：shared/backend/frontend 构建 → EXE 便携版 → NSIS Setup → mobile 构建 → Android APK
+2. **同步**：自用版 git 提交 → 文件级差异同步到开源版（`D:\Aether-OpenSource`）→ 开源版提交
+3. **发布**：push 到 GitHub → 删除旧 Release 重建 → 上传 Setup exe + APK → 自动生成 SHA256
+
+**数据安全（自用版绝不外泄）：**
+
+| 排除项 | 说明 |
+|--------|------|
+| `data/`、`qa/` | 个人数据 / QA 截图 |
+| `*.jks`、`keystore.properties` | APK 签名与密钥 |
+| `*.db`、`*.log` | 数据库 / 日志 |
+| `dist*`、`build/sqljs_dist`、`src/mobile/dist`、`Aether-Mobile.apk` | 构建产物 |
+
+> 同步方向：**自用版 → 开源版 → GitHub**。自用版没有配置 GitHub 远程，个人数据（`data/` 数据库、签名密钥）始终只留在本地。
+
 ---
 
 ## 项目结构
