@@ -107,6 +107,11 @@ async function buildAll() {
 // ============ 2. 同步 ============
 function syncToOpenSource() {
   log('SYNC', '提交自用版...');
+  // Oracle P1-5: 校验自用版与开源版版本一致，防止 TAG 与开源版漂移
+  const openVersion = JSON.parse(fs.readFileSync(path.join(OPENSOURCE_DIR, 'package.json'), 'utf-8')).version;
+  if (openVersion !== VERSION) {
+    throw new Error('版本不一致：自用版 ' + VERSION + ' vs 开源版 ' + openVersion + '。请先同步 package.json 版本。');
+  }
   run('git add -A', PRIVATE_DIR);
   try {
     run('git commit -m "release: Aether ' + VERSION + '"', PRIVATE_DIR);
@@ -196,7 +201,16 @@ async function release() {
   run('git push origin ' + TAG, OPENSOURCE_DIR);
 
   const assetArgs = assets.map((a) => '"' + a + '"').join(' ');
-  run('gh release create ' + TAG + ' ' + assetArgs + ' --repo ' + GITHUB_REPO + ' --title "Aether ' + VERSION + '" --notes-file "' + noteFile + '"', PRIVATE_DIR);
+  try {
+    run('gh release create ' + TAG + ' ' + assetArgs + ' --repo ' + GITHUB_REPO + ' --title "Aether ' + VERSION + '" --notes-file "' + noteFile + '"', PRIVATE_DIR);
+  } catch (e) {
+    // Oracle P1-3: gh release create 失败时的中间态说明。
+    // 此时远程 tag 已指向最新 master、本地 tag 已重建，仅 Release 对象未创建。
+    // 重新运行本脚本（--skip-build --skip-sync 或全量）即可恢复，无需手工处理。
+    console.error('\n⚠️ Release 创建失败（tag 已更新至最新 master，Release 未创建）。');
+    console.error('   直接重跑 `npm run release:sync` 或 `npm run release:build` 即可重试创建 Release。');
+    throw e;
+  }
   log('RELEASE', '已发布 https://github.com/' + GITHUB_REPO + '/releases/tag/' + TAG);
 }
 
