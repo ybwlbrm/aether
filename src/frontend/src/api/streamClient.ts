@@ -1,5 +1,5 @@
 import type { AgentEventEnvelope } from '@pacc/shared';
-import { getAuthToken } from './client';
+import { getAuthToken, ensureAuthToken } from './client';
 
 const BASE = '/api';
 
@@ -187,6 +187,9 @@ export async function streamConversation(
   callbacks: StreamCallbacks,
   opts?: { signal?: AbortSignal; images?: string[]; providerId?: string; model?: string; files?: { name: string; dataUrl: string }[]; deepThinking?: boolean; reasoningEffort?: 'low' | 'medium' | 'high'; webSearch?: boolean; loop?: boolean },
 ): Promise<void> {
+  // 整改计划第 1 章（P0）：写请求前确保 token 就绪 —— 防止刷新后立即发首条消息
+  // 因 auth-guard 默认拒绝（缺 Bearer → 401）而丢失
+  await ensureAuthToken();
   const res = await fetch(`${BASE}/conversations/${conversationId}/messages`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest', ...(getAuthToken() ? { Authorization: `Bearer ${getAuthToken()}` } : {}) },
@@ -220,6 +223,8 @@ export async function streamOrchestrate(
   callbacks: StreamCallbacks,
   signal?: AbortSignal,
 ): Promise<void> {
+  // 整改计划第 1 章（P0）：写请求前确保 token 就绪 —— 防止刷新后立即发首条消息 401 丢失
+  await ensureAuthToken();
   const res = await fetch(`${BASE}/agents/orchestrate`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest', ...(getAuthToken() ? { Authorization: `Bearer ${getAuthToken()}` } : {}) },

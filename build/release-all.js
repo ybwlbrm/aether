@@ -141,8 +141,10 @@ function syncToOpenSource() {
 // ============ 3. 发布 ============
 async function release() {
   log('RELEASE', '上传 GitHub (' + GITHUB_REPO + ')...');
-  // 绕过可能失效的本地代理直连 GitHub
-  run('git -c http.proxy= -c https.proxy= push origin master', OPENSOURCE_DIR);
+  // 修复：移除 -c http.proxy=/-c https.proxy= 强制清空代理。
+  // 本机走 127.0.0.1:7897 代理才能访问 GitHub，清空代理导致 Connection reset。
+  // 保留 git 全局/环境代理配置（或让用户通过 HTTPS_PROXY 配置）。
+  run('git push origin master', OPENSOURCE_DIR);
 
   const assets = [
     path.join(PRIVATE_DIR, 'dist_electron', 'Aether Setup ' + VERSION + '.exe'),

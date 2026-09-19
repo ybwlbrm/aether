@@ -418,11 +418,12 @@ useEffect(() => {
   const messageListRef = useRef<HTMLDivElement>(null);
   const [userScrolledUp, setUserScrolledUp] = useState(false);
 
-  // 检测用户是否在底部附近（阈值 100px）
+  // 检测用户是否在底部附近（阈值 40px —— 整改计划：原 100px 太大，
+  // 用户小幅上滑仍被判定"在底部"→ 轮询更新被拉回）
   const isNearBottom = useCallback(() => {
     const el = messageListRef.current;
     if (!el) return true;
-    return el.scrollHeight - el.scrollTop - el.clientHeight < 100;
+    return el.scrollHeight - el.scrollTop - el.clientHeight < 40;
   }, []);
 
   // 监听手动滚动

@@ -215,6 +215,17 @@ export function Chat() {
     mountedRef,
   });
 
+  // 整改计划第 3 章（P0）修复：发送必须传入输入框内容。
+  // 原实现调用 handleSend() 不带参数，而 useStreamSend 的 handleSend(contentOverride?)
+  // 内部 `content = (contentOverride ?? '').trim()` → 恒为空 → 被守卫拦截，
+  // POST /messages 从不发出 → 新对话首条消息 AI 不回复。
+  const sendMessage = useCallback(() => {
+    const content = input.trim();
+    if (!content) return;
+    setInput(''); // 发送后清空输入框
+    handleSend(content);
+  }, [input, handleSend]);
+
   // useMessagePolling hook
   // 整改计划第 3 章（P0）：显式状态机 {idle,polling,error,retrying} + AbortController + retry
   const { pollStatus: msgPollStatus, pollErrorInfo: msgPollErrorInfo, retry: retryPolling } = useMessagePolling({
@@ -326,7 +337,8 @@ export function Chat() {
   const isNearBottom = useCallback(() => {
     const el = messageListRef.current;
     if (!el) return true;
-    return el.scrollHeight - el.scrollTop - el.clientHeight < 100;
+    // 整改计划：阈值 40px（原 100px 太大，小幅上滑被误判"在底部"→ 被拉回）
+    return el.scrollHeight - el.scrollTop - el.clientHeight < 40;
   }, []);
   const handleScroll = useCallback(() => {
     setUserScrolledUp(!isNearBottom());
@@ -368,8 +380,8 @@ export function Chat() {
   const messageList = useMemo(() => messages, [messages]);
 
   return (
-    <div className="min-h-screen" style={{ background: 'var(--bg-base)', backgroundImage: 'var(--bg-gradient)' }}>
-    <div style={{ maxWidth: 'min(1100px, 100%)', margin: '0 auto', padding: '0 16px' }}>
+    <div className="h-screen flex flex-col overflow-hidden" style={{ background: 'var(--bg-base)', backgroundImage: 'var(--bg-gradient)' }}>
+    <div style={{ maxWidth: 'min(1100px, 100%)', margin: '0 auto', padding: '0 16px', flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
       <PageHeader title="对话" description="与 AI 助手交流，管理多轮对话" icon={<MessageSquare size={22} />} color="var(--color-accent)" action={<button className="btn btn-primary" onClick={() => handleNewConversation(providers)} title="新建对话"><Plus size={18} /> 新建对话</button>} />
 
       <div className="flex flex-1 gap-6 min-h-0">
@@ -575,7 +587,7 @@ export function Chat() {
               <div className="flex gap-3" style={{ padding: '8px 8px 4px' }}>
                 <input className="input flex-1" value={input} onChange={e => setInput(e.target.value)}
                   onKeyDown={e => {
-                    if (e.key === 'Enter' && !e.shiftKey && !(e.nativeEvent as any).isComposing) handleSend();
+                    if (e.key === 'Enter' && !e.shiftKey && !(e.nativeEvent as any).isComposing) sendMessage();
                   }}
                   placeholder="输入消息，按 Enter 发送..." />
                 {sending ? (
@@ -586,7 +598,7 @@ export function Chat() {
                 <button className="btn btn-ghost" onClick={() => setTemplateOpen(true)} title="提示词模板" aria-label="提示词模板" style={{ width: 44, padding: 0, flexShrink: 0, color: 'var(--text-secondary)' }}>
                   <Bookmark size={18} />
                 </button>
-                <button className="btn btn-primary" onClick={() => handleSend()} disabled={sending} title="发送" aria-label="发送" style={{ width: 44, padding: 0, flexShrink: 0 }}>
+                <button className="btn btn-primary" onClick={() => sendMessage()} disabled={sending} title="发送" aria-label="发送" style={{ width: 44, padding: 0, flexShrink: 0 }}>
                   {sending ? <div className="spinner spinner-sm" /> : <Send size={18} />}
                 </button>
               </div>

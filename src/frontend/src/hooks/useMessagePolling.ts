@@ -143,6 +143,16 @@ export function useMessagePolling(options: UseMessagePollingOptions): UseMessage
         const serverMessages: Message[] = (conv.messages || []).map(parseMsg);
         const serverMap = new Map<string, Message>(serverMessages.map(m => [m.id, m]));
 
+        // 整改计划：无变化检测 —— 若 server 消息与本地完全一致（同 id 同 content），
+        // 直接返回原 prev 引用（不触发 messages 变更 → 不打扰滚动位置）。
+        // 修复：轮询 1s 一次但消息未变时，不能让 setMessages 产生新数组导致滚动 effect 反复触发。
+        if (serverMessages.length === prev.length && serverMessages.every((sm, i) => {
+          const p = prev[i];
+          return p && p.id === sm.id && p.content === sm.content && p.role === sm.role;
+        })) {
+          return prev;
+        }
+
         // Start with local messages, replace with server where IDs match
         const merged = prev.map(localMsg => serverMap.get(localMsg.id) || localMsg);
 

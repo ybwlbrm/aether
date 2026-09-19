@@ -6,20 +6,38 @@ const MEDIA_TIMEOUT_MS = 300000;
 
 // 本地认证 token（启动时从 /api/auth/token 获取，仅内存）
 let authToken: string | null = null;
+// 整改计划：authReadyPromise —— initAuthToken 只跑一次，供 ensureAuthToken 等待
+let authReadyPromise: Promise<void> | null = null;
 
-/** 初始化认证 token（应用启动时调用一次） */
-export async function initAuthToken(): Promise<void> {
-  try {
-    const res = await fetch(`${BASE}/auth/token`, {
-      headers: { 'X-Requested-With': 'XMLHttpRequest' },
-    });
-    if (res.ok) {
-      const data = await res.json();
-      authToken = data.token ?? null;
-    }
-  } catch {
-    // 静默失败：token 获取失败不阻断应用，敏感端点会返回 401 提示重试
+/** 初始化认证 token（应用启动时调用一次；幂等 —— 多次调用共用同一 Promise） */
+export function initAuthToken(): Promise<void> {
+  if (!authReadyPromise) {
+    authReadyPromise = (async () => {
+      try {
+        const res = await fetch(`${BASE}/auth/token`, {
+          headers: { 'X-Requested-With': 'XMLHttpRequest' },
+        });
+        if (res.ok) {
+          const data = await res.json();
+          authToken = data.token ?? null;
+        }
+      } catch {
+        // 静默失败：token 获取失败不阻断应用，写请求会 401 提示重试
+      }
+    })();
   }
+  return authReadyPromise;
+}
+
+/**
+ * 整改计划第 1 章（P0）：确保认证 token 已就绪。
+ * 后端默认拒绝鉴权 —— 若用户刷新页面后立即发送消息（token 尚未异步获取），
+ * 写请求会因缺 Authorization 被 401 拒绝，导致"新对话首条消息丢失"。
+ * 调用方（request / streamClient 写请求）在发起请求前 await 此函数。
+ */
+export async function ensureAuthToken(): Promise<void> {
+  if (authToken) return;
+  await initAuthToken();
 }
 
 /** 获取当前认证 token（供调试/测试用） */
@@ -62,6 +80,10 @@ async function request<T>(path: string, options?: RequestInit & { timeout?: numb
     path === p || (p.endsWith('/') && path.startsWith(p))
   );
   const needsAuth = !isReadMethod || isSensitiveRead;
+  if (needsAuth) {
+    // 整改计划第 1 章（P0）：写请求前确保 token 已就绪（防止刷新后首条消息 401 丢失）
+    await ensureAuthToken();
+  }
   if (needsAuth && authToken) {
     headers['Authorization'] = `Bearer ${authToken}`;
   }
