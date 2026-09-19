@@ -1,0 +1,129 @@
+/* ===== 通用 token（两主题共用） ===== */
+:root {
+  --color-accent: #5e9eff;
+  --color-accent-hover: #7aafff;
+  --color-accent-subtle: rgba(94, 158, 255, 0.12);
+  --color-accent-glow: rgba(80, 140, 255, 0.28);
+  --on-accent: #ffffff;
+  --color-success: #34d399;
+  --color-warning: #fbbf24;
+  --color-danger: #f87171;
+
+  --font-sans: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text",
+               "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --font-mono: "SF Mono", "SFMono-Regular", "Fira Code", Consolas, monospace;
+
+  --font-base: 15px;   /* 正文主字号 */
+  --font-md: 16px;     /* 重点正文 */
+  --font-sm: 13px;     /* 次级 */
+  --font-xs: 12px;     /* 元信息（11px 仅允许用于时间戳/角标） */
+
+  /* 8pt 网格 */
+  --space-1: 4px;  --space-2: 8px;  --space-3: 12px; --space-4: 16px;
+  --space-5: 20px; --space-6: 24px; --space-8: 32px; --space-10: 40px;
+  --space-12: 48px;
+
+  /* 圆角（移动端规格） */
+  --radius-sm: 12px;    /* 小：12~14 */
+  --radius-md: 16px;    /* 中：16~18 */
+  --radius-lg: 20px;    /* 大：20~24 */
+  --radius-xl: 24px;
+  --radius-input: 26px; /* 输入框：24~28 */
+  --radius-full: 9999px;
+
+  /* 玻璃 */
+  --glass-blur-radius: 26px;
+  --glass-saturate: 200%;
+  --glass-brightness: 1.25;
+
+  /* 动画 */
+  --anim-fast: 180ms;
+  --anim-base: 220ms;
+  --anim-slow: 260ms;
+  --anim-curve: cubic-bezier(0.34, 1.56, 0.64, 1);   /* 进场弹性 */
+  --anim-ease: cubic-bezier(0.25, 0.1, 0.25, 1);     /* 常规 */
+
+  /* 图标尺寸（统一） */
+  --icon-nav: 20px;
+  --icon-btn: 18px;
+  --icon-card: 24px;
+  --icon-sm: 16px;
+
+  /* 安全区域 */
+  --safe-top: env(safe-area-inset-top, 0px);
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+}
+
+/* ===== 暗色主题（默认） ===== */
+:root, [data-theme="dark"] {
+  color-scheme: dark;
+  --bg-base: #0a0b10;
+  --bg-gradient:
+    radial-gradient(120% 90% at 15% 0%, rgba(94,158,255,0.13) 0%, rgba(139,92,246,0.07) 40%, transparent 62%),
+    linear-gradient(180deg, #0d0f18 0%, #0a0b10 65%);
+  --bg-surface: rgba(255,255,255,0.04);
+  --bg-surface-hover: rgba(255,255,255,0.08);
+  --bg-elevated: rgba(20,22,30,0.85);
+  --bg-overlay: rgba(0,0,0,0.55);
+
+  --glass-fill-rgb: 20, 22, 28;
+  --glass-fill: rgba(20, 22, 28, 0.10);
+  --glass-fill-hover: rgba(20, 22, 28, 0.16);
+  --glass-border: 1px solid rgba(255,255,255,0.10);
+  --glass-shadow:
+    0 4px 24px rgba(0,0,0,0.22),
+    inset 0 1px 0.5px rgba(255,255,255,0.12);
+
+  --text-primary: rgba(255,255,255,0.92);
+  --text-secondary: rgba(255,255,255,0.55);
+  --text-tertiary: rgba(255,255,255,0.35);
+
+  --border-primary: rgba(255,255,255,0.08);
+
+  --input-bg: rgba(20,22,28,0.5);
+  --input-border: rgba(255,255,255,0.08);
+  --input-placeholder: rgba(255,255,255,0.25);
+
+  --status-online: #34d399;
+  --status-busy: #fbbf24;
+  --status-offline: rgba(255,255,255,0.20);
+
+  --scrollbar-thumb: rgba(255,255,255,0.08);
+}
+
+/* ===== 浅色主题 ===== */
+[data-theme="light"] {
+  color-scheme: light;
+  --bg-base: #f5f5f7;
+  --bg-gradient:
+    radial-gradient(120% 90% at 15% 0%, rgba(94,158,255,0.09) 0%, rgba(139,92,246,0.04) 40%, transparent 62%),
+    linear-gradient(180deg, #f7f7f9 0%, #f5f5f7 65%);
+  --bg-surface: rgba(0,0,0,0.03);
+  --bg-surface-hover: rgba(0,0,0,0.05);
+  --bg-elevated: rgba(255,255,255,0.85);
+  --bg-overlay: rgba(0,0,0,0.30);
+
+  --glass-fill-rgb: 255, 255, 255;
+  --glass-fill: rgba(255,255,255,0.60);
+  --glass-fill-hover: rgba(255,255,255,0.75);
+  --glass-border: 1px solid rgba(255,255,255,0.55);
+  --glass-shadow:
+    0 4px 20px rgba(0,0,0,0.05),
+    inset 0 1px 0.5px rgba(255,255,255,0.85);
+
+  --text-primary: rgba(0,0,0,0.88);
+  --text-secondary: rgba(0,0,0,0.62);
+  --text-tertiary: rgba(0,0,0,0.45);
+
+  --border-primary: rgba(0,0,0,0.08);
+
+  --input-bg: rgba(255,255,255,0.70);
+  --input-border: rgba(0,0,0,0.08);
+  --input-placeholder: rgba(0,0,0,0.25);
+
+  --status-online: #2ecc8f;   /* 浅色下略加深保证对比 */
+  --status-busy: #e0a30e;
+  --status-offline: rgba(0,0,0,0.15);
+
+  --scrollbar-thumb: rgba(0,0,0,0.12);
+}

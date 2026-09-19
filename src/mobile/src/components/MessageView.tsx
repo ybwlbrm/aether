@@ -1,7 +1,24 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { getMessages, sendCommand, subscribeMessages, getSyncState, onSyncStateChange, type SyncStatus } from '../api/supabase';
+import {
+  getMessages,
+  sendCommand,
+  subscribeMessages,
+  getSyncState,
+  onSyncStateChange,
+  type SyncStatus,
+} from '../api/supabase';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import {
+  ChevronLeft,
+  ChevronRight,
+  ChevronDown,
+  MoreHorizontal,
+  Sparkles,
+  Loader2,
+  Plus,
+  ArrowUp,
+} from 'lucide-react';
 
 // 代码块组件（带行号+复制按钮，透明背景）
 function CodeBlock({ language, code }: { language: string; code: string }) {
@@ -16,17 +33,17 @@ function CodeBlock({ language, code }: { language: string; code: string }) {
   const lines = code.split('\n');
   const lineNumWidth = String(lines.length).length;
   return (
-    <div style={{ margin: '8px 0', borderRadius: 10, overflow: 'hidden', border: '1px solid var(--border)' }}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '4px 10px', fontSize: 11, fontWeight: 600, background: 'rgba(255,255,255,0.04)', color: 'var(--text-secondary)', borderBottom: '1px solid var(--border)' }}>
+    <div className="md-codeblock">
+      <div className="md-codeblock-head">
         <span>{language}</span>
-        <span style={{ color: 'var(--text-tertiary)', fontWeight: 400 }}>{lines.length} 行</span>
-        <button onClick={handleCopy} style={{ marginLeft: 'auto', background: 'none', border: 'none', color: 'var(--text-tertiary)', cursor: 'pointer', fontSize: 11, padding: '2px 6px' }}>{copied ? '已复制' : '复制'}</button>
+        <span className="md-codeblock-copy" style={{ color: 'var(--text-tertiary)', fontWeight: 400 }}>{lines.length} 行</span>
+        <button className="md-codeblock-copy" onClick={handleCopy}>{copied ? '已复制' : '复制'}</button>
       </div>
-      <div style={{ padding: '8px 12px', overflowX: 'auto', fontSize: 12, lineHeight: 1.5, fontFamily: 'monospace', background: 'transparent' }}>
+      <div className="md-codeblock-lines">
         {lines.map((line, i) => (
-          <div key={i} style={{ display: 'flex', gap: 8 }}>
-            <span style={{ color: 'var(--text-tertiary)', textAlign: 'right', minWidth: `${lineNumWidth}ch`, userSelect: 'none', flexShrink: 0 }}>{i + 1}</span>
-            <span style={{ color: 'var(--text)' }}>{line || ' '}</span>
+          <div key={i} className="md-codeblock-line">
+            <span className="md-codeblock-lineno" style={{ minWidth: `${lineNumWidth}ch` }}>{i + 1}</span>
+            <span>{line || ' '}</span>
           </div>
         ))}
       </div>
@@ -34,7 +51,7 @@ function CodeBlock({ language, code }: { language: string; code: string }) {
   );
 }
 
-// Markdown 渲染组件（react-markdown + remark-gfm，支持表格/代码块/链接/图片等）
+// Markdown 渲染组件（react-markdown + remark-gfm，样式 class 化）
 function MarkdownContent({ content }: { content: string }) {
   if (!content) return null;
   return (
@@ -47,18 +64,18 @@ function MarkdownContent({ content }: { content: string }) {
           if (match && codeText.includes('\n')) {
             return <CodeBlock language={match[1]} code={codeText} />;
           }
-          return <code style={{ fontSize: 12, padding: '1px 5px', borderRadius: 4, background: 'transparent', color: 'var(--text)', border: 'none' }} {...props}>{children}</code>;
+          return <code className="md-inline-code" {...props}>{children}</code>;
         },
         pre({ children }) { return <>{children}</>; },
         table({ children }) {
-          return <div style={{ overflowX: 'auto', margin: '8px 0' }}><table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12, background: 'transparent', border: '1px solid var(--border)' }}>{children}</table></div>;
+          return <div className="md-table-wrap"><table>{children}</table></div>;
         },
-        th({ children }) { return <th style={{ border: '1px solid var(--border)', padding: '4px 8px', textAlign: 'left', background: 'rgba(94,158,255,0.08)', fontWeight: 600 }}>{children}</th>; },
-        td({ children }) { return <td style={{ border: '1px solid var(--border)', padding: '4px 8px', background: 'transparent' }}>{children}</td>; },
-        a({ href, children }) { return <a href={href} target="_blank" rel="noopener noreferrer" style={{ color: '#5e9eff' }}>{children}</a>; },
+        th({ children }) { return <th>{children}</th>; },
+        td({ children }) { return <td>{children}</td>; },
+        a({ href, children }) { return <a className="md-link" href={href} target="_blank" rel="noopener noreferrer">{children}</a>; },
         img({ src, alt }) {
           if (src?.startsWith('data:') || src?.startsWith('http')) {
-            return <img src={src} alt={alt} style={{ maxWidth: '100%', maxHeight: 300, borderRadius: 8, margin: '8px 0', display: 'block' }} />;
+            return <img className="md-img" src={src} alt={alt} />;
           }
           return <span style={{ color: 'var(--text-secondary)', fontStyle: 'italic' }}>[图片]</span>;
         },
@@ -67,6 +84,32 @@ function MarkdownContent({ content }: { content: string }) {
       {content}
     </ReactMarkdown>
   );
+}
+
+// Reasoning 折叠块（§8.5，中性化）
+function ReasoningBlock({ reasoning }: { reasoning: string }) {
+  const [open, setOpen] = useState(false);
+  const lines = reasoning.split('\n').filter(Boolean);
+  return (
+    <div className={`msg-reasoning ${open ? 'open' : ''}`} onClick={() => setOpen((o) => !o)}>
+      <div className="msg-reasoning-head">
+        <Loader2 size={13} className="spin" />
+        <span>正在处理</span>
+        <ChevronRight size={14} className="msg-reasoning-chevron" />
+      </div>
+      {open && (
+        <div className="msg-reasoning-body">
+          {lines.map((l, i) => <p key={i}>{l}</p>)}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// 解析 tool_results JSON（失败回退 null）
+function safeParse(json?: string): any | null {
+  if (!json) return null;
+  try { return JSON.parse(json); } catch { return null; }
 }
 
 interface Message {
@@ -98,6 +141,7 @@ export default function MessageView({ conversationId, conversationTitle, onBack 
   const [expandedTools, setExpandedTools] = useState<Set<string>>(new Set());
   const [templates, setTemplates] = useState<{ name: string; content: string }[]>([]);
   const [templateOpen, setTemplateOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
   // 手机端思考过程横条
   const [liveReasoning, setLiveReasoning] = useState<string>('');
   // P0-A08：Realtime 连接状态（realtime 正常时不轮询，断开时降级轮询）
@@ -106,6 +150,9 @@ export default function MessageView({ conversationId, conversationTitle, onBack 
   const listRef = useRef<HTMLDivElement>(null);
   const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const assistantReceivedRef = useRef(false);
+  // §8.4：仅在接近底部时跟随新内容；用户上翻阅读时停止跟随
+  const nearBottomRef = useRef(true);
+  const [showJump, setShowJump] = useState(false);
 
   const loadMessages = useCallback(async () => {
     try {
@@ -123,14 +170,14 @@ export default function MessageView({ conversationId, conversationTitle, onBack 
     // 实时订阅新消息（支持流式逐字更新 — 后端 streaming 不断 upsert 同一消息）
     const unsub = subscribeMessages(conversationId, (newMsg: Message) => {
       setMessages((prev) => {
-        const existingIdx = prev.findIndex(m => m.id === newMsg.id);
+        const existingIdx = prev.findIndex((m) => m.id === newMsg.id);
         if (existingIdx !== -1) {
           const next = [...prev];
           next[existingIdx] = newMsg;
           return next;
         }
         if (newMsg.role === 'user') {
-          const tempIdx = prev.findIndex(m => m.id.startsWith('temp-'));
+          const tempIdx = prev.findIndex((m) => m.id.startsWith('temp-'));
           if (tempIdx !== -1) {
             const next = [...prev];
             next[tempIdx] = newMsg;
@@ -162,9 +209,7 @@ export default function MessageView({ conversationId, conversationTitle, onBack 
     return unsub;
   }, [conversationId, loadMessages]);
 
-  // 轮询兜底（P0-A08）：Realtime 连接正常时不轮询；
-  // realtime 断线时降级为每 2 秒轮询；恢复连接后 effect 重评估自动停止轮询。
-  // 连接状态由模块级 syncStatus（channel SUBSCRIBED/CLOSED 驱动）同步到本地 state。
+  // 轮询兜底（P0-A08）：Realtime 连接正常时不轮询；断开时降级每 2 秒轮询
   useEffect(() => {
     return onSyncStateChange((s) => setSyncStatus(s.status));
   }, []);
@@ -182,7 +227,7 @@ export default function MessageView({ conversationId, conversationTitle, onBack 
           const merged = [...prev];
           let changed = false;
           for (const newMsg of data) {
-            const idx = merged.findIndex(m => m.id === newMsg.id);
+            const idx = merged.findIndex((m) => m.id === newMsg.id);
             if (idx !== -1) {
               if (merged[idx].content !== newMsg.content) {
                 merged[idx] = newMsg;
@@ -206,16 +251,30 @@ export default function MessageView({ conversationId, conversationTitle, onBack 
     return () => { cancelled = true; clearInterval(interval); };
   }, [conversationId, syncStatus]);
 
-  // 自动滚动到底部
+  // §8.4：条件跟随滚动 — 仅在接近底部时滚动到底
+  const onScroll = () => {
+    const el = listRef.current;
+    if (!el) return;
+    nearBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 96;
+    setShowJump(!nearBottomRef.current);
+  };
+
   useEffect(() => {
-    if (listRef.current) {
-      listRef.current.scrollTop = listRef.current.scrollHeight;
+    const el = listRef.current;
+    if (!el) return;
+    el.addEventListener('scroll', onScroll, { passive: true });
+    return () => el.removeEventListener('scroll', onScroll);
+  }, []);
+
+  useEffect(() => {
+    const el = listRef.current;
+    if (el && nearBottomRef.current) {
+      el.scrollTop = el.scrollHeight;
     }
   }, [messages]);
 
   // P1 修复：组件卸载时清理 pending 超时定时器，防泄漏/悬空 setState
   useEffect(() => {
-    const current = timeoutRef.current;
     return () => {
       if (timeoutRef.current) clearTimeout(timeoutRef.current);
       timeoutRef.current = null;
@@ -251,13 +310,13 @@ export default function MessageView({ conversationId, conversationTitle, onBack 
     setSending(true);
     assistantReceivedRef.current = false;
 
-    const tempId = `temp-${Date.now()}-${Math.random().toString(36).slice(2,6)}`;
+    const tempId = `temp-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
     const optimisticMsg: Message = {
       id: tempId, role: 'user', content: text, created_at: new Date().toISOString(),
     };
     setMessages((prev) => [...prev, optimisticMsg]);
 
-    // 附加模式参数
+    // 附加模式参数（§10 #3 原样）
     const contentWithMeta = `[mode=${mode}][level=${permissionLevel}][deep=${deepThinking}][web=${webSearch}][loop=${loopMode}] ${text}`.trim();
     const ok = await sendCommand(contentWithMeta, conversationId);
     if (!ok) {
@@ -274,7 +333,7 @@ export default function MessageView({ conversationId, conversationTitle, onBack 
           setMessages((prev) => [...prev, {
             id: `timeout-${Date.now()}`,
             role: 'assistant',
-            content: '⚠️ 等待超时，桌面端可能未运行或 AI 配置有误',
+            content: '等待超时，桌面端可能未运行或 AI 配置有误',
             created_at: new Date().toISOString(),
           }]);
           return false;
@@ -297,7 +356,7 @@ export default function MessageView({ conversationId, conversationTitle, onBack 
   };
 
   const toggleToolExpand = (msgId: string) => {
-    setExpandedTools(prev => {
+    setExpandedTools((prev) => {
       const next = new Set(prev);
       if (next.has(msgId)) next.delete(msgId);
       else next.add(msgId);
@@ -311,30 +370,29 @@ export default function MessageView({ conversationId, conversationTitle, onBack 
     const isSystem = msg.role === 'system';
     const isExpanded = expandedTools.has(msg.id);
 
-    // 工具消息 — 可展开/收起
+    // 工具消息（§8.6 紧凑 pill）
     if (isTool) {
-      const showFull = isExpanded || msg.content.length <= 150;
-      const display = showFull ? msg.content : msg.content.slice(0, 150) + '...';
+      const tr = safeParse(msg.tool_results);
+      const toolName = tr?.tool_name ?? (msg.content.slice(0, 18) + '…');
+      const status = tr?.status ?? 'done';
       return (
-        <div className="message tool" key={msg.id} style={{ alignSelf: 'stretch', cursor: 'pointer' }}
-          onClick={() => toggleToolExpand(msg.id)}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
-            <span style={{ fontWeight: 600, color: '#34d399', fontSize: 12 }}>🔧 工具结果</span>
-            <span style={{ fontSize: 11, color: 'var(--text-secondary)' }}>{isExpanded ? '▲ 收起' : '▼ 展开'}</span>
+        <div key={msg.id}>
+          <div className="msg-tool" onClick={() => toggleToolExpand(msg.id)}>
+            <span className={`msg-tool-dot ${status === 'running' ? 'running' : ''}`} />
+            <span className="msg-tool-name">{toolName}</span>
+            <span className="msg-tool-status">{status === 'running' ? '正在执行…' : '已完成'}</span>
+            <ChevronRight size={14} className={isExpanded ? 'rotated' : ''} style={isExpanded ? { transform: 'rotate(90deg)', transition: 'transform 200ms' } : { transition: 'transform 200ms' }} />
           </div>
-          <div style={{ whiteSpace: 'pre-wrap', maxHeight: isExpanded ? 400 : 120, overflowY: 'auto', fontWeight: 400 }}>
-            {display}
-          </div>
-          <div className="message-time">{formatTime(msg.created_at)}</div>
+          {isExpanded && <div className="msg-tool-detail">{msg.content}</div>}
         </div>
       );
     }
 
     if (isSystem) {
       return (
-        <div className="message system" key={msg.id}>
-          ⚙️ {msg.content}
-          <div className="message-time">{formatTime(msg.created_at)}</div>
+        <div className="msg msg-system" key={msg.id}>
+          {msg.content}
+          <span className="msg-time">{formatTime(msg.created_at)}</span>
         </div>
       );
     }
@@ -350,35 +408,45 @@ export default function MessageView({ conversationId, conversationTitle, onBack 
     }
 
     return (
-      <div className={`message ${isUser ? 'user' : 'assistant'}`} key={msg.id}>
-        {reasoning && (
-          <div style={{
-            marginBottom: 8, padding: '8px 12px', borderRadius: 8,
-            background: 'rgba(167,139,250,0.08)', border: '1px solid rgba(167,139,250,0.15)',
-            fontSize: 12, color: 'var(--text-secondary)',
-          }}>
-            <div style={{ fontWeight: 600, marginBottom: 4, color: '#a78bfa' }}>🧠 思考过程</div>
-            <div style={{ whiteSpace: 'pre-wrap', maxHeight: 200, overflowY: 'auto', lineHeight: 1.5 }}>{reasoning}</div>
-          </div>
-        )}
-        {hasCode ? (
-          <div style={{ marginTop: 4 }}>
-            <MarkdownContent content={content} />
-          </div>
+      <div className={`msg ${isUser ? 'msg-user' : 'msg-assistant'}`} key={msg.id}>
+        {isUser ? (
+          <>
+            <div className="msg-content">{content}</div>
+            <span className="msg-time">{formatTime(msg.created_at)}</span>
+          </>
         ) : (
-          <div style={{ whiteSpace: 'pre-wrap' }}><MarkdownContent content={content} /></div>
+          <>
+            <div className="msg-assistant-head">
+              <Sparkles size={14} className="msg-assistant-mark" />
+              <span className="msg-assistant-role">Aether</span>
+            </div>
+            {reasoning && <ReasoningBlock reasoning={reasoning} />}
+            <div className="msg-content">
+              {hasCode ? (
+                <MarkdownContent content={content} />
+              ) : (
+                <MarkdownContent content={content} />
+              )}
+            </div>
+            <span className="msg-time">{formatTime(msg.created_at)}</span>
+          </>
         )}
-        <div className="message-time">{formatTime(msg.created_at)}</div>
       </div>
     );
   };
 
+  const online = syncStatus === 'connected';
+
   if (loading) {
     return (
-<div className="app-layout chat-view">
+      <div className="chat-page">
         <div className="chat-header">
-          <button className="back-btn" onClick={onBack}>←</button>
-          <h2>{conversationTitle}</h2>
+          <button className="chat-back-btn" onClick={onBack} aria-label="返回">
+            <ChevronLeft size={22} />
+          </button>
+          <div className="chat-header-text">
+            <h2 className="chat-title">{conversationTitle}</h2>
+          </div>
         </div>
         <div className="loading">
           <div className="spinner" />
@@ -389,146 +457,179 @@ export default function MessageView({ conversationId, conversationTitle, onBack 
   }
 
   return (
-    <div className="chat-view">
+    <div className="chat-page">
+      {/* 顶栏（§8.2） */}
       <div className="chat-header">
-        <button className="back-btn" onClick={onBack}>←</button>
-        <h2>{conversationTitle}</h2>
-        <span className="status-dot online" />
+        <button className="chat-back-btn" onClick={onBack} aria-label="返回">
+          <ChevronLeft size={22} />
+        </button>
+        <div className="chat-header-text">
+          <h2 className="chat-title">{conversationTitle}</h2>
+          <p className="chat-subtitle">
+            <span className={`sync-dot ${online ? 'online' : ''}`} />
+            {sending ? '电脑端正在工作' : online ? '已同步' : '同步中断，正在重连…'}
+          </p>
+        </div>
+        <button className="chat-more-btn" onClick={() => setSettingsOpen(true)} aria-label="执行设置">
+          <MoreHorizontal size={20} />
+        </button>
       </div>
 
-      {/* 模式/Level/Token 控制栏（对齐电脑端） */}
-      <div style={{
-        display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8,
-        padding: '8px 12px', fontSize: 11, color: 'var(--text-secondary)',
-        borderBottom: '1px solid var(--border)', flexWrap: 'wrap',
-        background: 'rgba(10,10,15,0.6)', backdropFilter: 'blur(12px)',
-      }}>
-        <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-          {convTokenTotal > 0 && <span>⚡ 累计: {convTokenTotal.toLocaleString()} tokens</span>}
-        </div>
-        <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
-          {/* 模式切换 */}
-          <button onClick={() => setMode('normal')}
-            style={{ fontSize: 11, fontWeight: 600, padding: '2px 8px', borderRadius: 99, border: `1px solid ${mode === 'normal' ? 'rgba(94,158,255,0.3)' : 'transparent'}`, background: mode === 'normal' ? 'rgba(94,158,255,0.12)' : 'var(--bg-card)', color: mode === 'normal' ? '#5e9eff' : 'var(--text-secondary)', cursor: 'pointer' }}>
-            ⊥ 普通
-          </button>
-          <button onClick={() => setMode('super')}
-            style={{ fontSize: 11, fontWeight: 600, padding: '2px 8px', borderRadius: 99, border: `1px solid ${mode === 'super' ? 'rgba(167,139,250,0.3)' : 'transparent'}`, background: mode === 'super' ? 'rgba(167,139,250,0.12)' : 'var(--bg-card)', color: mode === 'super' ? '#a78bfa' : 'var(--text-secondary)', cursor: 'pointer' }}>
-            ⊥ 超级
-          </button>
-          <span style={{ color: 'var(--border)' }}>|</span>
-          {/* 权限等级 */}
-          <button onClick={() => setPermissionLevel(l => l >= 3 ? 1 : l + 1)}
-            style={{ fontSize: 11, fontWeight: 600, padding: '2px 8px', borderRadius: 99, border: `1px solid ${permissionLevel === 3 ? 'rgba(239,68,68,0.3)' : permissionLevel === 2 ? 'rgba(52,211,153,0.3)' : 'rgba(245,158,11,0.3)'}`, background: permissionLevel === 3 ? 'rgba(239,68,68,0.12)' : permissionLevel === 2 ? 'rgba(52,211,153,0.12)' : 'rgba(245,158,11,0.12)', color: permissionLevel === 3 ? '#ef4444' : permissionLevel === 2 ? '#34d399' : '#f59e0b', cursor: 'pointer' }}>
-            {permissionLevel === 3 ? '🔴 Level 3' : permissionLevel === 2 ? '🔓 Level 2' : '🔒 Level 1'}
-          </button>
-          <span style={{ color: 'var(--border)' }}>|</span>
-          {/* 深度思考开关 */}
-          <button onClick={() => setDeepThinking(d => !d)}
-            style={{ fontSize: 11, fontWeight: 600, padding: '2px 8px', borderRadius: 99, border: `1px solid ${deepThinking ? 'rgba(94,158,255,0.3)' : 'transparent'}`, background: deepThinking ? 'rgba(94,158,255,0.12)' : 'transparent', color: deepThinking ? '#5e9eff' : 'var(--text-secondary)', cursor: 'pointer' }}>
-            🧠 深度
-          </button>
-          {/* 联网搜索开关 */}
-          <button onClick={() => setWebSearch(w => !w)}
-            style={{ fontSize: 11, fontWeight: 600, padding: '2px 8px', borderRadius: 99, border: `1px solid ${webSearch ? 'rgba(52,211,153,0.3)' : 'transparent'}`, background: webSearch ? 'rgba(52,211,153,0.12)' : 'transparent', color: webSearch ? '#34d399' : 'var(--text-secondary)', cursor: 'pointer' }}>
-            🌐 联网
-          </button>
-          {/* 循环模式开关 */}
-          <button onClick={() => setLoopMode(l => !l)}
-            title="循环模式：AI 持续执行直到完整完成任务"
-            style={{ fontSize: 11, fontWeight: 600, padding: '2px 8px', borderRadius: 99, border: `1px solid ${loopMode ? 'rgba(245,158,11,0.3)' : 'transparent'}`, background: loopMode ? 'rgba(245,158,11,0.12)' : 'transparent', color: loopMode ? '#f59e0b' : 'var(--text-secondary)', cursor: 'pointer' }}>
-            ♾️ 循环
-          </button>
-        </div>
-      </div>
-
+      {/* 消息列表（§8.4 独立滚动 + 条件跟随） */}
       <div className="message-list" ref={listRef}>
         {messages.length === 0 ? (
           <div className="empty-state" style={{ padding: '40px 24px' }}>
-            <div className="empty-state-icon">💬</div>
-            <h3>暂无消息</h3>
-            <p>发送一条指令开始对话</p>
+            <h3 className="empty-state-title">暂无消息</h3>
+            <p className="empty-state-desc">发送一条指令开始对话</p>
           </div>
         ) : (
           messages.map(renderMessage)
         )}
         {sending && (
-          <div className="message assistant" style={{ alignSelf: 'flex-start', background: 'var(--bg-card)', border: '1px solid var(--border)' }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-              <div className="spinner" style={{ width: 16, height: 16, margin: 0 }} />
-              正在处理...
+          <div className="msg msg-assistant">
+            <div className="msg-assistant-head">
+              <Sparkles size={14} className="msg-assistant-mark" />
+              <span className="msg-assistant-role">Aether</span>
+            </div>
+            <div className="msg-content">
+              <span>正在处理…</span>
+              <span className="stream-indicator" />
             </div>
           </div>
         )}
       </div>
 
-      {/* 手机端思考过程横条 — 输入框上方 */}
+      {/* 回到底部浮动按钮（§8.4） */}
+      {showJump && (
+        <button
+          className="jump-bottom"
+          onClick={() => {
+            const el = listRef.current;
+            if (el) el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' });
+          }}
+        >
+          <ChevronDown size={18} />
+          回到底部
+        </button>
+      )}
+
+      {/* 思考过程横条（§8.5 中性玻璃小条，输入框上方） */}
       {liveReasoning ? (
-        <div style={{
-          display: 'flex', alignItems: 'flex-start', gap: 8,
-          margin: '4px 12px 2px', padding: '6px 10px',
-          borderRadius: 12, maxHeight: 100,
-          background: 'rgba(167,139,250,0.08)',
-          border: '1px solid rgba(167,139,250,0.18)',
-          backdropFilter: 'blur(12px) saturate(1.4)',
-          WebkitBackdropFilter: 'blur(12px) saturate(1.4)',
-        }}>
-          <span style={{ fontSize: 14, flexShrink: 0, marginTop: 1 }}>🧠</span>
-          <div ref={reasoningBarRef} style={{
-            flex: 1, fontSize: 12, lineHeight: 1.6,
-            color: 'var(--text-secondary)',
-            whiteSpace: 'pre-wrap', maxHeight: 86,
-            overflowY: 'auto',
-          }}>{liveReasoning}</div>
+        <div className="reasoning-bar">
+          <Loader2 size={13} className="reasoning-bar-icon spin" />
+          <div ref={reasoningBarRef} className="reasoning-bar-text">{liveReasoning}</div>
         </div>
       ) : null}
 
-      <div className="command-input-area">
-        {templateOpen && (
-          <div style={{
-            position: 'fixed', bottom: 72, left: 12, right: 12, zIndex: 100,
-            background: 'var(--bg-card)', border: '1px solid var(--border)',
-            borderRadius: 14, padding: 8, maxHeight: 240, overflowY: 'auto',
-            backdropFilter: 'blur(24px)',
-          }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '4px 8px' }}>
-              <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--text)' }}>提示词模板</span>
-              <button onClick={() => setTemplateOpen(false)} style={{ background: 'none', border: 'none', color: 'var(--text-secondary)', fontSize: 14, cursor: 'pointer' }}>✕</button>
-            </div>
-            {templates.length === 0 ? (
-              <p style={{ fontSize: 12, color: 'var(--text-secondary)', padding: 8 }}>暂无模板</p>
-            ) : (
-              templates.map((t, i) => (
-                <button key={i} onClick={() => { setInput(t.content); setTemplateOpen(false); }}
-                  style={{ display: 'block', width: '100%', textAlign: 'left', padding: '8px 10px', borderRadius: 8, border: 'none', background: 'transparent', color: 'var(--text)', fontSize: 13, cursor: 'pointer' }}>
-                  <span style={{ fontWeight: 600 }}>{t.name}</span>
-                  <span style={{ color: 'var(--text-secondary)', fontSize: 11, marginLeft: 6 }}>{t.content.slice(0, 40)}</span>
-                </button>
-              ))
-            )}
-          </div>
-        )}
-        <button onClick={() => setTemplateOpen(!templateOpen)}
-          title="提示词模板"
-          style={{ flexShrink: 0, height: 44, padding: '0 8px', borderRadius: 22, border: '1px solid var(--border)', background: templateOpen ? 'rgba(94,158,255,0.12)' : 'rgba(255,255,255,0.04)', color: 'var(--text-secondary)', fontSize: 16, cursor: 'pointer' }}>
-          ⚡
+      {/* 输入栏（§8.7 玻璃圆角） */}
+      <div className="command-bar">
+        <button className="command-bar-btn" onClick={() => setTemplateOpen(!templateOpen)} title="提示词模板">
+          <Plus size={20} />
         </button>
         <textarea
+          className="command-input"
           value={input}
           onChange={(e) => setInput(e.target.value)}
           onKeyDown={handleKeyDown}
-          placeholder="输入指令，按 Enter 发送..."
+          placeholder="输入指令…"
           rows={1}
           disabled={sending}
         />
         <button
-          className={`send-btn ${sending ? 'sending' : ''}`}
+          className="send-btn"
           onClick={handleSend}
           disabled={!input.trim() || sending}
+          aria-label="发送"
         >
-          {sending ? '⋯' : '↑'}
+          {sending ? <Loader2 size={18} className="spin" /> : <ArrowUp size={18} />}
         </button>
       </div>
+
+      {/* 模板弹层 */}
+      {templateOpen && (
+        <div className="template-popup">
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '4px 8px' }}>
+            <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-primary)' }}>提示词模板</span>
+            <button
+              className="command-bar-btn"
+              style={{ width: 28, height: 28 }}
+              onClick={() => setTemplateOpen(false)}
+              aria-label="关闭"
+            >
+              ×
+            </button>
+          </div>
+          {templates.length === 0 ? (
+            <p style={{ fontSize: 12, color: 'var(--text-secondary)', padding: 8 }}>暂无模板</p>
+          ) : (
+            templates.map((t, i) => (
+              <button
+                key={i}
+                className="template-popup-item"
+                onClick={() => { setInput(t.content); setTemplateOpen(false); }}
+              >
+                <span className="template-popup-item-name">{t.name}</span>
+                <span className="template-popup-item-preview">{t.content.slice(0, 40)}</span>
+              </button>
+            ))
+          )}
+        </div>
+      )}
+
+      {/* 执行设置 Bottom Sheet（§8.3 功能全保留） */}
+      {settingsOpen && (
+        <div className="sheet-backdrop" onClick={() => setSettingsOpen(false)}>
+          <div className="sheet settings-sheet" onClick={(e) => e.stopPropagation()}>
+            <div className="sheet-handle" />
+            <h3 className="sheet-title">执行设置</h3>
+
+            <div className="sheet-group">
+              <p className="sheet-group-label">执行模式</p>
+              <div className="sheet-segment">
+                <button className={mode === 'normal' ? 'active' : ''} onClick={() => setMode('normal')}>普通</button>
+                <button className={mode === 'super' ? 'active' : ''} onClick={() => setMode('super')}>Super Agent</button>
+              </div>
+            </div>
+
+            <div className="sheet-group">
+              <p className="sheet-group-label">能力</p>
+              <div className="sheet-row">
+                <span>深度思考</span>
+                <button className={`switch ${deepThinking ? 'on' : ''}`} onClick={() => setDeepThinking((d) => !d)} aria-label="深度思考" />
+              </div>
+              <div className="sheet-row">
+                <span>联网搜索</span>
+                <button className={`switch ${webSearch ? 'on' : ''}`} onClick={() => setWebSearch((w) => !w)} aria-label="联网搜索" />
+              </div>
+              <div className="sheet-row">
+                <span>循环执行</span>
+                <button className={`switch ${loopMode ? 'on' : ''}`} onClick={() => setLoopMode((l) => !l)} aria-label="循环执行" />
+              </div>
+            </div>
+
+            <div className="sheet-group">
+              <p className="sheet-group-label">权限</p>
+              <div className="sheet-segment sheet-levels">
+                {[1, 2, 3].map((l) => (
+                  <button key={l} className={permissionLevel === l ? 'active' : ''} onClick={() => setPermissionLevel(l)}>
+                    Level {l}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div className="sheet-group">
+              <p className="sheet-group-label">会话</p>
+              <div className="sheet-row">
+                <span>累计 Token</span>
+                <span className="sheet-value">{convTokenTotal.toLocaleString()}</span>
+              </div>
+            </div>
+
+            <button className="btn-primary sheet-done" onClick={() => setSettingsOpen(false)}>完成</button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

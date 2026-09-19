@@ -1,0 +1,21 @@
+/* 玻璃 Surface 原语：仅用于需要承载内容的表层面 */
+.glass-surface {
+  position: relative;
+  background: var(--glass-fill);
+  -webkit-backdrop-filter: blur(var(--glass-blur-radius)) saturate(var(--glass-saturate)) brightness(var(--glass-brightness));
+  backdrop-filter: blur(var(--glass-blur-radius)) saturate(var(--glass-saturate)) brightness(var(--glass-brightness));
+  border: var(--glass-border);
+  box-shadow: var(--glass-shadow);
+  border-radius: var(--radius-md);
+}
+/* 内部顶部高光（可选，随用随取） */
+.glass-surface::before {
+  content: '';
+  position: absolute; inset: 0;
+  border-radius: inherit;
+  background: linear-gradient(180deg, rgba(255,255,255,0.06), transparent 40%);
+  pointer-events: none;
+}
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  .glass-surface { background: rgba(var(--glass-fill-rgb), 0.92) !important; }
+}

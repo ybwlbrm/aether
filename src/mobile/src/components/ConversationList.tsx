@@ -1,5 +1,14 @@
 import { useState, useEffect, useCallback } from 'react';
-import { getConversations, subscribeConversations, deleteConversation } from '../api/supabase';
+import {
+  getConversations,
+  subscribeConversations,
+  deleteConversation,
+  getMessages,
+  getSyncState,
+  onSyncStateChange,
+  type SyncState,
+} from '../api/supabase';
+import { User, Search, Trash2, MessageSquare, Plus, ChevronRight } from 'lucide-react';
 
 interface Conversation {
   id: string;
@@ -13,13 +22,26 @@ interface Conversation {
 interface Props {
   onSelect: (conv: Conversation) => void;
   onNewCommand: () => void;
+  variant?: 'home' | 'conversations';
 }
 
-export default function ConversationList({ onSelect, onNewCommand }: Props) {
+function formatClock(iso: string): string {
+  const d = new Date(iso);
+  const h = d.getHours().toString().padStart(2, '0');
+  const m = d.getMinutes().toString().padStart(2, '0');
+  return `${h}:${m}`;
+}
+
+export default function ConversationList({ onSelect, onNewCommand, variant = 'home' }: Props) {
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
+
+  const [sync, setSync] = useState<SyncState>(() => getSyncState());
+  useEffect(() => onSyncStateChange(setSync), []);
+
+  const [activePreview, setActivePreview] = useState('');
 
   const load = useCallback(async () => {
     try {
@@ -35,14 +57,11 @@ export default function ConversationList({ onSelect, onNewCommand }: Props) {
 
   useEffect(() => {
     load();
-    // P0-A06/A21：回调接收完整 payload。
-    // DELETE 事件（桌面端删除对话 → 级联删除）→ 本地立即移除，避免重新拉取仍缓存旧行；
-    // 其余事件（INSERT/UPDATE）→ 重新加载列表。
     const unsub = subscribeConversations((payload: any) => {
       if (payload?.eventType === 'DELETE') {
         const deletedId = payload.old?.id;
         if (deletedId) {
-          setConversations(prev => prev.filter(c => c.id !== deletedId));
+          setConversations((prev) => prev.filter((c) => c.id !== deletedId));
         }
         return;
       }
@@ -51,8 +70,29 @@ export default function ConversationList({ onSelect, onNewCommand }: Props) {
     return unsub;
   }, [load]);
 
+  const activeConv = conversations.find((c) =>
+    Date.now() - new Date(c.updated_at).getTime() < 30 * 60 * 1000
+  );
+
+  useEffect(() => {
+    if (!activeConv) {
+      setActivePreview('');
+      return;
+    }
+    let cancelled = false;
+    getMessages(activeConv.id).then((msgs) => {
+      if (cancelled) return;
+      const last = [...msgs].reverse().find((m) => m.role === 'assistant');
+      const content = last?.content?.replace(/```[\s\S]*?```/g, '代码块').slice(0, 40) ?? '';
+      setActivePreview(content);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [activeConv?.id]);
+
   const filtered = searchQuery.trim()
-    ? conversations.filter(c => c.title.toLowerCase().includes(searchQuery.toLowerCase()))
+    ? conversations.filter((c) => c.title.toLowerCase().includes(searchQuery.toLowerCase()))
     : conversations;
 
   const handleRefresh = () => {
@@ -62,10 +102,10 @@ export default function ConversationList({ onSelect, onNewCommand }: Props) {
 
   const handleDelete = async (e: React.MouseEvent, convId: string, convTitle: string) => {
     e.stopPropagation();
-    if (!confirm(`确定删除「${convTitle}」？\n此操作不可恢复。`)) return;
+    if (!window.confirm(`确定删除「${convTitle}」？\n此操作不可恢复。`)) return;
     const ok = await deleteConversation(convId);
     if (ok) {
-      setConversations(prev => prev.filter(c => c.id !== convId));
+      setConversations((prev) => prev.filter((c) => c.id !== convId));
     }
   };
 
@@ -81,6 +121,9 @@ export default function ConversationList({ onSelect, onNewCommand }: Props) {
     return d.toLocaleDateString('zh-CN', { month: 'short', day: 'numeric' });
   };
 
+  const online = sync.status === 'connected';
+  const lastSyncLabel = sync.lastSyncAt ? formatClock(sync.lastSyncAt) : '—';
+
   if (loading) {
     return (
       <div className="loading">
@@ -90,80 +133,111 @@ export default function ConversationList({ onSelect, onNewCommand }: Props) {
     );
   }
 
+  const isHome = variant === 'home';
+
   return (
-    <div className="app-layout">
-      <div className="top-bar">
-        <h1>Aether</h1>
-        <div className="top-bar-actions">
-          <span className="badge">{conversations.length} 对话</span>
-          <button className="refresh-btn" onClick={handleRefresh} disabled={refreshing}>
-            {refreshing ? '⟳' : '↻'} 刷新
-          </button>
-        </div>
+    <div className="home-page fade-in">
+      {isHome && (
+        <>
+          <header className="home-header">
+            <h1 className="home-title">Aether</h1>
+            <div className="home-avatar" aria-label="用户">
+              <User size={20} />
+            </div>
+          </header>
+
+          <div className="device-status-row">
+            <span className={`device-status-dot ${online ? 'online' : ''}`} aria-hidden="true" />
+            <span className="device-name">
+              Aether 工作站 · {online ? '在线' : '未连接'}
+            </span>
+          </div>
+
+          <div className="device-card glass-surface">
+            <div className="device-card-status">
+              {online ? '电脑端在线' : '电脑端未连接'}
+            </div>
+            <div className="device-card-synced">最近同步 {lastSyncLabel}</div>
+          </div>
+
+          {activeConv && (
+            <div
+              className="continue-card glass-surface"
+              onClick={() => onSelect(activeConv)}
+              role="button"
+              tabIndex={0}
+              onKeyDown={(e) => e.key === 'Enter' && onSelect(activeConv)}
+            >
+              <div className="continue-title">继续工作</div>
+              <div className="continue-preview">
+                {activeConv.title}
+                {activePreview && <span>· {activePreview}</span>}
+                <ChevronRight size={16} className="continue-chevron" />
+              </div>
+            </div>
+          )}
+        </>
+      )}
+
+      <div className="section-title">最近对话</div>
+
+      <div className="search-field">
+        <Search size={18} className="search-field-icon" aria-hidden="true" />
+        <input
+          className="search-field-input"
+          type="text"
+          placeholder="搜索对话"
+          value={searchQuery}
+          onChange={(e) => setSearchQuery(e.target.value)}
+        />
       </div>
 
       <div className="conv-list">
-        {/* 搜索栏 */}
-        <input
-          className="search-bar"
-          type="text"
-          placeholder="🔍 搜索对话..."
-          value={searchQuery}
-          onChange={e => setSearchQuery(e.target.value)}
-        />
         {filtered.length === 0 ? (
           <div className="empty-state">
-            <div className="empty-state-icon">💬</div>
-            <h3>暂无对话</h3>
-            <p>桌面端 Aether 的对话记录将自动同步到这里</p>
-            <div style={{ marginTop: 24 }}>
-              <button className="btn-primary" onClick={onNewCommand}>
-                发送新指令
-              </button>
+            <div className="empty-state-icon">
+              <MessageSquare size={28} />
             </div>
+            <h3 className="empty-state-title">暂无对话</h3>
+            <p className="empty-state-desc">
+              桌面端 Aether 的对话记录将自动同步到这里
+            </p>
+            <button className="btn-primary" onClick={onNewCommand} style={{ marginTop: 16, width: 'auto' }}>
+              发送新指令
+            </button>
           </div>
         ) : (
-          <>
-            <div style={{ padding: '8px 4px 4px' }}>
-              <button className="btn-primary" onClick={onNewCommand}>
-                ✏️ 发送新指令
+          filtered.map((conv) => (
+            <div
+              key={conv.id}
+              className="conv-row"
+              onClick={() => onSelect(conv)}
+            >
+              <div className="conv-main">
+                <div className="conv-title">{conv.title}</div>
+                <div className="conv-sub">
+                  {conv.message_count != null
+                    ? `${conv.message_count} 条消息`
+                    : conv.model || 'AI'}
+                </div>
+              </div>
+              <span className="conv-time">{formatTime(conv.updated_at)}</span>
+              <button
+                className="conv-delete"
+                onClick={(e) => handleDelete(e, conv.id, conv.title)}
+                aria-label={`删除 ${conv.title}`}
+              >
+                <Trash2 size={16} />
               </button>
             </div>
-            {filtered.map((conv) => (
-              <div
-                key={conv.id}
-                className="conv-item"
-                onClick={() => onSelect(conv)}
-              >
-                <div className="conv-item-title">{conv.title}</div>
-                <div className="conv-item-meta">
-                  <span>{conv.model || 'AI'}</span>
-                  <span>{formatTime(conv.updated_at)}</span>
-                </div>
-                {conv.message_count != null && (
-                  <div className="conv-item-preview">
-                    {conv.message_count} 条消息
-                  </div>
-                )}
-                <button
-                  onClick={(e) => handleDelete(e, conv.id, conv.title)}
-                  style={{
-                    position: 'absolute', right: 12, top: 12,
-                    background: 'none', border: 'none', color: 'var(--text-secondary)',
-                    fontSize: 16, cursor: 'pointer', padding: 4,
-                    opacity: 0.5,
-                  }}
-                  onMouseEnter={e => { (e.target as HTMLElement).style.opacity = '1'; }}
-                  onMouseLeave={e => { (e.target as HTMLElement).style.opacity = '0.5'; }}
-                  title="删除对话"
-                >
-                  🗑️
-                </button>
-              </div>
-            ))}
-          </>
+          ))
         )}
       </div>
+
+      <button className="new-command-cta" onClick={onNewCommand} type="button">
+        <Plus size={20} aria-hidden="true" />
+        继续告诉 Aether 下一步…
+      </button>
     </div>
   );
 }

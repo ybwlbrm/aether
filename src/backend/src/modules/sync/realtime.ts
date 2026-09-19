@@ -8,6 +8,7 @@ import { processRemoteCommand } from './command-processor.js';
 import { startPollingFallback, type PollingFallbackHandle } from './polling-fallback.js';
 import { deleteConversationCascade } from '../conversations/delete-conversation.js';
 import type { SyncConfig } from './sync-config.js';
+import { shouldScheduleReconnect } from './realtime-logic.js';
 
 // ============================================================
 // 设置 Realtime 监听（远程命令）
@@ -31,8 +32,12 @@ export async function setupRealtimeListener(
   if (pollingHandle) { pollingHandle.stop(); pollingHandle = null; }
 
   // 清理旧监听
+  // BE-RL-03 修复：先摘除模块级注册引用，再 removeChannel。
+  // 若不摘除，removeChannel 触发的旧 channel CLOSED 回调会判定
+  // 「getRealtimeChannel() !== 新 channel」失败而误走重连调度 → 死循环。
   const existingChannel = getRealtimeChannel();
   if (existingChannel) {
+    setRealtimeChannel(null); // 关键：先置空注册，使旧 channel 回调被判定为「非当前 channel」
     try { await sb.removeChannel(existingChannel); } catch { /* ignore */ }
   }
 
@@ -93,8 +98,13 @@ export async function setupRealtimeListener(
     )
     .subscribe((status: string, err: any) => {
       console.log('[Sync] Realtime 订阅状态:', status);
+      // BE-RL-03 修复：仅当本 channel 仍是当前注册的 channel 时才处理状态回调。
+      // 主动 removeChannel 的旧 channel 触发的 CLOSED/TIMED_OUT 回调被直接忽略，
+      // 不再调度重连 → 打断「重连 → removeChannel → 回调 → 再重连」死循环。
+      const isCurrent = getRealtimeChannel() === realtimeChannel;
+      if (!isCurrent) return;
       // 断线重连：SUBSCRIBED 但之后 CLOSED/CHANNEL_ERROR/TIMED_OUT → 重新订阅
-      if (status === 'CLOSED' || status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
+      if (shouldScheduleReconnect(status, isCurrent)) {
         console.warn(`[Sync] Realtime 连接异常 (${status})，3s 后重新订阅:`, err?.message || '');
         // 使用闭包捕获重试次数，实现指数退避 + 最大重试次数，防止无限重试风暴
         let reconnectAttempt = 0;

@@ -336,17 +336,21 @@ export function registerSyncConfigRoutes(app: FastifyInstance, config: BackendCo
   if (syncConfig) {
     const sb = getSupabase();
     if (sb) {
+      // 局部常量：闭包内保持类型收窄（TS 无法跨 .then 回调保留 narrowing）
+      const cfg = syncConfig;
       // P1-14: 启动时先保证身份绑定（Supabase Auth → UID → 设备绑定 → 本地持久化），
       // 再注册设备 —— 避免 user_id=null 写入导致手机端看不到数据。
-      ensureIdentityThenRegister(sb, syncConfig).catch(e => {
-        console.warn('[Sync] 启动身份初始化失败:', e instanceof Error ? e.message : e);
-      });
-      // Realtime listener will be set up by registerSyncRoutes after importing
-      // 启动时全量同步本地对话到 Supabase（手机端才能看到电脑端历史对话）
-      // BE-UA-01: 启动全量同步 fire-and-forget → 保存 promise 供 shutdown 等待
-      void syncConversationsToSupabase(sb, syncConfig)
+      // BE-SQ-01 修复：设备注册与全量同步必须串行 —— conversations_sync/messages_sync
+      // 的 FK 依赖 devices(id)，若同步先于注册执行会整批失败（electron.log 实证 78 条全败）。
+      void ensureIdentityThenRegister(sb, cfg)
+        .then(() => {
+          // Realtime listener will be set up by registerSyncRoutes after importing
+          // 启动时全量同步本地对话到 Supabase（手机端才能看到电脑端历史对话）
+          // BE-UA-01: 启动全量同步 fire-and-forget → 保存 promise 供 shutdown 等待
+          return syncConversationsToSupabase(sb, cfg);
+        })
         .then(r => console.log(`[Sync] 启动全量同步完成: ${r.ok} 条消息，${r.fail} 条失败`))
-        .catch(e => console.warn('[Sync] 启动全量同步失败:', e instanceof Error ? e.message : e));
+        .catch(e => console.warn('[Sync] 启动身份初始化/同步失败:', e instanceof Error ? e.message : e));
     }
   }
 

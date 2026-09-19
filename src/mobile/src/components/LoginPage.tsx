@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { Sparkles, ChevronRight } from 'lucide-react';
 import {
   saveConfig,
   signIn,
@@ -7,21 +8,14 @@ import {
   SupabaseApiError,
 } from '../api/supabase';
 
-// 认证表单模式
 type AuthMode = 'signin' | 'signup';
 
 interface Props {
   initialUrl?: string;
   initialAnonKey?: string;
-  /** 登录/注册成功且设备注册完成后回调（由 App 切换页面） */
   onAuthenticated: () => void;
 }
 
-/**
- * 登录 / 注册页面（P0-A01/A02/A03 修复）。
- * 替代原「手填 Supabase Service Role Key」配置页：
- * 使用公开 Anon Key + 邮箱密码登录建立用户身份，RLS 按 user_id 行级隔离。
- */
 export default function LoginPage({ initialUrl, initialAnonKey, onAuthenticated }: Props) {
   const [url, setUrl] = useState(initialUrl ?? '');
   const [anonKey, setAnonKey] = useState(initialAnonKey ?? '');
@@ -29,18 +23,21 @@ export default function LoginPage({ initialUrl, initialAnonKey, onAuthenticated 
   const [password, setPassword] = useState('');
   const [authMode, setAuthMode] = useState<AuthMode>('signin');
   const [statusMsg, setStatusMsg] = useState('');
+  const [statusTone, setStatusTone] = useState<'success' | 'error' | 'warning' | 'info'>('info');
   const [busy, setBusy] = useState(false);
+  const [serverOpen, setServerOpen] = useState(false);
 
   const handleSubmitAuth = async () => {
     if (!url.trim() || !anonKey.trim() || !email.trim() || !password) {
       setStatusMsg('请填写完整的 Supabase URL、Anon Key、邮箱和密码');
+      setStatusTone('error');
       return;
     }
     setBusy(true);
     setStatusMsg(authMode === 'signin' ? '登录中...' : '注册中...');
+    setStatusTone('info');
 
     try {
-      // 保存连接配置（anon key 公开安全，可持久化）
       saveConfig(url.trim(), anonKey.trim());
 
       if (authMode === 'signin') {
@@ -48,63 +45,57 @@ export default function LoginPage({ initialUrl, initialAnonKey, onAuthenticated 
       } else {
         const result = await signUp(email.trim(), password);
         if (result.needsEmailConfirm) {
-          setStatusMsg('✅ 注册成功，请前往邮箱完成验证后再登录');
+          setStatusMsg('注册成功，请前往邮箱完成验证后再登录');
+          setStatusTone('success');
           setAuthMode('signin');
           setBusy(false);
           return;
         }
       }
 
-      // 设备注册绑定当前 userId（P0-A05）
       const registered = await registerDevice();
       if (!registered) {
-        setStatusMsg('⚠️ 设备注册失败，远程命令可能无法下发');
+        setStatusMsg('设备注册失败，远程命令可能无法下发');
+        setStatusTone('warning');
       } else {
-        setStatusMsg(authMode === 'signin' ? '✅ 登录成功' : '✅ 注册成功');
+        setStatusMsg(authMode === 'signin' ? '登录成功' : '注册成功');
+        setStatusTone('success');
       }
       setPassword('');
       onAuthenticated();
     } catch (e: unknown) {
       const msg = e instanceof SupabaseApiError ? e.message : (e instanceof Error ? e.message : String(e));
-      setStatusMsg(`❌ ${msg}`);
+      setStatusMsg(msg);
+      setStatusTone('error');
     } finally {
       setBusy(false);
     }
   };
 
+  const switchMode = () => {
+    setAuthMode(authMode === 'signin' ? 'signup' : 'signin');
+    setStatusMsg('');
+  };
+
+  const handleUrlChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    setUrl(e.target.value);
+  };
+
+  const handleAnonKeyChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    setAnonKey(e.target.value);
+  };
+
   return (
-    <div className="config-page">
-      <h1>Aether</h1>
-      <p>登录你的 Supabase 账号<br />以远程控制桌面端 Aether</p>
-      <div className="config-form">
-        <div>
-          <label>Supabase URL</label>
+    <div className="login-page">
+      <Sparkles className="login-logo" size={60} />
+      <h1 className="login-title">Aether</h1>
+      <p className="login-subtitle">远程连接你的 AI 工作站</p>
+
+      <form className="login-form" onSubmit={(e) => { e.preventDefault(); handleSubmitAuth(); }}>
+        <label className="login-field">
+          <span className="login-field-label">邮箱</span>
           <input
-            value={url}
-            onChange={(e) => setUrl(e.target.value)}
-            placeholder="https://xxx.supabase.co"
-            autoCapitalize="none"
-            autoCorrect="off"
-          />
-        </div>
-        <div>
-          <label>Supabase Anon Key（公开密钥）</label>
-          <input
-            type="password"
-            value={anonKey}
-            onChange={(e) => setAnonKey(e.target.value)}
-            placeholder="eyJhbGciOiJIUzI1NiIs..."
-            autoCapitalize="none"
-            autoCorrect="off"
-          />
-          <p style={{ fontSize: 11, marginTop: 4, color: 'var(--text-tertiary)' }}>
-            Anon Key 可公开（用于建立加密连接），数据访问由登录账号 + 行级安全策略控制。
-            请勿填写 Service Role Key。
-          </p>
-        </div>
-        <div>
-          <label>邮箱</label>
-          <input
+            className="login-input"
             type="email"
             value={email}
             onChange={(e) => setEmail(e.target.value)}
@@ -112,11 +103,13 @@ export default function LoginPage({ initialUrl, initialAnonKey, onAuthenticated 
             autoCapitalize="none"
             autoCorrect="off"
             autoComplete="email"
+            disabled={busy}
           />
-        </div>
-        <div>
-          <label>密码</label>
+        </label>
+        <label className="login-field">
+          <span className="login-field-label">密码</span>
           <input
+            className="login-input"
             type="password"
             value={password}
             onChange={(e) => setPassword(e.target.value)}
@@ -124,20 +117,82 @@ export default function LoginPage({ initialUrl, initialAnonKey, onAuthenticated 
             autoCapitalize="none"
             autoCorrect="off"
             autoComplete={authMode === 'signin' ? 'current-password' : 'new-password'}
+            disabled={busy}
           />
-        </div>
-        <button className="btn-primary" onClick={handleSubmitAuth} disabled={busy || !url.trim() || !anonKey.trim() || !email.trim() || !password}>
-          {busy ? '处理中...' : authMode === 'signin' ? '登录' : '注册'}
+        </label>
+
+        <button
+          className="btn-primary login-submit"
+          type="submit"
+          disabled={busy || !email.trim() || !password}
+        >
+          {busy ? '处理中…' : authMode === 'signin' ? '登录' : '注册'}
         </button>
-        <button className="btn-ghost" onClick={() => setAuthMode(authMode === 'signin' ? 'signup' : 'signin')} disabled={busy}>
-          {authMode === 'signin' ? '没有账号？去注册' : '已有账号？去登录'}
+        <button
+          type="button"
+          className="login-toggle"
+          onClick={switchMode}
+          disabled={busy}
+        >
+          {authMode === 'signin' ? '注册账号' : '已有账号？去登录'}
         </button>
+
         {statusMsg && (
-          <div className="status-msg" style={{ color: statusMsg.includes('✅') ? 'var(--success)' : statusMsg.includes('❌') ? 'var(--danger)' : 'var(--text-secondary)' }}>
+          <p className="login-status" data-tone={statusTone}>
             {statusMsg}
-          </div>
+          </p>
         )}
-      </div>
+
+        <button
+          type="button"
+          className="login-server-link"
+          onClick={() => setServerOpen(true)}
+          disabled={busy}
+        >
+          <span>服务器连接设置</span>
+          <ChevronRight size={16} />
+        </button>
+      </form>
+
+      {serverOpen && (
+        <div className="sheet-backdrop" onClick={() => setServerOpen(false)}>
+          <div className="sheet login-server-sheet" onClick={(e) => e.stopPropagation()}>
+            <div className="sheet-handle" />
+            <h3 className="sheet-title">服务器连接设置</h3>
+            <label className="login-field">
+              <span className="login-field-label">服务器地址</span>
+              <input
+                className="login-input"
+                value={url}
+                onChange={handleUrlChange}
+                placeholder="https://xxx.supabase.co"
+                autoCapitalize="none"
+                autoCorrect="off"
+                disabled={busy}
+              />
+            </label>
+            <label className="login-field">
+              <span className="login-field-label">公开密钥（Anon Key）</span>
+              <input
+                className="login-input"
+                type="password"
+                value={anonKey}
+                onChange={handleAnonKeyChange}
+                placeholder="eyJhbGciOiJIUzI1NiIs..."
+                autoCapitalize="none"
+                autoCorrect="off"
+                disabled={busy}
+              />
+            </label>
+            <p className="login-sheet-hint">
+              Anon Key 可公开（用于建立加密连接），数据访问由登录账号 + 行级安全策略控制。请勿填写 Service Role Key。
+            </p>
+            <button className="btn-primary sheet-done" onClick={() => setServerOpen(false)} disabled={busy}>
+              完成
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

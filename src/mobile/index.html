@@ -3,29 +3,30 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
-    <meta name="theme-color" content="#0a0a0f" />
-    <title>Aether Mobile</title>
+    <meta name="theme-color" content="#0a0b10" />
+    <title>Aether</title>
+    <!-- 防闪白：CSS 加载前先按本地主题设置 data-theme -->
+    <script>
+      try {
+        var t = localStorage.getItem('aether_mobile_theme');
+        var m = t === 'light' || t === 'dark'
+          ? t
+          : (window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark');
+        document.documentElement.dataset.theme = m;
+        document.documentElement.style.colorScheme = m;
+      } catch (e) {}
+    </script>
     <style>
       * { margin: 0; padding: 0; box-sizing: border-box; }
+      html { height: 100%; }
       body {
-        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-        background: #0a0a0f;
-        color: #e0e0e0;
+        font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Segoe UI", Roboto, sans-serif;
+        background: #0a0b10; /* 暗色兜底，防 CSS 加载失败时白屏 */
+        color-scheme: dark;
         -webkit-font-smoothing: antialiased;
         overscroll-behavior: none;
       }
-      :root {
-        --bg: #0a0a0f;
-        --bg-card: #14141e;
-        --bg-hover: #1e1e2e;
-        --border: #2a2a3a;
-        --text: #e0e0e0;
-        --text-secondary: #8888a0;
-        --accent: #5e9eff;
-        --success: #34d399;
-        --danger: #ef4444;
-        --warning: #f59e0b;
-      }
+      #root { min-height: 100%; }
     </style>
   </head>
   <body>

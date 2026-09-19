@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
+import { Home, MessageSquare, User } from 'lucide-react';
 import {
   getStoredUrl,
   getStoredAnonKey,
@@ -13,11 +14,12 @@ import MessageView from './components/MessageView';
 import NewCommand from './components/NewCommand';
 import AppearanceSettings from './components/AppearanceSettings';
 import LoginPage from './components/LoginPage';
+import MinePage from './components/MinePage';
 import { LiquidGlassFilter } from './components/LiquidGlassFilter';
 import './App.css';
 
-// 页面类型
-type Page = 'auth' | 'list' | 'chat' | 'new-command' | 'appearance';
+// 页面类型（§9.1：list 拆为 home / conversations，复用同一组件 variant）
+type Page = 'auth' | 'home' | 'conversations' | 'chat' | 'new-command' | 'appearance' | 'mine';
 
 interface Conversation {
   id: string;
@@ -74,7 +76,7 @@ export default function App() {
     });
   }, []);
 
-  // 启动流（任务 §21）：load auth session → validate → device registration → 主界面
+  // 启动流：load auth session → validate → device registration → 主界面
   useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -87,9 +89,9 @@ export default function App() {
         const registered = await registerDevice();
         if (cancelled) return;
         if (!registered) {
-          setStatusMsg('⚠️ 设备注册失败，远程命令可能无法下发');
+          setStatusMsg('设备注册失败，远程命令可能无法下发');
         }
-        setPage('list');
+        setPage('home');
       }
       setBooting(false);
     })();
@@ -102,7 +104,7 @@ export default function App() {
   const handleAuthenticated = useCallback(() => {
     // 认证成功后确保 auth 监听已挂载（client 此时已创建）
     subscribeAuth();
-    setPage('list');
+    setPage('home');
     setTimeout(() => setStatusMsg(''), 1200);
   }, [subscribeAuth]);
 
@@ -126,8 +128,11 @@ export default function App() {
 
   const handleBack = () => {
     setSelectedConv(null);
-    setPage('list');
+    setPage('home');
   };
+
+  // 底部导航（§9.2：仅 home / conversations / mine 三页显示）
+  const showNav = page === 'home' || page === 'conversations' || page === 'mine';
 
   // 启动中：显示加载页
   if (booting) {
@@ -145,7 +150,7 @@ export default function App() {
     );
   }
 
-  // 登录 / 注册页面（P0-A01/A02：不再手填 Service Role Key）
+  // 登录 / 注册页面
   if (page === 'auth') {
     return (
       <>
@@ -159,7 +164,7 @@ export default function App() {
     );
   }
 
-  // 聊天页面
+  // 聊天页面（沉浸，无底部导航）
   if (page === 'chat' && selectedConv) {
     return (
       <>
@@ -193,38 +198,65 @@ export default function App() {
     );
   }
 
-  // 对话列表页面（默认）
+  // 我的页面
+  if (page === 'mine') {
+    return (
+      <>
+        {glassFilter}
+        <MinePage
+          onOpenAppearance={() => setPage('appearance')}
+          onSignOut={handleSignOut}
+        />
+        <nav className="bottom-nav">
+          <button className="bottom-nav-item" onClick={() => setPage('home')}>
+            <Home size={20} className="bottom-nav-icon" />
+            <span className="bottom-nav-label">首页</span>
+          </button>
+          <button className="bottom-nav-item" onClick={() => setPage('conversations')}>
+            <MessageSquare size={20} className="bottom-nav-icon" />
+            <span className="bottom-nav-label">对话</span>
+          </button>
+          <button className="bottom-nav-item active" onClick={() => setPage('mine')}>
+            <User size={20} className="bottom-nav-icon" />
+            <span className="bottom-nav-label">我的</span>
+          </button>
+        </nav>
+        {statusMsg && (
+          <div className="status-toast">{statusMsg}</div>
+        )}
+      </>
+    );
+  }
+
+  // 首页 / 对话列表（复用 ConversationList，variant 控制）
+  const isHome = page === 'home';
   return (
-    <>
+    <div className="app-shell">
       {glassFilter}
       <ConversationList
         onSelect={handleSelectConv}
         onNewCommand={() => setPage('new-command')}
+        variant={isHome ? 'home' : 'conversations'}
       />
-      {/* 底部导航 */}
-      <div className="bottom-nav">
-        <button className="active" onClick={() => setPage('list')}>
-          <span className="nav-icon">💬</span>
-          对话
-        </button>
-        <button onClick={() => setPage('new-command')}>
-          <span className="nav-icon">✏️</span>
-          新指令
-        </button>
-        <button onClick={() => setPage('appearance')}>
-          <span className="nav-icon">🎨</span>
-          外观
-        </button>
-        <button onClick={handleSignOut}>
-          <span className="nav-icon">🚪</span>
-          登出
-        </button>
-      </div>
-      {statusMsg && (
-        <div className="status-msg" style={{ position: 'fixed', bottom: 72, left: 16, right: 16, textAlign: 'center', color: statusMsg.includes('⚠️') ? 'var(--warning, #f59e0b)' : 'var(--text-secondary)' }}>
-          {statusMsg}
-        </div>
+      {showNav && (
+        <nav className="bottom-nav">
+          <button className={`bottom-nav-item ${isHome ? 'active' : ''}`} onClick={() => setPage('home')}>
+            <Home size={20} className="bottom-nav-icon" />
+            <span className="bottom-nav-label">首页</span>
+          </button>
+          <button className={`bottom-nav-item ${!isHome ? 'active' : ''}`} onClick={() => setPage('conversations')}>
+            <MessageSquare size={20} className="bottom-nav-icon" />
+            <span className="bottom-nav-label">对话</span>
+          </button>
+          <button className="bottom-nav-item" onClick={() => setPage('mine')}>
+            <User size={20} className="bottom-nav-icon" />
+            <span className="bottom-nav-label">我的</span>
+          </button>
+        </nav>
       )}
-    </>
+      {statusMsg && (
+        <div className="status-toast">{statusMsg}</div>
+      )}
+    </div>
   );
 }
