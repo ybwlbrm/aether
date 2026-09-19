@@ -60,18 +60,23 @@ export function markDirty(config: BackendConfig): void {
  * 立即同步落盘（原子写 + fsync 保证崩溃一致）。
  * 整改计划第 4 章：错误向上传播（返回 false 并记录），不再静默吞掉 ——
  * 失败时保留缓冲到重试队列，供 /api/health 或下次 flush 重试。
+ * @param force 强制落盘（onClose/关闭场景）—— 忽略 debounce 延迟，无条件导出写盘。
+ *              默认 false：防抖调度，仅在达到 maxLatency 时落盘。
  */
-function flushNow(config: BackendConfig): boolean {
+function flushNow(config: BackendConfig, force = false): boolean {
   if (!sqlDb) return true;
-  // BE-RC-01: 检查距离最后一次 markDirty 是否已超过最大延迟，若未超过则重新安排防抖定时器
-  const elapsed = Date.now() - lastDirtyTime;
-  if (elapsed < FLUSH_MAX_LATENCY_MS) {
-    // 尚未达到兜底时间，重新安排防抖定时器等待剩余时间
-    if (flushTimer) { clearTimeout(flushTimer); flushTimer = null; }
-    flushTimer = setTimeout(() => flushNow(config), FLUSH_MAX_LATENCY_MS - elapsed);
-    return true;
+  if (!force) {
+    // 防抖路径：距上次 markDirty 未超 maxLatency 时重排定时器（非关闭场景）
+    const elapsed = Date.now() - lastDirtyTime;
+    if (elapsed < FLUSH_MAX_LATENCY_MS) {
+      if (flushTimer) { clearTimeout(flushTimer); flushTimer = null; }
+      flushTimer = setTimeout(() => flushNow(config), FLUSH_MAX_LATENCY_MS - elapsed);
+      return true;
+    }
   }
-  if (!dirty) return true;
+  // force 模式（关闭应用）：无条件导出写盘，即使 dirty=false 也执行
+  // （防止存在未被 markDirty 标记的变更；关闭场景宁可多写一次也不丢数据）
+  if (!dirty && !force) return true;
   dirty = false;
   if (flushTimer) { clearTimeout(flushTimer); flushTimer = null; }
 
@@ -154,7 +159,10 @@ export function saveDb(config: BackendConfig): void {
   markDirty(config);
 }
 
-/** 立即同步落盘（用于 onClose 等必须立即持久化的场景） */
+/** 立即同步落盘（用于 onClose 等必须立即持久化的场景）。
+ *  force=true：无条件导出写盘，忽略 debounce —— 修复关闭应用时对话丢失
+ *  （原实现因 elapsed < 5s 只重排定时器，app.close() 后进程退出前定时器
+ *  未执行 → dirty 数据从未写盘 → 关闭后对话全丢）。 */
 export function flushDbSync(config: BackendConfig): boolean {
-  return flushNow(config);
+  return flushNow(config, true);
 }

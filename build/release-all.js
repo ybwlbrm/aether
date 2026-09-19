@@ -81,8 +81,22 @@ async function buildAll() {
   log('BUILD', '构建 mobile 前端并打包 APK...');
   run('npm run build:mobile', PRIVATE_DIR);
   run('npx cap sync android', PRIVATE_DIR);
-  const gradle = 'set JAVA_HOME=' + JAVA_HOME + ' && cd android && gradlew.bat assembleRelease';
-  run(gradle, PRIVATE_DIR);
+  // 修复：原 `set JAVA_HOME=... && cd android && gradlew.bat` 在 execSync(cmd) 下
+  // 报 "JAVA_HOME is set to an invalid directory"。改用 cmd /c + env 注入，
+  // 确保 gradle 读取正确的 JAVA_HOME（.bat 必须经 cmd 启动）。
+  function runGradle() {
+    const { spawnSync } = require('child_process');
+    const gradlePath = path.join(PRIVATE_DIR, 'android', 'gradlew.bat');
+    const res = spawnSync('cmd', ['/c', gradlePath, 'assembleRelease'], {
+      cwd: path.join(PRIVATE_DIR, 'android'),
+      env: { ...process.env, JAVA_HOME },
+      stdio: 'inherit',
+      shell: false,
+      windowsHide: true,
+    });
+    if (res.status !== 0) throw new Error('gradlew assembleRelease 失败 (exit ' + res.status + ')');
+  }
+  runGradle();
 
   // 复制 APK 到根目录
   const apk = path.join(PRIVATE_DIR, 'android', 'app', 'build', 'outputs', 'apk', 'release', 'app-release.apk');
