@@ -159,6 +159,12 @@ function syncToOpenSource() {
 
 // ============ 3. 发布 ============
 async function release() {
+  // 防御：即使本函数被意外调用，--skip-release 模式下也绝不触碰 tag/Release
+  const skipReleaseGuard = process.argv.includes('--skip-release');
+  if (skipReleaseGuard) {
+    console.log('（--skip-release 已指定，跳过 GitHub Release 创建）');
+    return;
+  }
   log('RELEASE', '上传 GitHub (' + GITHUB_REPO + ')...');
   // 修复：移除 -c http.proxy=/-c https.proxy= 强制清空代理。
   // 本机走 127.0.0.1:7897 代理才能访问 GitHub，清空代理导致 Connection reset。
@@ -200,9 +206,13 @@ async function release() {
   run('git tag ' + TAG, OPENSOURCE_DIR);
   run('git push origin ' + TAG, OPENSOURCE_DIR);
 
+  // 获取当前 master commit 作为显式 target —— 双保险：即使 tag 状态异常，
+  // gh release create --target 也强制 Release 指向当前 master 提交（绝对版本绑定）。
+  const masterCommit = run('git rev-parse HEAD', OPENSOURCE_DIR).trim();
+
   const assetArgs = assets.map((a) => '"' + a + '"').join(' ');
   try {
-    run('gh release create ' + TAG + ' ' + assetArgs + ' --repo ' + GITHUB_REPO + ' --title "Aether ' + VERSION + '" --notes-file "' + noteFile + '"', PRIVATE_DIR);
+    run('gh release create ' + TAG + ' ' + assetArgs + ' --repo ' + GITHUB_REPO + ' --target ' + masterCommit + ' --title "Aether ' + VERSION + '" --notes-file "' + noteFile + '"', PRIVATE_DIR);
   } catch (e) {
     // Oracle P1-3: gh release create 失败时的中间态说明。
     // 此时远程 tag 已指向最新 master、本地 tag 已重建，仅 Release 对象未创建。
