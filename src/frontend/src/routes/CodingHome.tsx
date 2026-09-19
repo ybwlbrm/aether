@@ -144,6 +144,10 @@ export function CodingHome() {
   const providerInitialized = useRef(false);
 const currentConvRef = useRef<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
+  // 首条消息竞态修复：标记"刚由用户发送产生的会话切换"——挂载检查 effect
+  // 借此跳过对刚发起 run 的 /agents/cancel（否则新 run 被 mount effect 取消，
+  // 导致 AI 生成中断 "This operation was aborted"、首条消息不回复）。
+  const justSentRef = useRef(false);
 
   // 整改计划第 3 章（P0）：setActiveConversation — 同步 state + ref（+ 中断旧请求）。
   // 原实现仅 setState，currentConvRef 由 useEffect 延迟同步；新建对话后立即 doSend 时
@@ -526,7 +530,12 @@ const handleSelectConv = async (id: string) => {
         setSending(true);
       }
     }).catch(() => {});
-    // 同时检查 agents 端
+    // 同时检查 agents 端 —— 修复：若这是"刚发送消息触发的会话切换"（justSentRef），
+    // 跳过 /agents/cancel，避免取消刚注册的新 run（导致首条消息被中断）。
+    if (justSentRef.current) {
+      justSentRef.current = false;
+      return;
+    }
     fetch('/api/agents/cancel', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest', ...authHeaders() },
@@ -574,12 +583,16 @@ const handleSelectConv = async (id: string) => {
       // 整改计划第 3 章（P0）：创建成功后立即同步 currentConvRef ——
       // 原实现仅 setState，ref 由 useEffect 延迟同步；紧跟的 doSend 内
       // currentConvRef.current !== convId 守卫会丢弃首条消息的所有 SSE 事件。
+      // 首条消息竞态修复：标记"刚由发送触发"，mount effect 借此跳过 /agents/cancel
+      justSentRef.current = true;
       setActiveConversation(conv.id);
       // 修复：创建新对话后立即刷新对话列表，否则新对话不会出现在侧栏中
       load();
       window.dispatchEvent(new CustomEvent('conversations-changed'));
       await doSend(conv.id, content, currentAttachments);
     } else {
+      // 已有会话发送：同样标记 justSent，避免 currentConvId 未变时 effect 误 cancel
+      justSentRef.current = true;
       await doSend(currentConvId, content, currentAttachments);
     }
   };
