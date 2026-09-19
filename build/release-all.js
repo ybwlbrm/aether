@@ -178,6 +178,23 @@ async function release() {
   try {
     run('gh release delete ' + TAG + ' --repo ' + GITHUB_REPO + ' --yes', PRIVATE_DIR);
   } catch { /* 无旧 release 时忽略 */ }
+
+  // ===== 版本绑定修复（严重：Release Tag 与最新 master 不一致）=====
+  // 原实现：gh release create 复用已存在的 v2.2.0 tag → tag 停留在第一次创建时的
+  // 旧 commit，而 push 已推进 master → Release 资产（EXE/APK）是新代码，但 tag 指向旧代码，
+  // GitHub Release 页签的源码/下载是旧版本。
+  // 修复：创建 release 前先删除远程 tag 与本地 tag，使 `gh release create v2.2.0`
+  // 基于当前 master HEAD 重新打 tag（targetCommitish=最新提交）。
+  try {
+    run('git push origin :refs/tags/' + TAG, OPENSOURCE_DIR);  // 删除远程 tag
+  } catch { /* tag 不存在时忽略 */ }
+  try {
+    run('git tag -d ' + TAG, OPENSOURCE_DIR);  // 删除本地 tag（如有）
+  } catch { /* 本地无 tag 时忽略 */ }
+  // 在最新 master HEAD 上创建新 tag（指向当前提交）
+  run('git tag ' + TAG, OPENSOURCE_DIR);
+  run('git push origin ' + TAG, OPENSOURCE_DIR);
+
   const assetArgs = assets.map((a) => '"' + a + '"').join(' ');
   run('gh release create ' + TAG + ' ' + assetArgs + ' --repo ' + GITHUB_REPO + ' --title "Aether ' + VERSION + '" --notes-file "' + noteFile + '"', PRIVATE_DIR);
   log('RELEASE', '已发布 https://github.com/' + GITHUB_REPO + '/releases/tag/' + TAG);
