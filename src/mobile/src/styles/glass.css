@@ -1,21 +1,46 @@
-/* 玻璃 Surface 原语：仅用于需要承载内容的表层面 */
-.glass-surface {
+/* ============================================================
+   Aether Mobile - Liquid Glass 原语 v2
+   原则：Glass 是材质，不是组件。
+   仅用于需要悬浮感的元素（Command Bar / Floating Nav / Sheet / 输入框）
+   普通内容（标题/列表/消息/正文）直接存在于页面环境中。
+   ============================================================ */
+
+/* 玻璃 Surface：唯一材质入口 */
+.glass {
   position: relative;
   background: var(--glass-fill);
-  -webkit-backdrop-filter: blur(var(--glass-blur-radius)) saturate(var(--glass-saturate)) brightness(var(--glass-brightness));
-  backdrop-filter: blur(var(--glass-blur-radius)) saturate(var(--glass-saturate)) brightness(var(--glass-brightness));
+  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate)) brightness(var(--glass-brightness));
+  backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate)) brightness(var(--glass-brightness));
+  border: var(--glass-border);
+  box-shadow: var(--glass-shadow);
+}
+
+/* 顶部高光（材质内部细节，可选） */
+.glass::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: var(--glass-highlight);
+  pointer-events: none;
+}
+
+/* 无 backdrop-filter 时降级为高不透明底 */
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  .glass {
+    background: rgba(var(--glass-fill-rgb), 0.94) !important;
+  }
+}
+
+/* 历史兼容：glass-surface / glass-card 别名平滑过渡（旧页面引用），
+   渲染与 .glass 一致但不再主动推荐使用 */
+.glass-surface,
+.glass-card {
+  position: relative;
+  background: var(--glass-fill);
+  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate)) brightness(var(--glass-brightness));
+  backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate)) brightness(var(--glass-brightness));
   border: var(--glass-border);
   box-shadow: var(--glass-shadow);
   border-radius: var(--radius-md);
-}
-/* 内部顶部高光（可选，随用随取） */
-.glass-surface::before {
-  content: '';
-  position: absolute; inset: 0;
-  border-radius: inherit;
-  background: linear-gradient(180deg, rgba(255,255,255,0.06), transparent 40%);
-  pointer-events: none;
-}
-@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
-  .glass-surface { background: rgba(var(--glass-fill-rgb), 0.92) !important; }
 }

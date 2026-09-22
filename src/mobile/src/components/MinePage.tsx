@@ -32,7 +32,7 @@ export default function MinePage({ onOpenAppearance, onSignOut }: Props) {
         <h1 className="mine-title">我的</h1>
       </div>
 
-      <div className="mine-profile glass-surface">
+      <div className="mine-profile">
         <div className="mine-avatar">
           <User size={24} />
         </div>

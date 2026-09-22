@@ -14,13 +14,14 @@ import {
   ChevronRight,
   ChevronDown,
   MoreHorizontal,
-  Sparkles,
-  Loader2,
   Plus,
   ArrowUp,
 } from 'lucide-react';
+import AetherMark from './AetherMark';
 
-// 代码块组件（带行号+复制按钮，透明背景）
+// ============================================================
+// CodeBlock — 弱化边框/行号/背景，代码即内容（§26）
+// ============================================================
 function CodeBlock({ language, code }: { language: string; code: string }) {
   const [copied, setCopied] = useState(false);
   const handleCopy = async () => {
@@ -35,13 +36,13 @@ function CodeBlock({ language, code }: { language: string; code: string }) {
   return (
     <div className="md-codeblock">
       <div className="md-codeblock-head">
-        <span>{language}</span>
-        <span className="md-codeblock-copy" style={{ color: 'var(--text-tertiary)', fontWeight: 400 }}>{lines.length} 行</span>
+        <span className="md-codeblock-lang">{language}</span>
+        <span className="md-codeblock-lines-count">{lines.length} 行</span>
         <button className="md-codeblock-copy" onClick={handleCopy}>{copied ? '已复制' : '复制'}</button>
       </div>
       <div className="md-codeblock-lines">
         {lines.map((line, i) => (
-          <div key={i} className="md-codeblock-line">
+          <div key={i} style={{ display: 'flex', gap: 10 }}>
             <span className="md-codeblock-lineno" style={{ minWidth: `${lineNumWidth}ch` }}>{i + 1}</span>
             <span>{line || ' '}</span>
           </div>
@@ -51,7 +52,7 @@ function CodeBlock({ language, code }: { language: string; code: string }) {
   );
 }
 
-// Markdown 渲染组件（react-markdown + remark-gfm，样式 class 化）
+// Markdown 渲染（react-markdown + remark-gfm，样式 class 化）
 function MarkdownContent({ content }: { content: string }) {
   if (!content) return null;
   return (
@@ -77,7 +78,7 @@ function MarkdownContent({ content }: { content: string }) {
           if (src?.startsWith('data:') || src?.startsWith('http')) {
             return <img className="md-img" src={src} alt={alt} />;
           }
-          return <span style={{ color: 'var(--text-secondary)', fontStyle: 'italic' }}>[图片]</span>;
+          return <span style={{ color: 'var(--text-tertiary)', fontStyle: 'italic' }}>[图片]</span>;
         },
       }}
     >
@@ -86,27 +87,50 @@ function MarkdownContent({ content }: { content: string }) {
   );
 }
 
-// Reasoning 折叠块（§8.5，中性化）
-function ReasoningBlock({ reasoning }: { reasoning: string }) {
+// Reasoning — 极轻执行状态（§24：不转圈、无紫、完成静态）
+function ReasoningBlock({ reasoning, active }: { reasoning: string; active: boolean }) {
   const [open, setOpen] = useState(false);
+  const [elapsed, setElapsed] = useState(0);
+  const startRef = useRef<number>(Date.now());
+
+  useEffect(() => {
+    startRef.current = Date.now();
+    setElapsed(0);
+  }, []);
+
+  // 仅 active 时计时，完成即静态
+  useEffect(() => {
+    if (!active) return;
+    setElapsed(Math.max(1, Math.round((Date.now() - startRef.current) / 1000)));
+    const t = setInterval(() => {
+      setElapsed(Math.round((Date.now() - startRef.current) / 1000));
+    }, 1000);
+    return () => clearInterval(t);
+  }, [active]);
+
   const lines = reasoning.split('\n').filter(Boolean);
   return (
-    <div className={`msg-reasoning ${open ? 'open' : ''}`} onClick={() => setOpen((o) => !o)}>
+    <div className={`msg-reasoning ${open ? 'open' : ''}`} onClick={() => setOpen((o) => !o)} role="button" tabIndex={0}>
       <div className="msg-reasoning-head">
-        <Loader2 size={13} className="spin" />
-        <span>正在处理</span>
+        <span className={`msg-reasoning-dot ${active ? 'active' : 'done'}`} />
+        {active ? (
+          <span className="msg-reasoning-label">正在处理</span>
+        ) : (
+          <span className="msg-reasoning-label">已完成</span>
+        )}
+        {active && <span className="msg-reasoning-time">· {elapsed}s</span>}
+        {!active && <span className="msg-reasoning-time">· 查看过程</span>}
         <ChevronRight size={14} className="msg-reasoning-chevron" />
       </div>
       {open && (
         <div className="msg-reasoning-body">
-          {lines.map((l, i) => <p key={i}>{l}</p>)}
+          {lines.map((l, i) => <p key={i} style={{ marginBottom: 4 }}>{l}</p>)}
         </div>
       )}
     </div>
   );
 }
 
-// 解析 tool_results JSON（失败回退 null）
 function safeParse(json?: string): any | null {
   if (!json) return null;
   try { return JSON.parse(json); } catch { return null; }
@@ -142,7 +166,6 @@ export default function MessageView({ conversationId, conversationTitle, onBack 
   const [templates, setTemplates] = useState<{ name: string; content: string }[]>([]);
   const [templateOpen, setTemplateOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
-  // 手机端思考过程横条
   const [liveReasoning, setLiveReasoning] = useState<string>('');
   // P0-A08：Realtime 连接状态（realtime 正常时不轮询，断开时降级轮询）
   const [syncStatus, setSyncStatus] = useState<SyncStatus>(() => getSyncState().status);
@@ -153,6 +176,8 @@ export default function MessageView({ conversationId, conversationTitle, onBack 
   // §8.4：仅在接近底部时跟随新内容；用户上翻阅读时停止跟随
   const nearBottomRef = useRef(true);
   const [showJump, setShowJump] = useState(false);
+  // Reasoning 起始时间表（per msg id）
+  const reasoningStartRef = useRef<Record<string, number>>({});
 
   const loadMessages = useCallback(async () => {
     try {
@@ -240,7 +265,6 @@ export default function MessageView({ conversationId, conversationTitle, onBack 
           }
           return changed ? merged : prev;
         });
-        // 检查是否有新的 assistant 消息（生成完成）
         const hasAssistant = data.some((m: Message) => m.role === 'assistant');
         if (hasAssistant) {
           setSending(false);
@@ -251,7 +275,7 @@ export default function MessageView({ conversationId, conversationTitle, onBack 
     return () => { cancelled = true; clearInterval(interval); };
   }, [conversationId, syncStatus]);
 
-  // §8.4：条件跟随滚动 — 仅在接近底部时滚动到底
+  // §8.4 条件跟随滚动
   const onScroll = () => {
     const el = listRef.current;
     if (!el) return;
@@ -273,7 +297,7 @@ export default function MessageView({ conversationId, conversationTitle, onBack 
     }
   }, [messages]);
 
-  // P1 修复：组件卸载时清理 pending 超时定时器，防泄漏/悬空 setState
+  // P1 修复：组件卸载时清理 pending 超时定时器
   useEffect(() => {
     return () => {
       if (timeoutRef.current) clearTimeout(timeoutRef.current);
@@ -289,7 +313,7 @@ export default function MessageView({ conversationId, conversationTitle, onBack 
     } catch { /* ignore */ }
   }, []);
 
-  // 计算 token 总量（从助手消息 tool_results 累加）
+  // 计算 token 总量（§10 #6）
   useEffect(() => {
     let total = 0;
     for (const m of messages) {
@@ -316,7 +340,7 @@ export default function MessageView({ conversationId, conversationTitle, onBack 
     };
     setMessages((prev) => [...prev, optimisticMsg]);
 
-    // 附加模式参数（§10 #3 原样）
+    // §10 #3 元数据前缀原样
     const contentWithMeta = `[mode=${mode}][level=${permissionLevel}][deep=${deepThinking}][web=${webSearch}][loop=${loopMode}] ${text}`.trim();
     const ok = await sendCommand(contentWithMeta, conversationId);
     if (!ok) {
@@ -364,41 +388,42 @@ export default function MessageView({ conversationId, conversationTitle, onBack 
     });
   };
 
-  const renderMessage = (msg: Message) => {
+  const renderMessage = (msg: Message, index: number) => {
     const isUser = msg.role === 'user';
     const isTool = msg.role === 'tool';
     const isSystem = msg.role === 'system';
     const isExpanded = expandedTools.has(msg.id);
+    const isLastMessage = index === messages.length - 1;
 
-    // 工具消息（§8.6 紧凑 pill）
+    // Tool — 轻量 pill（§25）
     if (isTool) {
       const tr = safeParse(msg.tool_results);
-      const toolName = tr?.tool_name ?? (msg.content.slice(0, 18) + '…');
+      const toolName = tr?.tool_name ?? (msg.content.slice(0, 12) + '…');
       const status = tr?.status ?? 'done';
       return (
         <div key={msg.id}>
-          <div className="msg-tool" onClick={() => toggleToolExpand(msg.id)}>
+          <div className={`msg-tool ${isExpanded ? 'open' : ''}`} onClick={() => toggleToolExpand(msg.id)} role="button" tabIndex={0}>
             <span className={`msg-tool-dot ${status === 'running' ? 'running' : ''}`} />
             <span className="msg-tool-name">{toolName}</span>
-            <span className="msg-tool-status">{status === 'running' ? '正在执行…' : '已完成'}</span>
-            <ChevronRight size={14} className={isExpanded ? 'rotated' : ''} style={isExpanded ? { transform: 'rotate(90deg)', transition: 'transform 200ms' } : { transition: 'transform 200ms' }} />
+            <span className="msg-tool-action">{msg.content.slice(0, 24)}</span>
+            {status === 'running' && <span className="msg-tool-status">执行中</span>}
+            <ChevronRight size={14} className="msg-tool-chevron" />
           </div>
           {isExpanded && <div className="msg-tool-detail">{msg.content}</div>}
         </div>
       );
     }
 
+    // System — 极轻居中（§历史 保持）
     if (isSystem) {
       return (
         <div className="msg msg-system" key={msg.id}>
           {msg.content}
-          <span className="msg-time">{formatTime(msg.created_at)}</span>
         </div>
       );
     }
 
     const content = msg.content;
-    const hasCode = content.includes('```');
     let reasoning = '';
     if (msg.tool_results) {
       try {
@@ -406,6 +431,9 @@ export default function MessageView({ conversationId, conversationTitle, onBack 
         if (tr.reasoning) reasoning = tr.reasoning;
       } catch { /* ignore */ }
     }
+
+    // assistant 消息最后一条且仍在等待 → reasoning 处于活跃状态
+    const activeReasoning = isUser ? false : (sending && isLastMessage);
 
     return (
       <div className={`msg ${isUser ? 'msg-user' : 'msg-assistant'}`} key={msg.id}>
@@ -416,17 +444,13 @@ export default function MessageView({ conversationId, conversationTitle, onBack 
           </>
         ) : (
           <>
-            <div className="msg-assistant-head">
-              <Sparkles size={14} className="msg-assistant-mark" />
-              <span className="msg-assistant-role">Aether</span>
+            <div className="msg-asst-meta">
+              <AetherMark size={14} className="msg-asst-mark" />
+              <span className="msg-asst-name">Aether</span>
             </div>
-            {reasoning && <ReasoningBlock reasoning={reasoning} />}
+            {reasoning && <ReasoningBlock reasoning={reasoning} active={activeReasoning} />}
             <div className="msg-content">
-              {hasCode ? (
-                <MarkdownContent content={content} />
-              ) : (
-                <MarkdownContent content={content} />
-              )}
+              <MarkdownContent content={content} />
             </div>
             <span className="msg-time">{formatTime(msg.created_at)}</span>
           </>
@@ -441,10 +465,10 @@ export default function MessageView({ conversationId, conversationTitle, onBack 
     return (
       <div className="chat-page">
         <div className="chat-header">
-          <button className="chat-back-btn" onClick={onBack} aria-label="返回">
+          <button className="chat-back" onClick={onBack} aria-label="返回">
             <ChevronLeft size={22} />
           </button>
-          <div className="chat-header-text">
+          <div className="chat-titles">
             <h2 className="chat-title">{conversationTitle}</h2>
           </div>
         </div>
@@ -458,38 +482,38 @@ export default function MessageView({ conversationId, conversationTitle, onBack 
 
   return (
     <div className="chat-page">
-      {/* 顶栏（§8.2） */}
+      {/* 顶栏（§19：会话名 + Aether 工作站状态） */}
       <div className="chat-header">
-        <button className="chat-back-btn" onClick={onBack} aria-label="返回">
+        <button className="chat-back" onClick={onBack} aria-label="返回">
           <ChevronLeft size={22} />
         </button>
-        <div className="chat-header-text">
+        <div className="chat-titles">
           <h2 className="chat-title">{conversationTitle}</h2>
           <p className="chat-subtitle">
             <span className={`sync-dot ${online ? 'online' : ''}`} />
-            {sending ? '电脑端正在工作' : online ? '已同步' : '同步中断，正在重连…'}
+            {sending ? 'Aether 工作站 · 正在工作' : online ? 'Aether 工作站 · 已同步' : 'Aether 工作站 · 连接中断'}
           </p>
         </div>
-        <button className="chat-more-btn" onClick={() => setSettingsOpen(true)} aria-label="执行设置">
+        <button className="chat-actions" onClick={() => setSettingsOpen(true)} aria-label="执行设置">
           <MoreHorizontal size={20} />
         </button>
       </div>
 
-      {/* 消息列表（§8.4 独立滚动 + 条件跟随） */}
+      {/* 消息列表（§23 内容自然展开） */}
       <div className="message-list" ref={listRef}>
         {messages.length === 0 ? (
           <div className="empty-state" style={{ padding: '40px 24px' }}>
             <h3 className="empty-state-title">暂无消息</h3>
-            <p className="empty-state-desc">发送一条指令开始对话</p>
+            <p className="empty-state-desc">向桌面端 Aether 发送一条指令</p>
           </div>
         ) : (
-          messages.map(renderMessage)
+          messages.map((m, i) => renderMessage(m, i))
         )}
         {sending && (
           <div className="msg msg-assistant">
-            <div className="msg-assistant-head">
-              <Sparkles size={14} className="msg-assistant-mark" />
-              <span className="msg-assistant-role">Aether</span>
+            <div className="msg-asst-meta">
+              <AetherMark size={14} className="msg-asst-mark" />
+              <span className="msg-asst-name">Aether</span>
             </div>
             <div className="msg-content">
               <span>正在处理…</span>
@@ -499,7 +523,7 @@ export default function MessageView({ conversationId, conversationTitle, onBack 
         )}
       </div>
 
-      {/* 回到底部浮动按钮（§8.4） */}
+      {/* 回到底部（§29 iOS 轻量浮动） */}
       {showJump && (
         <button
           className="jump-bottom"
@@ -508,48 +532,50 @@ export default function MessageView({ conversationId, conversationTitle, onBack 
             if (el) el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' });
           }}
         >
-          <ChevronDown size={18} />
-          回到底部
+          <ChevronDown size={16} />
+          到底部
         </button>
       )}
 
-      {/* 思考过程横条（§8.5 中性玻璃小条，输入框上方） */}
+      {/* 思考横条（§24 中性，输入框上方） */}
       {liveReasoning ? (
         <div className="reasoning-bar">
-          <Loader2 size={13} className="reasoning-bar-icon spin" />
+          <span className="reasoning-bar-dot" />
           <div ref={reasoningBarRef} className="reasoning-bar-text">{liveReasoning}</div>
         </div>
       ) : null}
 
-      {/* 输入栏（§8.7 玻璃圆角） */}
-      <div className="command-bar">
-        <button className="command-bar-btn" onClick={() => setTemplateOpen(!templateOpen)} title="提示词模板">
-          <Plus size={20} />
-        </button>
-        <textarea
-          className="command-input"
-          value={input}
-          onChange={(e) => setInput(e.target.value)}
-          onKeyDown={handleKeyDown}
-          placeholder="输入指令…"
-          rows={1}
-          disabled={sending}
-        />
-        <button
-          className="send-btn"
-          onClick={handleSend}
-          disabled={!input.trim() || sending}
-          aria-label="发送"
-        >
-          {sending ? <Loader2 size={18} className="spin" /> : <ArrowUp size={18} />}
-        </button>
+      {/* Command Bar（§28 Signature Floating Liquid Glass） */}
+      <div className="command-bar-wrap">
+        <div className="command-bar">
+          <button className="command-bar-btn" onClick={() => setTemplateOpen(!templateOpen)} title="提示词模板">
+            <Plus size={20} />
+          </button>
+          <textarea
+            className="command-input"
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            onKeyDown={handleKeyDown}
+            placeholder="输入指令…"
+            rows={1}
+            disabled={sending}
+          />
+          <button
+            className="send-btn"
+            onClick={handleSend}
+            disabled={!input.trim() || sending}
+            aria-label="发送"
+          >
+            <ArrowUp size={18} />
+          </button>
+        </div>
       </div>
 
       {/* 模板弹层 */}
       {templateOpen && (
         <div className="template-popup">
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '4px 8px' }}>
-            <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-primary)' }}>提示词模板</span>
+            <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-secondary)' }}>提示词模板</span>
             <button
               className="command-bar-btn"
               style={{ width: 28, height: 28 }}
@@ -560,7 +586,7 @@ export default function MessageView({ conversationId, conversationTitle, onBack 
             </button>
           </div>
           {templates.length === 0 ? (
-            <p style={{ fontSize: 12, color: 'var(--text-secondary)', padding: 8 }}>暂无模板</p>
+            <p style={{ fontSize: 12, color: 'var(--text-tertiary)', padding: 8 }}>暂无模板</p>
           ) : (
             templates.map((t, i) => (
               <button
@@ -587,7 +613,7 @@ export default function MessageView({ conversationId, conversationTitle, onBack 
               <p className="sheet-group-label">执行模式</p>
               <div className="sheet-segment">
                 <button className={mode === 'normal' ? 'active' : ''} onClick={() => setMode('normal')}>普通</button>
-                <button className={mode === 'super' ? 'active' : ''} onClick={() => setMode('super')}>Super Agent</button>
+                <button className={mode === 'super' ? 'active primary' : 'primary'} onClick={() => setMode('super')}>Super Agent</button>
               </div>
             </div>
 
@@ -611,7 +637,11 @@ export default function MessageView({ conversationId, conversationTitle, onBack 
               <p className="sheet-group-label">权限</p>
               <div className="sheet-segment sheet-levels">
                 {[1, 2, 3].map((l) => (
-                  <button key={l} className={permissionLevel === l ? 'active' : ''} onClick={() => setPermissionLevel(l)}>
+                  <button
+                    key={l}
+                    className={permissionLevel === l ? 'active' : ''}
+                    onClick={() => setPermissionLevel(l)}
+                  >
                     Level {l}
                   </button>
                 ))}

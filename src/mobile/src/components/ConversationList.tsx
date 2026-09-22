@@ -8,7 +8,8 @@ import {
   onSyncStateChange,
   type SyncState,
 } from '../api/supabase';
-import { User, Search, Trash2, MessageSquare, Plus, ChevronRight } from 'lucide-react';
+import { User, Search, Trash2, MessageSquare, Plus, ChevronRight, PlayCircle } from 'lucide-react';
+import AetherMark from './AetherMark';
 
 interface Conversation {
   id: string;
@@ -32,6 +33,8 @@ function formatClock(iso: string): string {
   return `${h}:${m}`;
 }
 
+const PREVIEW_ROWS_LIMIT = 10; // 仅对可见列表前 N 条加载预览，避免大量请求
+
 export default function ConversationList({ onSelect, onNewCommand, variant = 'home' }: Props) {
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [loading, setLoading] = useState(true);
@@ -42,6 +45,7 @@ export default function ConversationList({ onSelect, onNewCommand, variant = 'ho
   useEffect(() => onSyncStateChange(setSync), []);
 
   const [activePreview, setActivePreview] = useState('');
+  const [previews, setPreviews] = useState<Record<string, string>>({});
 
   const load = useCallback(async () => {
     try {
@@ -70,6 +74,7 @@ export default function ConversationList({ onSelect, onNewCommand, variant = 'ho
     return unsub;
   }, [load]);
 
+  // 「继续工作」：最近 30 分钟有更新的对话（取第一条）
   const activeConv = conversations.find((c) =>
     Date.now() - new Date(c.updated_at).getTime() < 30 * 60 * 1000
   );
@@ -86,10 +91,37 @@ export default function ConversationList({ onSelect, onNewCommand, variant = 'ho
       const content = last?.content?.replace(/```[\s\S]*?```/g, '代码块').slice(0, 40) ?? '';
       setActivePreview(content);
     });
-    return () => {
-      cancelled = true;
-    };
+    return () => { cancelled = true; };
   }, [activeConv?.id]);
+
+  // 最近对话预览：仅对可见列表前 N 条惰性加载最后一条 assistant 消息
+  useEffect(() => {
+    const visible = conversations.slice(0, PREVIEW_ROWS_LIMIT);
+    const targets = visible.filter((c) => !(c.id in previews) && c.message_count != null);
+    if (targets.length === 0) return;
+    let cancelled = false;
+    Promise.all(
+      targets.map(async (c) => {
+        try {
+          const msgs = await getMessages(c.id);
+          if (cancelled) return null;
+          const last = [...msgs].reverse().find((m) => m.role === 'assistant');
+          const preview = last?.content?.replace(/```[\s\S]*?```/g, '代码块').slice(0, 42) ?? '';
+          return { id: c.id, preview };
+        } catch { return null; }
+      }),
+    ).then((results) => {
+      if (cancelled) return;
+      const next: Record<string, string> = {};
+      for (const r of results) {
+        if (r && r.preview) next[r.id] = r.preview;
+      }
+      if (Object.keys(next).length > 0) {
+        setPreviews((prev) => ({ ...prev, ...next }));
+      }
+    });
+    return () => { cancelled = true; };
+  }, [conversations]);
 
   const filtered = searchQuery.trim()
     ? conversations.filter((c) => c.title.toLowerCase().includes(searchQuery.toLowerCase()))
@@ -123,6 +155,7 @@ export default function ConversationList({ onSelect, onNewCommand, variant = 'ho
 
   const online = sync.status === 'connected';
   const lastSyncLabel = sync.lastSyncAt ? formatClock(sync.lastSyncAt) : '—';
+  const isHome = variant === 'home';
 
   if (loading) {
     return (
@@ -133,45 +166,47 @@ export default function ConversationList({ onSelect, onNewCommand, variant = 'ho
     );
   }
 
-  const isHome = variant === 'home';
-
   return (
     <div className="home-page fade-in">
+      {/* 顶栏：Aether + 头像 */}
+      <header className="home-header">
+        <h1 className="home-title">Aether</h1>
+        <div className="home-avatar" aria-label="用户">
+          <User size={18} />
+        </div>
+      </header>
+
       {isHome && (
         <>
-          <header className="home-header">
-            <h1 className="home-title">Aether</h1>
-            <div className="home-avatar" aria-label="用户">
-              <User size={20} />
-            </div>
-          </header>
-
-          <div className="device-status-row">
-            <span className={`device-status-dot ${online ? 'online' : ''}`} aria-hidden="true" />
-            <span className="device-name">
-              Aether 工作站 · {online ? '在线' : '未连接'}
+          {/* 轻状态区 — 非功能卡 */}
+          <div className="home-status">
+            <span className={`home-status-dot ${online ? 'online' : ''}`} aria-hidden="true" />
+            <span className="home-status-name">
+              {online ? '在线' : '未连接'}
             </span>
+            <span className="home-status-divider">·</span>
+            <span className="home-status-name">Aether 工作站</span>
+            <span className="home-status-sub">最近同步 {lastSyncLabel}</span>
           </div>
 
-          <div className="device-card glass-surface">
-            <div className="device-card-status">
-              {online ? '电脑端在线' : '电脑端未连接'}
-            </div>
-            <div className="device-card-synced">最近同步 {lastSyncLabel}</div>
-          </div>
-
+          {/* 继续工作 — 轻 continuation row */}
           {activeConv && (
-            <div
-              className="continue-card glass-surface"
-              onClick={() => onSelect(activeConv)}
-              role="button"
-              tabIndex={0}
-              onKeyDown={(e) => e.key === 'Enter' && onSelect(activeConv)}
-            >
-              <div className="continue-title">继续工作</div>
-              <div className="continue-preview">
-                {activeConv.title}
-                {activePreview && <span>· {activePreview}</span>}
+            <div className="continue-section">
+              <div className="section-label" style={{ padding: 0, paddingBottom: 4 }}>继续工作</div>
+              <div
+                className="continue-row"
+                onClick={() => onSelect(activeConv)}
+                role="button"
+                tabIndex={0}
+                onKeyDown={(e) => e.key === 'Enter' && onSelect(activeConv)}
+              >
+                <div className="continue-row-mark">
+                  <PlayCircle size={20} />
+                </div>
+                <div className="continue-row-main">
+                  <div className="continue-row-title">{activeConv.title}</div>
+                  {activePreview && <div className="continue-row-preview">继续：{activePreview}</div>}
+                </div>
                 <ChevronRight size={16} className="continue-chevron" />
               </div>
             </div>
@@ -179,10 +214,11 @@ export default function ConversationList({ onSelect, onNewCommand, variant = 'ho
         </>
       )}
 
-      <div className="section-title">最近对话</div>
+      {/* 最近对话 */}
+      <div className="section-label">最近对话</div>
 
       <div className="search-field">
-        <Search size={18} className="search-field-icon" aria-hidden="true" />
+        <Search size={17} className="search-field-icon" aria-hidden="true" />
         <input
           className="search-field-input"
           type="text"
@@ -196,29 +232,23 @@ export default function ConversationList({ onSelect, onNewCommand, variant = 'ho
         {filtered.length === 0 ? (
           <div className="empty-state">
             <div className="empty-state-icon">
-              <MessageSquare size={28} />
+              <MessageSquare size={26} />
             </div>
             <h3 className="empty-state-title">暂无对话</h3>
             <p className="empty-state-desc">
               桌面端 Aether 的对话记录将自动同步到这里
             </p>
-            <button className="btn-primary" onClick={onNewCommand} style={{ marginTop: 16, width: 'auto' }}>
+            <button className="btn-primary" onClick={onNewCommand} style={{ marginTop: 18, width: 'auto', padding: '0 28px' }}>
               发送新指令
             </button>
           </div>
         ) : (
           filtered.map((conv) => (
-            <div
-              key={conv.id}
-              className="conv-row"
-              onClick={() => onSelect(conv)}
-            >
+            <div key={conv.id} className="conv-row" onClick={() => onSelect(conv)}>
               <div className="conv-main">
                 <div className="conv-title">{conv.title}</div>
-                <div className="conv-sub">
-                  {conv.message_count != null
-                    ? `${conv.message_count} 条消息`
-                    : conv.model || 'AI'}
+                <div className="conv-preview">
+                  {previews[conv.id] ?? (conv.message_count != null ? `${conv.message_count} 条消息` : (conv.model || 'AI'))}
                 </div>
               </div>
               <span className="conv-time">{formatTime(conv.updated_at)}</span>
@@ -227,7 +257,7 @@ export default function ConversationList({ onSelect, onNewCommand, variant = 'ho
                 onClick={(e) => handleDelete(e, conv.id, conv.title)}
                 aria-label={`删除 ${conv.title}`}
               >
-                <Trash2 size={16} />
+                <Trash2 size={14} />
               </button>
             </div>
           ))
@@ -235,8 +265,8 @@ export default function ConversationList({ onSelect, onNewCommand, variant = 'ho
       </div>
 
       <button className="new-command-cta" onClick={onNewCommand} type="button">
-        <Plus size={20} aria-hidden="true" />
-        继续告诉 Aether 下一步…
+        <Plus size={18} aria-hidden="true" />
+        告诉 Aether 下一步…
       </button>
     </div>
   );

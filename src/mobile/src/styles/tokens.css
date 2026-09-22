@@ -1,129 +1,170 @@
+/* ============================================================
+   Aether Mobile - Design Tokens v2
+   Apple Liquid Glass · Quiet Premium · Content First
+   ============================================================ */
+
 /* ===== 通用 token（两主题共用） ===== */
 :root {
-  --color-accent: #5e9eff;
-  --color-accent-hover: #7aafff;
-  --color-accent-subtle: rgba(94, 158, 255, 0.12);
-  --color-accent-glow: rgba(80, 140, 255, 0.28);
+  /* 品牌色（Aether 蓝，降低"互联网蓝"感，向钢蓝靠拢） */
+  --color-accent: #4a8fe7;
+  --color-accent-hover: #6aa5f0;
+  --color-accent-subtle: rgba(74, 143, 231, 0.10);
+  --color-accent-press: rgba(74, 143, 231, 0.18);
   --on-accent: #ffffff;
-  --color-success: #34d399;
-  --color-warning: #fbbf24;
-  --color-danger: #f87171;
 
+  /* 状态色 — 克制使用 */
+  --color-online: #38c988;
+  --color-success: #38c988;
+  --color-warning: #d9a03f;
+  --color-danger: #e2605f;
+
+  /* 中性功能色（reasoning 等，不用紫） */
+  --color-neutral: rgba(120, 128, 142, 0.55);
+
+  /* 字体 */
   --font-sans: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text",
-               "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
-  --font-mono: "SF Mono", "SFMono-Regular", "Fira Code", Consolas, monospace;
+               "Segoe UI", Roboto, "PingFang SC", "Microsoft YaHei", sans-serif;
+  --font-mono: "SF Mono", ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
 
-  --font-base: 15px;   /* 正文主字号 */
-  --font-md: 16px;     /* 重点正文 */
-  --font-sm: 13px;     /* 次级 */
-  --font-xs: 12px;     /* 元信息（11px 仅允许用于时间戳/角标） */
+  --font-base: 15px;    /* 正文 */
+  --font-md: 16px;      /* 重点正文 */
+  --font-sm: 13px;      /* 次级 */
+  --font-xs: 12px;      /* 元信息 */
+  --font-caption: 11px; /* 时间戳/角标 */
+  --font-title: 24px;   /* 页面大标题 */
 
-  /* 8pt 网格 */
+  /* 8pt 间距系统 */
   --space-1: 4px;  --space-2: 8px;  --space-3: 12px; --space-4: 16px;
   --space-5: 20px; --space-6: 24px; --space-8: 32px; --space-10: 40px;
   --space-12: 48px;
 
-  /* 圆角（移动端规格） */
-  --radius-sm: 12px;    /* 小：12~14 */
-  --radius-md: 16px;    /* 中：16~18 */
-  --radius-lg: 20px;    /* 大：20~24 */
-  --radius-xl: 24px;
-  --radius-input: 26px; /* 输入框：24~28 */
+  /* 圆角分级（真正需要才用） */
+  --radius-xs: 6px;      /* 内联小元素 */
+  --radius-sm: 10px;     /* 小控件/pill */
+  --radius-md: 16px;     /* 普通 Surface */
+  --radius-lg: 20px;     /* 大型 Surface */
+  --radius-xl: 24px;     /* 输入框/Sheet */
+  --radius-input: 26px;  /* Command Bar / 输入 */
+  --radius-floating: 30px; /* Floating 控件（Bottom Nav / Jump） */
   --radius-full: 9999px;
 
-  /* 玻璃 */
-  --glass-blur-radius: 26px;
-  --glass-saturate: 200%;
-  --glass-brightness: 1.25;
+  /* 玻璃材质 */
+  --glass-blur: 24px;
+  --glass-saturate: 1.6;
+  --glass-brightness: 1.15;
+  --glass-border: 1px solid rgba(255, 255, 255, 0.08);
+  --glass-highlight: linear-gradient(180deg, rgba(255,255,255,0.05), transparent 45%);
 
-  /* 动画 */
-  --anim-fast: 180ms;
+  /* 阴影 — 极轻，优先级低于材质 */
+  --shadow-none: none;
+  --shadow-xs: 0 1px 2px rgba(0, 0, 0, 0.06);
+  --shadow-sm: 0 2px 10px rgba(0, 0, 0, 0.08);
+  --shadow-md: 0 6px 24px rgba(0, 0, 0, 0.10);
+
+  /* 动画 — Apple smooth/subtle，禁弹性 */
+  --anim-fast: 150ms;
   --anim-base: 220ms;
-  --anim-slow: 260ms;
-  --anim-curve: cubic-bezier(0.34, 1.56, 0.64, 1);   /* 进场弹性 */
-  --anim-ease: cubic-bezier(0.25, 0.1, 0.25, 1);     /* 常规 */
+  --anim-slow: 320ms;
+  --anim-curve: cubic-bezier(0.25, 0.1, 0.25, 1);        /* 常规 easing */
+  --anim-enter: cubic-bezier(0.21, 0.32, 0.35, 1);       /* 进场轻缓 */
+  --anim-exit: cubic-bezier(0.4, 0.0, 0.6, 1);           /* 退场 */
 
-  /* 图标尺寸（统一） */
+  /* 图标尺寸 */
   --icon-nav: 20px;
   --icon-btn: 18px;
-  --icon-card: 24px;
+  --icon-md: 22px;
   --icon-sm: 16px;
 
   /* 安全区域 */
   --safe-top: env(safe-area-inset-top, 0px);
   --safe-bottom: env(safe-area-inset-bottom, 0px);
+
+  /* z-index 层级 */
+  --z-base: 0;
+  --z-content: 10;
+  --z-sticky: 100;
+  --z-floating: 200;
+  --z-sheet: 300;
+  --z-toast: 400;
 }
 
 /* ===== 暗色主题（默认） ===== */
 :root, [data-theme="dark"] {
   color-scheme: dark;
-  --bg-base: #0a0b10;
+  --bg-base: #0a0c0f;
+  /* 环境光背景 — 极淡、克制，不抢内容 */
   --bg-gradient:
-    radial-gradient(120% 90% at 15% 0%, rgba(94,158,255,0.13) 0%, rgba(139,92,246,0.07) 40%, transparent 62%),
-    linear-gradient(180deg, #0d0f18 0%, #0a0b10 65%);
-  --bg-surface: rgba(255,255,255,0.04);
-  --bg-surface-hover: rgba(255,255,255,0.08);
-  --bg-elevated: rgba(20,22,30,0.85);
-  --bg-overlay: rgba(0,0,0,0.55);
+    radial-gradient(120% 80% at 12% -5%, rgba(74, 143, 231, 0.07) 0%, transparent 55%),
+    radial-gradient(90% 60% at 100% 100%, rgba(120, 140, 160, 0.04) 0%, transparent 50%),
+    var(--bg-base);
 
-  --glass-fill-rgb: 20, 22, 28;
-  --glass-fill: rgba(20, 22, 28, 0.10);
-  --glass-fill-hover: rgba(20, 22, 28, 0.16);
-  --glass-border: 1px solid rgba(255,255,255,0.10);
-  --glass-shadow:
-    0 4px 24px rgba(0,0,0,0.22),
-    inset 0 1px 0.5px rgba(255,255,255,0.12);
+  --bg-surface: rgba(255, 255, 255, 0.028);
+  --bg-surface-hover: rgba(255, 255, 255, 0.055);
+  --bg-elevated: rgba(22, 25, 30, 0.72);
 
-  --text-primary: rgba(255,255,255,0.92);
-  --text-secondary: rgba(255,255,255,0.55);
-  --text-tertiary: rgba(255,255,255,0.35);
+  --glass-fill-rgb: 30, 34, 40;
+  --glass-fill: rgba(30, 34, 40, 0.55);
+  --glass-fill-hover: rgba(38, 42, 50, 0.65);
 
-  --border-primary: rgba(255,255,255,0.08);
+  --text-primary: rgba(245, 247, 250, 0.92);
+  --text-secondary: rgba(245, 247, 250, 0.55);
+  --text-tertiary: rgba(245, 247, 250, 0.32);
+  --text-disabled: rgba(245, 247, 250, 0.2);
 
-  --input-bg: rgba(20,22,28,0.5);
-  --input-border: rgba(255,255,255,0.08);
-  --input-placeholder: rgba(255,255,255,0.25);
+  --border-primary: rgba(255, 255, 255, 0.07);
+  --border-strong: rgba(255, 255, 255, 0.12);
+  --divider: rgba(255, 255, 255, 0.06);
 
-  --status-online: #34d399;
-  --status-busy: #fbbf24;
-  --status-offline: rgba(255,255,255,0.20);
+  --input-bg: rgba(18, 21, 26, 0.45);
+  --input-bg-focus: rgba(18, 21, 26, 0.6);
 
-  --scrollbar-thumb: rgba(255,255,255,0.08);
+  --overlay: rgba(0, 0, 0, 0.45);
+
+  --scrollbar-thumb: rgba(255, 255, 255, 0.10);
 }
 
 /* ===== 浅色主题 ===== */
 [data-theme="light"] {
   color-scheme: light;
-  --bg-base: #f5f5f7;
+  --bg-base: #f4f5f7;
   --bg-gradient:
-    radial-gradient(120% 90% at 15% 0%, rgba(94,158,255,0.09) 0%, rgba(139,92,246,0.04) 40%, transparent 62%),
-    linear-gradient(180deg, #f7f7f9 0%, #f5f5f7 65%);
-  --bg-surface: rgba(0,0,0,0.03);
-  --bg-surface-hover: rgba(0,0,0,0.05);
-  --bg-elevated: rgba(255,255,255,0.85);
-  --bg-overlay: rgba(0,0,0,0.30);
+    radial-gradient(120% 80% at 12% -5%, rgba(74, 143, 231, 0.05) 0%, transparent 55%),
+    var(--bg-base);
+
+  --bg-surface: rgba(255, 255, 255, 0.55);
+  --bg-surface-hover: rgba(255, 255, 255, 0.8);
+  --bg-elevated: rgba(250, 251, 253, 0.82);
 
   --glass-fill-rgb: 255, 255, 255;
-  --glass-fill: rgba(255,255,255,0.60);
-  --glass-fill-hover: rgba(255,255,255,0.75);
-  --glass-border: 1px solid rgba(255,255,255,0.55);
+  --glass-fill: rgba(255, 255, 255, 0.55);
+  --glass-fill-hover: rgba(255, 255, 255, 0.72);
+  --glass-border: 1px solid rgba(0, 0, 0, 0.06);
+  --glass-highlight: linear-gradient(180deg, rgba(255,255,255,0.85), transparent 45%);
+
+  --text-primary: rgba(17, 21, 27, 0.9);
+  --text-secondary: rgba(17, 21, 27, 0.56);
+  --text-tertiary: rgba(17, 21, 27, 0.34);
+  --text-disabled: rgba(17, 21, 27, 0.22);
+
+  --border-primary: rgba(0, 0, 0, 0.07);
+  --border-strong: rgba(0, 0, 0, 0.12);
+  --divider: rgba(0, 0, 0, 0.05);
+
+  --input-bg: rgba(255, 255, 255, 0.7);
+  --input-bg-focus: rgba(255, 255, 255, 0.95);
+
+  --overlay: rgba(17, 21, 27, 0.3);
+
+  --scrollbar-thumb: rgba(0, 0, 0, 0.14);
+
   --glass-shadow:
-    0 4px 20px rgba(0,0,0,0.05),
-    inset 0 1px 0.5px rgba(255,255,255,0.85);
+    0 2px 8px rgba(0, 0, 0, 0.04),
+    0 4px 16px rgba(0, 0, 0, 0.04);
+}
 
-  --text-primary: rgba(0,0,0,0.88);
-  --text-secondary: rgba(0,0,0,0.62);
-  --text-tertiary: rgba(0,0,0,0.45);
-
-  --border-primary: rgba(0,0,0,0.08);
-
-  --input-bg: rgba(255,255,255,0.70);
-  --input-border: rgba(0,0,0,0.08);
-  --input-placeholder: rgba(0,0,0,0.25);
-
-  --status-online: #2ecc8f;   /* 浅色下略加深保证对比 */
-  --status-busy: #e0a30e;
-  --status-offline: rgba(0,0,0,0.15);
-
-  --scrollbar-thumb: rgba(0,0,0,0.12);
+/* 暗色额外阴影（合并到 :root 末尾而非覆盖，避免浅色被误用） */
+:root, [data-theme="dark"] {
+  --glass-shadow:
+    0 2px 8px rgba(0, 0, 0, 0.16),
+    0 6px 20px rgba(0, 0, 0, 0.16);
 }

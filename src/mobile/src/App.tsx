@@ -18,7 +18,7 @@ import MinePage from './components/MinePage';
 import { LiquidGlassFilter } from './components/LiquidGlassFilter';
 import './App.css';
 
-// 页面类型（§9.1：list 拆为 home / conversations，复用同一组件 variant）
+// 页面类型（list 拆为 home / conversations，复用同一组件 variant）
 type Page = 'auth' | 'home' | 'conversations' | 'chat' | 'new-command' | 'appearance' | 'mine';
 
 interface Conversation {
@@ -131,8 +131,10 @@ export default function App() {
     setPage('home');
   };
 
-  // 底部导航（§9.2：仅 home / conversations / mine 三页显示）
+  // Floating Bottom Navigation（§17：仅 home / conversations / mine 三页显示）
   const showNav = page === 'home' || page === 'conversations' || page === 'mine';
+  const navTab: 'home' | 'conversations' | 'mine' =
+    page === 'home' ? 'home' : page === 'conversations' ? 'conversations' : page === 'mine' ? 'mine' : 'home';
 
   // 启动中：显示加载页
   if (booting) {
@@ -140,7 +142,7 @@ export default function App() {
       <>
         {glassFilter}
         <div className="config-page">
-          <h1>Aether</h1>
+          <AetherTitle />
           <div className="loading">
             <div className="spinner" />
             正在恢复会话...
@@ -207,23 +209,8 @@ export default function App() {
           onOpenAppearance={() => setPage('appearance')}
           onSignOut={handleSignOut}
         />
-        <nav className="bottom-nav">
-          <button className="bottom-nav-item" onClick={() => setPage('home')}>
-            <Home size={20} className="bottom-nav-icon" />
-            <span className="bottom-nav-label">首页</span>
-          </button>
-          <button className="bottom-nav-item" onClick={() => setPage('conversations')}>
-            <MessageSquare size={20} className="bottom-nav-icon" />
-            <span className="bottom-nav-label">对话</span>
-          </button>
-          <button className="bottom-nav-item active" onClick={() => setPage('mine')}>
-            <User size={20} className="bottom-nav-icon" />
-            <span className="bottom-nav-label">我的</span>
-          </button>
-        </nav>
-        {statusMsg && (
-          <div className="status-toast">{statusMsg}</div>
-        )}
+        <FloatingNav tab={navTab} onTab={(t) => setPage(t)} />
+        {statusMsg && <div className="status-toast">{statusMsg}</div>}
       </>
     );
   }
@@ -231,32 +218,54 @@ export default function App() {
   // 首页 / 对话列表（复用 ConversationList，variant 控制）
   const isHome = page === 'home';
   return (
-    <div className="app-shell">
+    <div className="page-shell">
       {glassFilter}
       <ConversationList
         onSelect={handleSelectConv}
         onNewCommand={() => setPage('new-command')}
         variant={isHome ? 'home' : 'conversations'}
       />
-      {showNav && (
-        <nav className="bottom-nav">
-          <button className={`bottom-nav-item ${isHome ? 'active' : ''}`} onClick={() => setPage('home')}>
-            <Home size={20} className="bottom-nav-icon" />
-            <span className="bottom-nav-label">首页</span>
-          </button>
-          <button className={`bottom-nav-item ${!isHome ? 'active' : ''}`} onClick={() => setPage('conversations')}>
-            <MessageSquare size={20} className="bottom-nav-icon" />
-            <span className="bottom-nav-label">对话</span>
-          </button>
-          <button className="bottom-nav-item" onClick={() => setPage('mine')}>
-            <User size={20} className="bottom-nav-icon" />
-            <span className="bottom-nav-label">我的</span>
-          </button>
-        </nav>
-      )}
-      {statusMsg && (
-        <div className="status-toast">{statusMsg}</div>
-      )}
+      {showNav && <FloatingNav tab={navTab} onTab={(t) => setPage(t)} />}
+      {statusMsg && <div className="status-toast">{statusMsg}</div>}
     </div>
   );
+}
+
+// ============================================================
+// Floating Liquid Glass Island（§17）
+// ============================================================
+function FloatingNav({
+  tab,
+  onTab,
+}: {
+  tab: 'home' | 'conversations' | 'mine';
+  onTab: (t: 'home' | 'conversations' | 'mine') => void;
+}) {
+  const items = [
+    { key: 'home' as const, icon: Home, label: '首页' },
+    { key: 'conversations' as const, icon: MessageSquare, label: '对话' },
+    { key: 'mine' as const, icon: User, label: '我的' },
+  ];
+  return (
+    <nav className="floating-nav" aria-label="主导航">
+      {items.map((it) => {
+        const Icon = it.icon;
+        return (
+          <button
+            key={it.key}
+            className={`floating-nav-item ${tab === it.key ? 'active' : ''}`}
+            onClick={() => onTab(it.key)}
+          >
+            <Icon size={18} className="floating-nav-icon" />
+            <span className="floating-nav-label">{it.label}</span>
+          </button>
+        );
+      })}
+    </nav>
+  );
+}
+
+// 品牌标题（启动页）
+function AetherTitle() {
+  return <h1 style={{ fontSize: 30, fontWeight: 700, marginBottom: 10, color: 'var(--text-primary)' }}>Aether</h1>;
 }

@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Sparkles, ChevronRight } from 'lucide-react';
+import { ChevronRight } from 'lucide-react';
 import {
   saveConfig,
   signIn,
@@ -7,6 +7,7 @@ import {
   registerDevice,
   SupabaseApiError,
 } from '../api/supabase';
+import AetherMark from './AetherMark';
 
 type AuthMode = 'signin' | 'signup';
 
@@ -28,6 +29,7 @@ export default function LoginPage({ initialUrl, initialAnonKey, onAuthenticated 
   const [serverOpen, setServerOpen] = useState(false);
 
   const handleSubmitAuth = async () => {
+    // 四字段校验（URL/Key 在 Sheet 内，仍参与校验）— 业务逻辑原样
     if (!url.trim() || !anonKey.trim() || !email.trim() || !password) {
       setStatusMsg('请填写完整的 Supabase URL、Anon Key、邮箱和密码');
       setStatusTone('error');
@@ -77,49 +79,47 @@ export default function LoginPage({ initialUrl, initialAnonKey, onAuthenticated 
     setStatusMsg('');
   };
 
-  const handleUrlChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    setUrl(e.target.value);
-  };
-
-  const handleAnonKeyChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    setAnonKey(e.target.value);
-  };
-
   return (
-    <div className="login-page">
-      <Sparkles className="login-logo" size={60} />
+    <div className="login-page fade-in">
+      <AetherMark size={56} className="login-mark" />
       <h1 className="login-title">Aether</h1>
       <p className="login-subtitle">远程连接你的 AI 工作站</p>
 
-      <form className="login-form" onSubmit={(e) => { e.preventDefault(); handleSubmitAuth(); }}>
-        <label className="login-field">
-          <span className="login-field-label">邮箱</span>
-          <input
-            className="login-input"
-            type="email"
-            value={email}
-            onChange={(e) => setEmail(e.target.value)}
-            placeholder="you@example.com"
-            autoCapitalize="none"
-            autoCorrect="off"
-            autoComplete="email"
-            disabled={busy}
-          />
-        </label>
-        <label className="login-field">
-          <span className="login-field-label">密码</span>
-          <input
-            className="login-input"
-            type="password"
-            value={password}
-            onChange={(e) => setPassword(e.target.value)}
-            placeholder="••••••••"
-            autoCapitalize="none"
-            autoCorrect="off"
-            autoComplete={authMode === 'signin' ? 'current-password' : 'new-password'}
-            disabled={busy}
-          />
-        </label>
+      <form
+        className="login-form"
+        onSubmit={(e) => { e.preventDefault(); handleSubmitAuth(); }}
+      >
+        {/* Grouped Input Surface — iOS 设置分组输入 */}
+        <div className="login-group">
+          <div className="login-group-item">
+            <span className="login-field-label">邮箱</span>
+            <input
+              className="login-input"
+              type="email"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              placeholder="you@example.com"
+              autoCapitalize="none"
+              autoCorrect="off"
+              autoComplete="email"
+              disabled={busy}
+            />
+          </div>
+          <div className="login-group-item">
+            <span className="login-field-label">密码</span>
+            <input
+              className="login-input"
+              type="password"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              placeholder="••••••••"
+              autoCapitalize="none"
+              autoCorrect="off"
+              autoComplete={authMode === 'signin' ? 'current-password' : 'new-password'}
+              disabled={busy}
+            />
+          </div>
+        </div>
 
         <button
           className="btn-primary login-submit"
@@ -128,6 +128,7 @@ export default function LoginPage({ initialUrl, initialAnonKey, onAuthenticated 
         >
           {busy ? '处理中…' : authMode === 'signin' ? '登录' : '注册'}
         </button>
+
         <button
           type="button"
           className="login-toggle"
@@ -143,6 +144,7 @@ export default function LoginPage({ initialUrl, initialAnonKey, onAuthenticated 
           </p>
         )}
 
+        {/* 次要设置入口 */}
         <button
           type="button"
           className="login-server-link"
@@ -164,7 +166,7 @@ export default function LoginPage({ initialUrl, initialAnonKey, onAuthenticated 
               <input
                 className="login-input"
                 value={url}
-                onChange={handleUrlChange}
+                onChange={(e) => setUrl(e.target.value)}
                 placeholder="https://xxx.supabase.co"
                 autoCapitalize="none"
                 autoCorrect="off"
@@ -177,7 +179,7 @@ export default function LoginPage({ initialUrl, initialAnonKey, onAuthenticated 
                 className="login-input"
                 type="password"
                 value={anonKey}
-                onChange={handleAnonKeyChange}
+                onChange={(e) => setAnonKey(e.target.value)}
                 placeholder="eyJhbGciOiJIUzI1NiIs..."
                 autoCapitalize="none"
                 autoCorrect="off"
