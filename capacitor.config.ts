@@ -2,7 +2,7 @@ import type { CapacitorConfig } from '@capacitor/cli';
 
 const config: CapacitorConfig = {
   appId: 'com.pacc.app',
-  appName: 'Aether Mobile',
+  appName: 'Aether',
   webDir: 'src/mobile/dist',
   server: {
     androidScheme: 'https',

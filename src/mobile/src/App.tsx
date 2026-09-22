@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
+﻿import { useState, useEffect, useCallback, useRef } from 'react';
 import { Home, MessageSquare, User } from 'lucide-react';
 import {
   getStoredUrl,
@@ -11,15 +11,13 @@ import {
 } from './api/supabase';
 import ConversationList from './components/ConversationList';
 import MessageView from './components/MessageView';
-import NewCommand from './components/NewCommand';
 import AppearanceSettings from './components/AppearanceSettings';
 import LoginPage from './components/LoginPage';
 import MinePage from './components/MinePage';
-import { LiquidGlassFilter } from './components/LiquidGlassFilter';
 import './App.css';
 
 // 页面类型（list 拆为 home / conversations，复用同一组件 variant）
-type Page = 'auth' | 'home' | 'conversations' | 'chat' | 'new-command' | 'appearance' | 'mine';
+type Page = 'auth' | 'home' | 'conversations' | 'chat' | 'appearance' | 'mine';
 
 interface Conversation {
   id: string;
@@ -30,30 +28,32 @@ interface Conversation {
   created_at: string;
 }
 
+// §29 Auth 启动状态
+type AuthState = 'checking' | 'authenticated' | 'unauthenticated' | 'error';
+
+function generateConvId(): string {
+  return typeof crypto !== 'undefined' && crypto.randomUUID
+    ? crypto.randomUUID()
+    : 'remote-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8);
+}
+
 export default function App() {
   const [page, setPage] = useState<Page>('auth');
+  const [authState, setAuthState] = useState<AuthState>('checking');
   const [booting, setBooting] = useState(true);
   const [selectedConv, setSelectedConv] = useState<Conversation | null>(null);
   const [statusMsg, setStatusMsg] = useState('');
   const authUnsubRef = useRef<(() => void) | null>(null);
 
-  // 全局恢复：应用启动时从 localStorage 恢复自定义背景
+  // §46 全局恢复：应用启动时从 localStorage 恢复自定义背景（单一 DOM 入口）
   useEffect(() => {
     try {
       const savedBg = localStorage.getItem('aether_mobile_bg');
       if (savedBg) {
-        const bgValue = `url(${savedBg})`;
-        document.body.style.backgroundImage = bgValue;
+        document.body.style.backgroundImage = `url(${savedBg})`;
         document.body.style.backgroundSize = 'cover';
         document.body.style.backgroundPosition = 'center';
         document.body.style.backgroundAttachment = 'fixed';
-        const layout = document.querySelector('.app-layout') as HTMLElement | null;
-        if (layout) {
-          layout.style.backgroundImage = bgValue;
-          layout.style.backgroundSize = 'cover';
-          layout.style.backgroundPosition = 'center';
-          layout.style.backgroundAttachment = 'fixed';
-        }
       }
     } catch { /* ignore */ }
   }, []);
@@ -70,40 +70,50 @@ export default function App() {
       // 登出 / session 失效 → 回到登录页
       if (!session || event === 'SIGNED_OUT') {
         setPage('auth');
+        setAuthState('unauthenticated');
         setSelectedConv(null);
         setStatusMsg('已退出登录');
       }
     });
   }, []);
 
-  // 启动流：load auth session → validate → device registration → 主界面
+  // §29 启动流：区分 checking / authenticated / unauthenticated / error
   useEffect(() => {
     let cancelled = false;
     (async () => {
-      const session = await getSession();
-      if (cancelled) return;
-      subscribeAuth();
-
-      if (session) {
-        // 已登录：注册设备后进入主界面（注册失败不阻断，记录警告）
-        const registered = await registerDevice();
+      try {
+        const session = await getSession();
         if (cancelled) return;
-        if (!registered) {
-          setStatusMsg('设备注册失败，远程命令可能无法下发');
+        subscribeAuth();
+
+        if (session) {
+          setAuthState('authenticated');
+          // 已登录：注册设备后进入主界面（注册失败不阻断，记录警告）
+          const registered = await registerDevice();
+          if (cancelled) return;
+          if (!registered) {
+            setStatusMsg('设备注册失败，远程命令可能无法下发');
+          }
+          setPage('home');
+        } else {
+          setAuthState('unauthenticated');
         }
-        setPage('home');
+      } catch (e: unknown) {
+        // 网络异常不要伪装成未登录（§29）
+        console.warn('启动恢复会话失败:', e instanceof Error ? e.message : e);
+        setAuthState('error');
+        setStatusMsg('无法连接服务器，请检查网络后重试');
+      } finally {
+        setBooting(false);
       }
-      setBooting(false);
     })();
     return () => { cancelled = true; };
   }, [subscribeAuth]);
 
-  // 全局挂载 Liquid Glass SVG 滤镜（供 backdrop-filter: url(#liquid-lens) 引用）
-  const glassFilter = <LiquidGlassFilter />;
-
   const handleAuthenticated = useCallback(() => {
     // 认证成功后确保 auth 监听已挂载（client 此时已创建）
     subscribeAuth();
+    setAuthState('authenticated');
     setPage('home');
     setTimeout(() => setStatusMsg(''), 1200);
   }, [subscribeAuth]);
@@ -116,6 +126,7 @@ export default function App() {
     } finally {
       cleanup();
       setPage('auth');
+      setAuthState('unauthenticated');
       setSelectedConv(null);
       setStatusMsg('已退出登录');
     }
@@ -126,67 +137,74 @@ export default function App() {
     setPage('chat');
   };
 
+  // §4：统一新指令入口 → 创建新 conversation 进入统一 Chat（不再进旧 NewCommand）
+  const handleNewCommand = () => {
+    const now = new Date().toISOString();
+    const newConv: Conversation = {
+      id: generateConvId(),
+      title: '新对话',
+      created_at: now,
+      updated_at: now,
+    };
+    setSelectedConv(newConv);
+    setPage('chat');
+  };
+
   const handleBack = () => {
     setSelectedConv(null);
     setPage('home');
   };
 
-  // Floating Bottom Navigation（§17：仅 home / conversations / mine 三页显示）
+  // Floating Bottom Navigation（仅 home / conversations / mine 三页显示）
   const showNav = page === 'home' || page === 'conversations' || page === 'mine';
   const navTab: 'home' | 'conversations' | 'mine' =
     page === 'home' ? 'home' : page === 'conversations' ? 'conversations' : page === 'mine' ? 'mine' : 'home';
 
-  // 启动中：显示加载页
+  // 启动中：显示加载页（§29 checking 态）
   if (booting) {
     return (
-      <>
-        {glassFilter}
-        <div className="config-page">
-          <AetherTitle />
+      <div className="config-page">
+        <AetherTitle />
+        {authState === 'error' ? (
+          <div className="empty-state">
+            <h3 className="empty-state-title">无法连接服务器</h3>
+            <p className="empty-state-desc">请检查网络后重试</p>
+            <button className="btn-primary" onClick={() => { setBooting(true); setAuthState('checking'); window.location.reload(); }} style={{ marginTop: 16, width: 'auto', padding: '0 28px' }}>
+              重新连接
+            </button>
+          </div>
+        ) : (
           <div className="loading">
             <div className="spinner" />
             正在恢复会话...
           </div>
-        </div>
-      </>
+        )}
+      </div>
     );
   }
 
-  // 登录 / 注册页面
+  // 登录 / 注册页面（含 error 提示）
   if (page === 'auth') {
     return (
       <>
-        {glassFilter}
         <LoginPage
           initialUrl={getStoredUrl() ?? undefined}
           initialAnonKey={getStoredAnonKey() ?? undefined}
           onAuthenticated={handleAuthenticated}
         />
+        {statusMsg && <div className="status-toast">{statusMsg}</div>}
       </>
     );
   }
 
-  // 聊天页面（沉浸，无底部导航）
+  // 聊天页面（沉浸，无底部导航）— 统一 Chat（含新对话）
   if (page === 'chat' && selectedConv) {
     return (
-      <>
-        {glassFilter}
-        <MessageView
-          conversationId={selectedConv.id}
-          conversationTitle={selectedConv.title}
-          onBack={handleBack}
-        />
-      </>
-    );
-  }
-
-  // 新命令页面
-  if (page === 'new-command') {
-    return (
-      <>
-        {glassFilter}
-        <NewCommand onBack={handleBack} />
-      </>
+      <MessageView
+        conversationId={selectedConv.id}
+        conversationTitle={selectedConv.title}
+        onBack={handleBack}
+      />
     );
   }
 
@@ -194,7 +212,6 @@ export default function App() {
   if (page === 'appearance') {
     return (
       <>
-        {glassFilter}
         <AppearanceSettings onBack={handleBack} />
       </>
     );
@@ -204,7 +221,6 @@ export default function App() {
   if (page === 'mine') {
     return (
       <>
-        {glassFilter}
         <MinePage
           onOpenAppearance={() => setPage('appearance')}
           onSignOut={handleSignOut}
@@ -219,10 +235,9 @@ export default function App() {
   const isHome = page === 'home';
   return (
     <div className="page-shell">
-      {glassFilter}
       <ConversationList
         onSelect={handleSelectConv}
-        onNewCommand={() => setPage('new-command')}
+        onNewCommand={handleNewCommand}
         variant={isHome ? 'home' : 'conversations'}
       />
       {showNav && <FloatingNav tab={navTab} onTab={(t) => setPage(t)} />}
@@ -232,7 +247,7 @@ export default function App() {
 }
 
 // ============================================================
-// Floating Liquid Glass Island（§17）
+// Floating Liquid Glass Island（§36）
 // ============================================================
 function FloatingNav({
   tab,

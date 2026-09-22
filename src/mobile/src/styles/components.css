@@ -644,6 +644,72 @@ input, textarea { font-family: inherit; }
 .reasoning-bar-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--color-accent); margin-top: 3px; flex-shrink: 0; animation: pulseSoft 1.6s ease-in-out infinite; }
 .reasoning-bar-text { flex: 1; }
 
+/* ===== 发送状态角标（§9） ===== */
+.msg-local-row { display: flex; align-items: center; gap: 6px; }
+.msg-local-badge {
+  font-size: var(--font-caption);
+  color: var(--text-tertiary);
+  display: inline-flex; align-items: center; gap: 4px;
+}
+.msg-local-badge.queued { color: var(--color-warning); }
+.msg-local-badge.failed { color: var(--color-danger); }
+.msg-resend-btn {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 18px; height: 18px; border-radius: 50%;
+  border: none; background: var(--color-danger);
+  color: #fff; cursor: pointer;
+}
+.msg-user .msg-local-badge { color: var(--text-tertiary); }
+
+/* ===== 加载更早消息 ===== */
+.load-older-btn {
+  align-self: center;
+  margin: 4px 0 8px;
+  padding: 6px 16px;
+  border-radius: 99px;
+  border: 1px solid var(--border-primary);
+  background: var(--bg-surface);
+  color: var(--text-secondary);
+  font-size: var(--font-sm);
+  cursor: pointer;
+  transition: background var(--anim-fast);
+}
+.load-older-btn:active { background: var(--bg-surface-hover); }
+
+/* ===== 附件预览（从 NewCommand 迁移） ===== */
+.attachment-preview-row {
+  display: flex; gap: 6px; flex-wrap: wrap;
+  padding: 4px 8px 0;
+  width: 100%;
+}
+.attachment-chip { position: relative; display: inline-flex; align-items: center; }
+.attachment-chip-img {
+  width: 38px; height: 38px; border-radius: 8px; object-fit: cover;
+  border: 1px solid var(--border-primary);
+}
+.attachment-chip.file {
+  padding: 4px 8px; border-radius: 8px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-primary);
+  font-size: var(--font-caption);
+  color: var(--text-secondary);
+}
+.attachment-chip-name { max-width: 80px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.attachment-chip-remove {
+  position: absolute; top: -4px; right: -4px;
+  width: 18px; height: 18px; border-radius: 50%;
+  background: var(--color-danger); color: #fff;
+  border: none; font-size: 10px; cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+}
+.command-bar-inner { display: flex; align-items: flex-end; gap: 6px; width: 100%; }
+
+/* 发送按钮 stop 态 */
+.send-btn.stop { background: var(--color-danger); }
+
+/* 设置 Sheet 提示 */
+.sheet-hint { font-size: var(--font-caption); color: var(--text-tertiary); margin-bottom: 12px; }
+
 /* ===== Markdown ===== */
 .md-codeblock {
   margin: 6px 0;
@@ -873,3 +939,10 @@ input, textarea { font-family: inherit; }
   color: var(--text-secondary);
   animation: fadeIn var(--anim-fast);
 }
+/* 外观设置错误提示 */
+.appearance-error {
+  margin-top: 10px;
+  font-size: var(--font-caption);
+  color: var(--color-danger);
+}
+

@@ -6,7 +6,9 @@ import {
   signUp,
   registerDevice,
   SupabaseApiError,
+  classifyError,
 } from '../api/supabase';
+import { createClient } from '@supabase/supabase-js';
 import AetherMark from './AetherMark';
 
 type AuthMode = 'signin' | 'signup';
@@ -27,6 +29,44 @@ export default function LoginPage({ initialUrl, initialAnonKey, onAuthenticated 
   const [statusTone, setStatusTone] = useState<'success' | 'error' | 'warning' | 'info'>('info');
   const [busy, setBusy] = useState(false);
   const [serverOpen, setServerOpen] = useState(false);
+  // §44：连接测试状态
+  const [testing, setTesting] = useState(false);
+  const [testMsg, setTestMsg] = useState('');
+  const [testTone, setTestTone] = useState<'success' | 'error' | 'info'>('info');
+
+  // §44：连接测试 — 用临时 client 预检 Supabase 连通性（不保存配置）
+  const handleTestConnection = async () => {
+    if (!url.trim() || !anonKey.trim()) {
+      setTestMsg('请先填写服务器地址和 Anon Key');
+      setTestTone('error');
+      return;
+    }
+    setTesting(true);
+    setTestMsg('');
+    try {
+      const temp = createClient(url.trim(), anonKey.trim(), {
+        auth: { persistSession: false },
+        realtime: { heartbeatIntervalMs: 15000 },
+      });
+      // 轻量连通性探测：查 knowledge 表 head（存在性查询）
+      const { error } = await temp.from('knowledge').select('device_id', { count: 'exact', head: true });
+      if (error) {
+        const err = classifyError(error);
+        setTestMsg(`连接失败：${err.message}`);
+        setTestTone('error');
+      } else {
+        setTestMsg('连接成功，服务器可用');
+        setTestTone('success');
+      }
+      void temp.realtime.removeAllChannels();
+    } catch (e) {
+      const err = classifyError(e);
+      setTestMsg(`连接失败：${err.message}`);
+      setTestTone('error');
+    } finally {
+      setTesting(false);
+    }
+  };
 
   const handleSubmitAuth = async () => {
     // 四字段校验（URL/Key 在 Sheet 内，仍参与校验）— 业务逻辑原样
@@ -189,6 +229,19 @@ export default function LoginPage({ initialUrl, initialAnonKey, onAuthenticated 
             <p className="login-sheet-hint">
               Anon Key 可公开（用于建立加密连接），数据访问由登录账号 + 行级安全策略控制。请勿填写 Service Role Key。
             </p>
+            <button
+              className="btn-ghost"
+              onClick={handleTestConnection}
+              disabled={testing}
+              style={{ width: '100%', marginBottom: 8 }}
+            >
+              {testing ? '测试中…' : '测试连接'}
+            </button>
+            {testMsg && (
+              <p className="login-status" data-tone={testTone} style={{ marginBottom: 8 }}>
+                {testMsg}
+              </p>
+            )}
             <button className="btn-primary sheet-done" onClick={() => setServerOpen(false)} disabled={busy}>
               完成
             </button>

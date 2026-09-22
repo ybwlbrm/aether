@@ -244,6 +244,7 @@ export default function AppearanceSettings({ onBack }: Props) {
               <img src={bgImage} alt="" style={{ width: '100%', maxHeight: 140, borderRadius: 8, objectFit: 'cover' }} />
             </div>
           )}
+          {bgMsg && <p className="appearance-error">{bgMsg}</p>}
         </div>
 
         {/* 玻璃效果 */}

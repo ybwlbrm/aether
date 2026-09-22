@@ -8,8 +8,8 @@ import {
   onSyncStateChange,
   type SyncState,
 } from '../api/supabase';
-import { User, Search, Trash2, MessageSquare, Plus, ChevronRight, PlayCircle } from 'lucide-react';
-import AetherMark from './AetherMark';
+import { type ChatMessage } from '../lib/message-store';
+import { User, Search, Trash2, MessageSquare, Plus, ChevronRight, PlayCircle, RefreshCw } from 'lucide-react';
 
 interface Conversation {
   id: string;
@@ -33,11 +33,15 @@ function formatClock(iso: string): string {
   return `${h}:${m}`;
 }
 
-const PREVIEW_ROWS_LIMIT = 10; // 仅对可见列表前 N 条加载预览，避免大量请求
+// §24：列表加载状态
+type ListPhase = 'loading' | 'success' | 'empty' | 'error';
+
+const PREVIEW_ROWS_LIMIT = 10;
 
 export default function ConversationList({ onSelect, onNewCommand, variant = 'home' }: Props) {
   const [conversations, setConversations] = useState<Conversation[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [phase, setPhase] = useState<ListPhase>('loading');
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
 
@@ -49,22 +53,30 @@ export default function ConversationList({ onSelect, onNewCommand, variant = 'ho
 
   const load = useCallback(async () => {
     try {
-      const data = await getConversations();
+      const res = await getConversations({ limit: 50 });
+      if (res.error) {
+        setPhase('error');
+        setLoadError(res.error.message);
+        return;
+      }
+      const data = (res.data ?? []) as Conversation[];
       setConversations(data);
+      setPhase(data.length > 0 ? 'success' : 'empty');
+      setLoadError(null);
     } catch (e) {
-      console.error('加载对话列表失败:', e);
+      setPhase('error');
+      setLoadError(e instanceof Error ? e.message : String(e));
     } finally {
-      setLoading(false);
       setRefreshing(false);
     }
   }, []);
 
   useEffect(() => {
     load();
-    const unsub = subscribeConversations((payload: any) => {
+    const unsub = subscribeConversations((payload) => {
       if (payload?.eventType === 'DELETE') {
         const deletedId = payload.old?.id;
-        if (deletedId) {
+        if (typeof deletedId === 'string') {
           setConversations((prev) => prev.filter((c) => c.id !== deletedId));
         }
         return;
@@ -74,7 +86,7 @@ export default function ConversationList({ onSelect, onNewCommand, variant = 'ho
     return unsub;
   }, [load]);
 
-  // 「继续工作」：最近 30 分钟有更新的对话（取第一条）
+  // 「继续工作」：最近 30 分钟有更新的对话
   const activeConv = conversations.find((c) =>
     Date.now() - new Date(c.updated_at).getTime() < 30 * 60 * 1000
   );
@@ -85,8 +97,9 @@ export default function ConversationList({ onSelect, onNewCommand, variant = 'ho
       return;
     }
     let cancelled = false;
-    getMessages(activeConv.id).then((msgs) => {
-      if (cancelled) return;
+    getMessages(activeConv.id, { limit: 50 }).then((res) => {
+      if (cancelled || res.error) return;
+      const msgs = (res.data ?? []) as ChatMessage[];
       const last = [...msgs].reverse().find((m) => m.role === 'assistant');
       const content = last?.content?.replace(/```[\s\S]*?```/g, '代码块').slice(0, 40) ?? '';
       setActivePreview(content);
@@ -103,8 +116,9 @@ export default function ConversationList({ onSelect, onNewCommand, variant = 'ho
     Promise.all(
       targets.map(async (c) => {
         try {
-          const msgs = await getMessages(c.id);
-          if (cancelled) return null;
+          const res = await getMessages(c.id, { limit: 20 });
+          if (cancelled || res.error) return null;
+          const msgs = (res.data ?? []) as ChatMessage[];
           const last = [...msgs].reverse().find((m) => m.role === 'assistant');
           const preview = last?.content?.replace(/```[\s\S]*?```/g, '代码块').slice(0, 42) ?? '';
           return { id: c.id, preview };
@@ -135,9 +149,13 @@ export default function ConversationList({ onSelect, onNewCommand, variant = 'ho
   const handleDelete = async (e: React.MouseEvent, convId: string, convTitle: string) => {
     e.stopPropagation();
     if (!window.confirm(`确定删除「${convTitle}」？\n此操作不可恢复。`)) return;
+    // §32：本地立即反馈，失败恢复行 + 错误提示
+    const prev = conversations;
+    setConversations((p) => p.filter((c) => c.id !== convId));
     const ok = await deleteConversation(convId);
-    if (ok) {
-      setConversations((prev) => prev.filter((c) => c.id !== convId));
+    if (!ok) {
+      setConversations(prev);
+      setLoadError('删除失败，请重试');
     }
   };
 
@@ -157,33 +175,38 @@ export default function ConversationList({ onSelect, onNewCommand, variant = 'ho
   const lastSyncLabel = sync.lastSyncAt ? formatClock(sync.lastSyncAt) : '—';
   const isHome = variant === 'home';
 
-  if (loading) {
+  const searchNoResult = searchQuery.trim() !== '' && filtered.length === 0 && phase === 'success';
+
+  if (phase === 'loading') {
     return (
-      <div className="loading">
-        <div className="spinner" />
-        加载中...
+      <div className="home-page fade-in">
+        <header className="home-header">
+          <h1 className="home-title">Aether</h1>
+          <div className="home-avatar" aria-label="用户"><User size={18} /></div>
+        </header>
+        <div className="loading"><div className="spinner" />加载中...</div>
       </div>
     );
   }
-
   return (
     <div className="home-page fade-in">
-      {/* 顶栏：Aether + 头像 */}
+      {/* 顶栏 */}
       <header className="home-header">
         <h1 className="home-title">Aether</h1>
-        <div className="home-avatar" aria-label="用户">
-          <User size={18} />
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <button className="refresh-btn" onClick={handleRefresh} disabled={refreshing} aria-label="刷新">
+            <RefreshCw size={14} className={refreshing ? 'spin' : ''} />
+          </button>
+          <div className="home-avatar" aria-label="用户"><User size={18} /></div>
         </div>
       </header>
 
-      {isHome && (
+      {isHome && phase === 'success' && (
         <>
-          {/* 轻状态区 — 非功能卡 */}
+          {/* 轻状态区 */}
           <div className="home-status">
             <span className={`home-status-dot ${online ? 'online' : ''}`} aria-hidden="true" />
-            <span className="home-status-name">
-              {online ? '在线' : '未连接'}
-            </span>
+            <span className="home-status-name">{online ? '在线' : '未连接'}</span>
             <span className="home-status-divider">·</span>
             <span className="home-status-name">Aether 工作站</span>
             <span className="home-status-sub">最近同步 {lastSyncLabel}</span>
@@ -200,9 +223,7 @@ export default function ConversationList({ onSelect, onNewCommand, variant = 'ho
                 tabIndex={0}
                 onKeyDown={(e) => e.key === 'Enter' && onSelect(activeConv)}
               >
-                <div className="continue-row-mark">
-                  <PlayCircle size={20} />
-                </div>
+                <div className="continue-row-mark"><PlayCircle size={20} /></div>
                 <div className="continue-row-main">
                   <div className="continue-row-title">{activeConv.title}</div>
                   {activePreview && <div className="continue-row-preview">继续：{activePreview}</div>}
@@ -229,15 +250,22 @@ export default function ConversationList({ onSelect, onNewCommand, variant = 'ho
       </div>
 
       <div className="conv-list">
-        {filtered.length === 0 ? (
+        {phase === 'error' ? (
           <div className="empty-state">
-            <div className="empty-state-icon">
-              <MessageSquare size={26} />
-            </div>
+            <h3 className="empty-state-title">加载失败</h3>
+            <p className="empty-state-desc">{loadError || '无法获取对话列表'}</p>
+            <button className="btn-ghost" onClick={load} style={{ marginTop: 16 }}>点击重试</button>
+          </div>
+        ) : searchNoResult ? (
+          <div className="empty-state">
+            <h3 className="empty-state-title">无搜索结果</h3>
+            <p className="empty-state-desc">没有找到匹配的对话</p>
+          </div>
+        ) : filtered.length === 0 ? (
+          <div className="empty-state">
+            <div className="empty-state-icon"><MessageSquare size={26} /></div>
             <h3 className="empty-state-title">暂无对话</h3>
-            <p className="empty-state-desc">
-              桌面端 Aether 的对话记录将自动同步到这里
-            </p>
+            <p className="empty-state-desc">桌面端 Aether 的对话记录将自动同步到这里</p>
             <button className="btn-primary" onClick={onNewCommand} style={{ marginTop: 18, width: 'auto', padding: '0 28px' }}>
               发送新指令
             </button>

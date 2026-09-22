@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState } from 'react';
 import { ChevronRight, LogOut, Palette, User } from 'lucide-react';
 import { getCurrentUser, loadConfig } from '../api/supabase';
 import { getStoredTheme, applyTheme, type ThemeMode } from '../lib/theme';

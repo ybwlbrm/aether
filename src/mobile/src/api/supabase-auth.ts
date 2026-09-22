@@ -10,20 +10,11 @@ import { SupabaseApiError, classifyError } from './supabase-errors';
 // ============================================================
 // Supabase Auth 层 — anon key + Supabase Auth（P0-A01/A02/A03/A05 修复）
 //
-// 安全设计（2026-09-06）：
-// - 移动端只持有「anon key」（可公开安全），绝不再接触 service_role key。
-// - 身份由 Supabase Auth（邮箱/密码登录）建立；RLS 按 user_id 行级隔离，
-//   未登录（anon）无法读写任何同步数据。
-// - Supabase URL 与 anon key 持久化到 localStorage（均为公开信息）；
-//   Auth session 由 supabase-js 自动持久化并刷新（refresh token）。
-// - 设备 ID 使用 UUID（crypto.randomUUID()）且同一设备持久化，
-//   不再使用 Date.now()+Math.random 的可预测 ID。
-// - 设备注册绑定当前登录用户（devices.user_id），device 与身份强关联。
-// - 错误分类：认证/权限/网络等错误抛 SupabaseApiError（见 supabase-errors.ts）。
-// ============================================================
-
-// ============================================================
-// 配置与存储
+// §27 / §28 Client Manager：
+// - saveConfig 比较 URL + Anon Key，任一变化 → 销毁旧 client + 重建
+// - getClient 惰性创建，配置变化自动重建
+// - disposeClient 显式销毁（登出时调用），避免旧 client 残留
+// - registerDevice 缓存成功状态（§54），避免每次命令重复注册
 // ============================================================
 
 const URL_STORAGE_KEY = 'aether_supabase_url';
@@ -40,7 +31,11 @@ interface SyncConfig {
 
 let sbClient: SupabaseClient | null = null;
 let currentUrl: string | null = null;
+let currentAnonKey: string | null = null;
 let currentUser: User | null = null;
+// §54: 设备注册成功缓存（配置变化时重置）
+let deviceRegisteredCached = false;
+let cachedDeviceIdForUser: string | null = null;
 
 /** 生成 UUID（crypto.randomUUID），兼容不支持的环境时回退到随机串 */
 function generateUuid(): string {
@@ -57,8 +52,7 @@ function generateUuid(): string {
 
 /**
  * 获取或创建设备 ID。
- * 使用 UUID（非 Date.now+random），并持久化 —— 同一设备始终复用同一 ID，
- * 重新安装/登出登录不改变设备身份。
+ * 使用 UUID（非 Date.now+random），并持久化 —— 同一设备始终复用同一 ID。
  */
 function getDeviceId(): string {
   let id = localStorage.getItem(DEVICE_ID_KEY);
@@ -73,16 +67,38 @@ function getDeviceId(): string {
 
 /**
  * 保存连接配置（URL + anon key）。
- * anon key 为公开密钥，可安全持久化；service_role key 不再需要。
+ * §27 修复：URL 或 anonKey 任一变化 → 销毁旧 client + 重置注册缓存。
+ * 不能出现「UI 已保存新配置，但请求仍使用旧 client」。
  */
 export function saveConfig(url: string, anonKey: string): void {
-  localStorage.setItem(URL_STORAGE_KEY, url.trim());
-  localStorage.setItem(ANON_KEY_STORAGE_KEY, anonKey.trim());
-  // 配置变化后强制重建客户端
-  if (sbClient && currentUrl !== url.trim()) {
-    sbClient = null;
-    currentUrl = null;
+  const nextUrl = url.trim();
+  const nextKey = anonKey.trim();
+  localStorage.setItem(URL_STORAGE_KEY, nextUrl);
+  localStorage.setItem(ANON_KEY_STORAGE_KEY, nextKey);
+
+  const urlChanged = sbClient && currentUrl !== nextUrl;
+  const keyChanged = sbClient && currentAnonKey !== nextKey;
+  if (urlChanged || keyChanged) {
+    disposeClient();
   }
+}
+
+/**
+ * 显式销毁当前 client（§28 dispose）。
+ * 登出 / 配置变更时调用：释放 Realtime channel、auth listener 引用。
+ */
+export function disposeClient(): void {
+  if (sbClient) {
+    try {
+      void sbClient.realtime.removeAllChannels();
+    } catch { /* ignore */ }
+  }
+  sbClient = null;
+  currentUrl = null;
+  currentAnonKey = null;
+  currentUser = null;
+  deviceRegisteredCached = false;
+  cachedDeviceIdForUser = null;
 }
 
 /** 加载配置 */
@@ -124,14 +140,15 @@ export function getCurrentUser(): User | null {
 }
 
 // ============================================================
-// 客户端管理
+// Client Manager（§28）
 // ============================================================
 
-/** 获取 Supabase 客户端（anon key，含 Auth 能力） */
+/** 获取 Supabase 客户端（anon key，含 Auth 能力）。配置变化自动重建。 */
 export function getClient(): SupabaseClient | null {
   const cfg = loadConfig();
   if (!cfg) return null;
-  if (!sbClient || currentUrl !== cfg.supabaseUrl) {
+  if (!sbClient || currentUrl !== cfg.supabaseUrl || currentAnonKey !== cfg.anonKey) {
+    disposeClient();
     sbClient = createClient(cfg.supabaseUrl, cfg.anonKey, {
       auth: {
         persistSession: true,
@@ -143,6 +160,7 @@ export function getClient(): SupabaseClient | null {
       realtime: { heartbeatIntervalMs: 15000 },
     });
     currentUrl = cfg.supabaseUrl;
+    currentAnonKey = cfg.anonKey;
     // 从持久化 session 同步内存用户缓存
     void sbClient.auth.getSession().then(({ data }) => {
       currentUser = data.session?.user ?? null;
@@ -152,16 +170,18 @@ export function getClient(): SupabaseClient | null {
 }
 
 // ============================================================
-// Supabase Auth（P0-A03：登录 / 注册 / 登出 / 会话）
+// Supabase Auth
 // ============================================================
 
-/** 邮箱密码登录。成功返回 Session，失败抛出分类后的 SupabaseApiError */
+/** 邮箱密码登录。成功返回 Session，失败抛分类后的 SupabaseApiError */
 export async function signIn(email: string, password: string): Promise<Session> {
   const sb = getClient();
   if (!sb) throw new SupabaseApiError('auth', '未配置 Supabase，请先填写 URL 和 Anon Key');
   const { data, error } = await sb.auth.signInWithPassword({ email: email.trim(), password });
   if (error) throw new SupabaseApiError('auth', error.message, { status: error.status, code: error.code });
   currentUser = data.user;
+  deviceRegisteredCached = false;
+  cachedDeviceIdForUser = null;
   return data.session;
 }
 
@@ -175,6 +195,8 @@ export async function signUp(
   const { data, error } = await sb.auth.signUp({ email: email.trim(), password });
   if (error) throw new SupabaseApiError('auth', error.message, { status: error.status, code: error.code });
   currentUser = data.user ?? null;
+  deviceRegisteredCached = false;
+  cachedDeviceIdForUser = null;
   return {
     session: data.session,
     user: data.user ?? null,
@@ -189,6 +211,8 @@ export async function signOut(): Promise<void> {
   const { error } = await sb.auth.signOut();
   if (error) throw new SupabaseApiError('auth', error.message, { status: error.status, code: error.code });
   currentUser = null;
+  deviceRegisteredCached = false;
+  cachedDeviceIdForUser = null;
 }
 
 /** 获取当前会话（从持久化存储恢复 session 后调用） */
@@ -229,14 +253,15 @@ export function onAuthStateChange(callback: (event: AuthChangeEvent, session: Se
 }
 
 // ============================================================
-// 设备注册（P0-A05：UUID 设备 ID + 绑定 userId）
+// 设备注册（§54：登录/初始化时注册一次，缓存成功状态）
 // ============================================================
 
 /**
  * 注册设备到 Supabase，device 记录绑定当前登录用户（user_id）。
- * 返回是否成功；失败时记录分类错误（不静默吞掉）。
+ * §54 修复：同用户同设备缓存成功状态，避免每次命令重复注册。
+ * 配置变化（saveConfig 触发 disposeClient）或登录用户变化时自动重置。
  */
-export async function registerDevice(): Promise<boolean> {
+export async function registerDevice(force = false): Promise<boolean> {
   const sb = getClient();
   const cfg = loadConfig();
   if (!sb || !cfg) {
@@ -248,6 +273,10 @@ export async function registerDevice(): Promise<boolean> {
     console.warn('[supabase] 设备注册失败：未登录（需先通过 Supabase Auth 登录）');
     return false;
   }
+  // 缓存命中：同一用户同一设备已注册成功 → 直接返回
+  if (!force && deviceRegisteredCached && cachedDeviceIdForUser === user.id) {
+    return true;
+  }
   try {
     const { error } = await sb.from('devices').upsert({
       id: cfg.deviceId,
@@ -257,19 +286,20 @@ export async function registerDevice(): Promise<boolean> {
       last_seen_at: new Date().toISOString(),
     }, { onConflict: 'id' });
     if (error) throw error;
+    deviceRegisteredCached = true;
+    cachedDeviceIdForUser = user.id;
     return true;
   } catch (e) {
     const err = classifyError(e);
     console.error(`[supabase] 设备注册失败 (${err.kind}):`, err.message);
+    deviceRegisteredCached = false;
     return false;
   }
 }
 
 /** 断开连接（保留设备 ID，同一设备再次登录身份不变） */
 export function disconnect(): void {
-  sbClient = null;
-  currentUrl = null;
-  currentUser = null;
+  disposeClient();
   localStorage.removeItem(URL_STORAGE_KEY);
   localStorage.removeItem(ANON_KEY_STORAGE_KEY);
 }

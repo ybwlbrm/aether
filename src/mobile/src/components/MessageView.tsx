@@ -5,8 +5,10 @@ import {
   subscribeMessages,
   getSyncState,
   onSyncStateChange,
-  type SyncStatus,
+  type SendResult,
+  type LocalMessageState,
 } from '../api/supabase';
+import { mergeMessages, hasAssistantAfter, type ChatMessage } from '../lib/message-store';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import {
@@ -16,11 +18,14 @@ import {
   MoreHorizontal,
   Plus,
   ArrowUp,
+  Square,
+  RefreshCw,
+  Upload,
 } from 'lucide-react';
 import AetherMark from './AetherMark';
 
 // ============================================================
-// CodeBlock — 弱化边框/行号/背景，代码即内容（§26）
+// CodeBlock — 弱化边框/行号/背景，代码即内容
 // ============================================================
 function CodeBlock({ language, code }: { language: string; code: string }) {
   const [copied, setCopied] = useState(false);
@@ -52,7 +57,7 @@ function CodeBlock({ language, code }: { language: string; code: string }) {
   );
 }
 
-// Markdown 渲染（react-markdown + remark-gfm，样式 class 化）
+// Markdown 渲染（react-markdown + remark-gfm，统一 renderer）
 function MarkdownContent({ content }: { content: string }) {
   if (!content) return null;
   return (
@@ -87,7 +92,7 @@ function MarkdownContent({ content }: { content: string }) {
   );
 }
 
-// Reasoning — 极轻执行状态（§24：不转圈、无紫、完成静态）
+// Reasoning — 极轻执行状态（processing 计时 / completed 静态）
 function ReasoningBlock({ reasoning, active }: { reasoning: string; active: boolean }) {
   const [open, setOpen] = useState(false);
   const [elapsed, setElapsed] = useState(0);
@@ -98,7 +103,6 @@ function ReasoningBlock({ reasoning, active }: { reasoning: string; active: bool
     setElapsed(0);
   }, []);
 
-  // 仅 active 时计时，完成即静态
   useEffect(() => {
     if (!active) return;
     setElapsed(Math.max(1, Math.round((Date.now() - startRef.current) / 1000)));
@@ -131,19 +135,29 @@ function ReasoningBlock({ reasoning, active }: { reasoning: string; active: bool
   );
 }
 
-function safeParse(json?: string): any | null {
-  if (!json) return null;
-  try { return JSON.parse(json); } catch { return null; }
+interface ParsedToolResult {
+  tool_name?: string;
+  status?: string;
+  reasoning?: string;
+  total_tokens?: number;
+  [key: string]: unknown;
 }
 
-interface Message {
-  id: string;
-  role: 'user' | 'assistant' | 'system' | 'tool';
-  content: string;
-  created_at: string;
-  tool_calls?: string;
-  tool_results?: string;
+function safeParse(json?: string | null): ParsedToolResult | null {
+  if (!json) return null;
+  try {
+    const parsed = JSON.parse(json) as unknown;
+    return typeof parsed === 'object' && parsed !== null ? (parsed as ParsedToolResult) : null;
+  } catch { return null; }
 }
+
+// 本地发送状态附加在乐观消息上（不落库，仅 UI 展示）
+interface LocalMeta {
+  localState?: LocalMessageState;
+  localError?: string;
+}
+
+type ViewMessage = ChatMessage & LocalMeta;
 
 interface Props {
   conversationId: string;
@@ -151,11 +165,27 @@ interface Props {
   onBack: () => void;
 }
 
+// 状态机（§15）
+type ExecutionPhase =
+  | 'idle'
+  | 'sending'
+  | 'queued'
+  | 'waiting'
+  | 'processing'
+  | 'streaming'
+  | 'completed'
+  | 'failed'
+  | 'timeout'
+  | 'cancelling'
+  | 'cancelled';
+
 export default function MessageView({ conversationId, conversationTitle, onBack }: Props) {
-  const [messages, setMessages] = useState<Message[]>([]);
+  const [messages, setMessages] = useState<ViewMessage[]>([]);
   const [input, setInput] = useState('');
-  const [sending, setSending] = useState(false);
+  const [phase, setPhase] = useState<ExecutionPhase>('idle');
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [hasMoreOlder, setHasMoreOlder] = useState(false);
   const [mode, setMode] = useState<'normal' | 'super'>('normal');
   const [permissionLevel, setPermissionLevel] = useState(2);
   const [deepThinking, setDeepThinking] = useState(false);
@@ -167,51 +197,66 @@ export default function MessageView({ conversationId, conversationTitle, onBack 
   const [templateOpen, setTemplateOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [liveReasoning, setLiveReasoning] = useState<string>('');
-  // P0-A08：Realtime 连接状态（realtime 正常时不轮询，断开时降级轮询）
-  const [syncStatus, setSyncStatus] = useState<SyncStatus>(() => getSyncState().status);
+  // 附件（§ 从 NewCommand 迁移：图片/文本/文件）
+  const [imageAttachments, setImageAttachments] = useState<string[]>([]);
+  const [fileAttachments, setFileAttachments] = useState<{ name: string; dataUrl: string }[]>([]);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // P0-A08：Realtime 连接状态（connected 不轮询，断开降级轮询）
+  const [syncStatus, setSyncStatus] = useState(() => getSyncState().status);
   const reasoningBarRef = useRef<HTMLDivElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const assistantReceivedRef = useRef(false);
-  // §8.4：仅在接近底部时跟随新内容；用户上翻阅读时停止跟随
+  // 当前请求绑定（§14/§16：timeout 与完成判断绑定当前 command，旧定时器不影响新命令）
+  const activeCommandIdRef = useRef<string | null>(null);
+  const latestUserMsgAtRef = useRef<string | null>(null);
   const nearBottomRef = useRef(true);
   const [showJump, setShowJump] = useState(false);
-  // Reasoning 起始时间表（per msg id）
-  const reasoningStartRef = useRef<Record<string, number>>({});
+  const [newWhileAway, setNewWhileAway] = useState(false);
+  // 发送中用户消息 id（§8：离线入队不删除，用于重发定位）
+  const sendingUserMsgRef = useRef<string | null>(null);
+  // 最新消息列表引用（subscribeMessages 回调中用于 §14 完成判断，避免闭包旧值）
+  const messagesRef = useRef<ViewMessage[]>([]);
+  useEffect(() => { messagesRef.current = messages; }, [messages]);
 
+  const phaseIsActive = ['sending', 'queued', 'waiting', 'processing', 'streaming', 'cancelling'].includes(phase);
+
+  // ========== 历史加载（§25 分页：最近 N 条 + 向上加载更早） ==========
   const loadMessages = useCallback(async () => {
     try {
-      const data = await getMessages(conversationId);
-      setMessages(data);
+      const res = await getMessages(conversationId, { limit: 100 });
+      if (res.error) {
+        setLoadError(res.error.message);
+        setLoading(false);
+        return;
+      }
+      const data = (res.data ?? []) as ViewMessage[];
+      setMessages((prev) => mergeMessages(prev, data));
+      setHasMoreOlder(data.length >= 100);
+      setLoadError(null);
     } catch (e) {
-      console.error('加载消息失败:', e);
+      setLoadError(e instanceof Error ? e.message : String(e));
     } finally {
       setLoading(false);
     }
   }, [conversationId]);
 
+  // 向上滚动加载更早消息（§25）
+  const loadOlder = useCallback(async () => {
+    if (messages.length === 0) return;
+    const oldestAt = messages[0]?.created_at;
+    const res = await getMessages(conversationId, { limit: 50, olderThan: oldestAt });
+    if (res.error) return;
+    const older = (res.data ?? []) as ViewMessage[];
+    setMessages((prev) => mergeMessages(older, prev));
+    setHasMoreOlder(older.length >= 50);
+  }, [conversationId, messages]);
+
   useEffect(() => {
     loadMessages();
-    // 实时订阅新消息（支持流式逐字更新 — 后端 streaming 不断 upsert 同一消息）
-    const unsub = subscribeMessages(conversationId, (newMsg: Message) => {
-      setMessages((prev) => {
-        const existingIdx = prev.findIndex((m) => m.id === newMsg.id);
-        if (existingIdx !== -1) {
-          const next = [...prev];
-          next[existingIdx] = newMsg;
-          return next;
-        }
-        if (newMsg.role === 'user') {
-          const tempIdx = prev.findIndex((m) => m.id.startsWith('temp-'));
-          if (tempIdx !== -1) {
-            const next = [...prev];
-            next[tempIdx] = newMsg;
-            return next;
-          }
-          return [...prev, newMsg];
-        }
-        return [...prev, newMsg];
-      });
+    // §11 Realtime + Fetch 竞态：先建立 Realtime 再获取历史，merge 由 mergeMessages 统一处理
+    const unsub = subscribeMessages(conversationId, (newMsg: ChatMessage) => {
+      setMessages((prev) => mergeMessages(prev, [newMsg as ViewMessage]));
       // 从 tool_results 提取 reasoning 更新思考横条
       if (newMsg.tool_results) {
         try {
@@ -224,17 +269,20 @@ export default function MessageView({ conversationId, conversationTitle, onBack 
           }
         } catch { /* ignore */ }
       }
-      if (newMsg.role === 'assistant') {
-        setSending(false);
-        assistantReceivedRef.current = true;
-        if (timeoutRef.current) { clearTimeout(timeoutRef.current); timeoutRef.current = null; }
-        setLiveReasoning('');
+      // §14：仅当新 assistant 晚于本次用户消息才判定完成
+      if (newMsg.role === 'assistant' && latestUserMsgAtRef.current) {
+        if (hasAssistantAfter(messagesRef.current.concat([newMsg as ViewMessage]), latestUserMsgAtRef.current)) {
+          setPhase((p) => (p === 'cancelling' ? 'cancelled' : 'completed'));
+          if (timeoutRef.current) { clearTimeout(timeoutRef.current); timeoutRef.current = null; }
+          setLiveReasoning('');
+          activeCommandIdRef.current = null;
+        }
       }
     });
     return unsub;
   }, [conversationId, loadMessages]);
 
-  // 轮询兜底（P0-A08）：Realtime 连接正常时不轮询；断开时降级每 2 秒轮询
+  // 轮询兜底（P0-A08）
   useEffect(() => {
     return onSyncStateChange((s) => setSyncStatus(s.status));
   }, []);
@@ -246,29 +294,17 @@ export default function MessageView({ conversationId, conversationTitle, onBack 
     const interval = setInterval(async () => {
       if (cancelled) return;
       try {
-        const data = await getMessages(conversationId);
-        if (cancelled) return;
-        setMessages((prev) => {
-          const merged = [...prev];
-          let changed = false;
-          for (const newMsg of data) {
-            const idx = merged.findIndex((m) => m.id === newMsg.id);
-            if (idx !== -1) {
-              if (merged[idx].content !== newMsg.content) {
-                merged[idx] = newMsg;
-                changed = true;
-              }
-            } else {
-              merged.push(newMsg);
-              changed = true;
-            }
+        const res = await getMessages(conversationId, { limit: 100 });
+        if (cancelled || res.error) return;
+        const data = (res.data ?? []) as ViewMessage[];
+        setMessages((prev) => mergeMessages(prev, data));
+        // §14：完成判断绑定当前请求
+        if (latestUserMsgAtRef.current) {
+          if (hasAssistantAfter(messagesRef.current.concat(data), latestUserMsgAtRef.current)) {
+            setPhase((p) => (p === 'cancelling' ? 'cancelled' : 'completed'));
+            if (timeoutRef.current) { clearTimeout(timeoutRef.current); timeoutRef.current = null; }
+            setLiveReasoning('');
           }
-          return changed ? merged : prev;
-        });
-        const hasAssistant = data.some((m: Message) => m.role === 'assistant');
-        if (hasAssistant) {
-          setSending(false);
-          if (timeoutRef.current) { clearTimeout(timeoutRef.current); timeoutRef.current = null; }
         }
       } catch { /* 忽略网络错误 */ }
     }, 2000);
@@ -279,8 +315,12 @@ export default function MessageView({ conversationId, conversationTitle, onBack 
   const onScroll = () => {
     const el = listRef.current;
     if (!el) return;
+    const wasNear = nearBottomRef.current;
     nearBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 96;
     setShowJump(!nearBottomRef.current);
+    if (!wasNear && nearBottomRef.current) {
+      setNewWhileAway(false); // 用户回到底部，清除"新消息"提示
+    }
   };
 
   useEffect(() => {
@@ -294,8 +334,10 @@ export default function MessageView({ conversationId, conversationTitle, onBack 
     const el = listRef.current;
     if (el && nearBottomRef.current) {
       el.scrollTop = el.scrollHeight;
+    } else if (phaseIsActive) {
+      setNewWhileAway(true);
     }
-  }, [messages]);
+  }, [messages, phaseIsActive]);
 
   // P1 修复：组件卸载时清理 pending 超时定时器
   useEffect(() => {
@@ -305,7 +347,7 @@ export default function MessageView({ conversationId, conversationTitle, onBack 
     };
   }, []);
 
-  // 加载提示词模板（从 localStorage）
+  // 加载提示词模板
   useEffect(() => {
     try {
       const saved = localStorage.getItem('aether_mobile_templates');
@@ -313,7 +355,7 @@ export default function MessageView({ conversationId, conversationTitle, onBack 
     } catch { /* ignore */ }
   }, []);
 
-  // 计算 token 总量（§10 #6）
+  // 计算 token 总量
   useEffect(() => {
     let total = 0;
     for (const m of messages) {
@@ -327,44 +369,140 @@ export default function MessageView({ conversationId, conversationTitle, onBack 
     if (total !== convTokenTotal) setConvTokenTotal(total);
   }, [messages]);
 
+  // 附件处理（从 NewCommand 迁移）
+  const handleFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(e.target.files || []);
+    for (const file of files) {
+      if (file.type.startsWith('image/')) {
+        const reader = new FileReader();
+        reader.onload = () => setImageAttachments((prev) => [...prev, reader.result as string]);
+        reader.readAsDataURL(file);
+      } else if (file.type.startsWith('text/') || file.name.match(/\.(py|js|ts|tsx|jsx|html|css|json|md|txt|xml|yaml|yml|sh|bat|ps1|env|gitignore|sql|rb|go|rs|c|cpp|h|hpp|java|kt|swift|php|pl|pm|r|m|mm|vue|svelte|astro)$/i)) {
+        const reader = new FileReader();
+        reader.onload = () => {
+          const text = reader.result as string;
+          const fileBlock = `\n\n---\n**文件: ${file.name}**\n\`\`\`${file.name.split('.').pop() || ''}\n${text}\n\`\`\`\n`;
+          setInput((prev) => (prev ? prev + fileBlock : fileBlock));
+        };
+        reader.readAsText(file);
+      } else {
+        const reader = new FileReader();
+        reader.onload = () => {
+          setFileAttachments((prev) => [...prev, { name: file.name, dataUrl: reader.result as string }]);
+        };
+        reader.readAsDataURL(file);
+      }
+    }
+    e.target.value = '';
+  };
+
+  // ========== 发送（§7/§8/§9/§15/§18） ==========
   const handleSend = async () => {
     const text = input.trim();
-    if (!text || sending) return;
+    if (!text || phaseIsActive) return;
     setInput('');
-    setSending(true);
-    assistantReceivedRef.current = false;
+    setPhase('sending');
+    activeCommandIdRef.current = null;
+    latestUserMsgAtRef.current = null;
 
-    const tempId = `temp-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
-    const optimisticMsg: Message = {
-      id: tempId, role: 'user', content: text, created_at: new Date().toISOString(),
-    };
-    setMessages((prev) => [...prev, optimisticMsg]);
-
-    // §10 #3 元数据前缀原样
-    const contentWithMeta = `[mode=${mode}][level=${permissionLevel}][deep=${deepThinking}][web=${webSearch}][loop=${loopMode}] ${text}`.trim();
-    const ok = await sendCommand(contentWithMeta, conversationId);
-    if (!ok) {
-      setMessages((prev) => prev.filter((m) => m.id !== tempId));
-      setSending(false);
-      return;
+    // 构建消息内容：文字 + 图片 + 文件（§ 附件管道）
+    let content = text;
+    if (imageAttachments.length > 0) {
+      content += '\n\n' + imageAttachments.map((url) => `![image](${url})`).join('\n');
+      setImageAttachments([]);
+    }
+    if (fileAttachments.length > 0) {
+      content += '\n\n' + fileAttachments.map((f) => `[上传文件: ${f.name}](${f.dataUrl})`).join('\n');
+      setFileAttachments([]);
     }
 
+    // 乐观添加用户消息（§8：无论结果如何都不删除，只更新状态）
+    const tempId = `temp-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+    const optimisticMsg: ViewMessage = {
+      id: tempId, role: 'user', content: text, created_at: new Date().toISOString(),
+      localState: 'sending',
+    };
+    setMessages((prev) => [...prev, optimisticMsg]);
+    sendingUserMsgRef.current = tempId;
+    latestUserMsgAtRef.current = optimisticMsg.created_at;
+
+    const contentWithMeta = `[mode=${mode}][level=${permissionLevel}][deep=${deepThinking}][web=${webSearch}][loop=${loopMode}] ${content}`.trim();
+    const result: SendResult = await sendCommand(contentWithMeta, conversationId);
+
+    if (result.status === 'sent') {
+      activeCommandIdRef.current = result.commandId;
+      setPhase('waiting');
+      // 乐观消息状态 → sent（等待真实回包替换）
+      setMessages((prev) => prev.map((m) => (m.id === tempId ? { ...m, localState: 'sent' as const } : m)));
+    } else if (result.status === 'queued') {
+      // §8/§9：离线入队不是失败，保留消息并显示"等待连接"
+      setPhase('queued');
+      setMessages((prev) => prev.map((m) => (m.id === tempId ? { ...m, localState: 'queued' as const } : m)));
+    } else {
+      // 真正失败：保留消息并标记 failed，提供重发入口（§9）
+      setPhase('failed');
+      setMessages((prev) => prev.map((m) => (m.id === tempId ? { ...m, localState: 'failed' as const, localError: result.message } : m)));
+    }
+
+    // §16：timeout 绑定当前 command（插入 system 角色，不伪装 AI 回复）
     if (timeoutRef.current) clearTimeout(timeoutRef.current);
     timeoutRef.current = setTimeout(() => {
-      if (assistantReceivedRef.current) return;
-      setSending((s) => {
-        if (s) {
-          setMessages((prev) => [...prev, {
-            id: `timeout-${Date.now()}`,
-            role: 'assistant',
-            content: '等待超时，桌面端可能未运行或 AI 配置有误',
-            created_at: new Date().toISOString(),
-          }]);
-          return false;
-        }
-        return false;
+      const cmdId = activeCommandIdRef.current;
+      if (!cmdId) return; // 已结算（completed/cancelled）或未成功发送 → 不插入超时
+      setPhase((p) => {
+        if (p === 'cancelling') return p;
+        if (['completed', 'cancelled', 'failed'].includes(p)) return p;
+        setMessages((prev) => [...prev, {
+          id: `timeout-${Date.now()}`,
+          role: 'system',
+          content: '等待桌面端响应超时，请检查 Aether 桌面端是否运行',
+          created_at: new Date().toISOString(),
+        }]);
+        return 'timeout';
       });
-    }, 300000); // 5分钟超时
+    }, 300000); // 5分钟
+  };
+
+  // 重发失败消息（§9）
+  const handleResend = async (msg: ViewMessage) => {
+    const text = msg.content;
+    setMessages((prev) => prev.map((m) => (m.id === msg.id ? { ...m, localState: 'sending' as const, localError: undefined } : m)));
+    setPhase('sending');
+    latestUserMsgAtRef.current = msg.created_at;
+    const contentWithMeta = `[mode=${mode}][level=${permissionLevel}][deep=${deepThinking}][web=${webSearch}][loop=${loopMode}] ${text}`.trim();
+    const result = await sendCommand(contentWithMeta, conversationId);
+    if (result.status === 'sent') {
+      activeCommandIdRef.current = result.commandId;
+      setPhase('waiting');
+      setMessages((prev) => prev.map((m) => (m.id === msg.id ? { ...m, localState: 'sent' as const } : m)));
+    } else if (result.status === 'queued') {
+      setPhase('queued');
+      setMessages((prev) => prev.map((m) => (m.id === msg.id ? { ...m, localState: 'queued' as const } : m)));
+    } else {
+      setPhase('failed');
+      setMessages((prev) => prev.map((m) => (m.id === msg.id ? { ...m, localState: 'failed' as const, localError: result.message } : m)));
+    }
+  };
+
+  // §18：停止执行（UI 状态协议：processing → cancelling → cancelled）
+  const handleStop = () => {
+    setPhase((p) => {
+      if (!['sending', 'queued', 'waiting', 'processing', 'streaming'].includes(p)) return p;
+      return 'cancelling';
+    });
+    // 停止即视为当前请求已结算（不伪造桌面端已取消，但 UI 明确告知）
+    if (timeoutRef.current) { clearTimeout(timeoutRef.current); timeoutRef.current = null; }
+    activeCommandIdRef.current = null;
+    setLiveReasoning('');
+    setTimeout(() => {
+      setPhase((p) => (p === 'cancelling' ? 'cancelled' : p));
+      setMessages((prev) => [...prev, {
+        id: `cancel-${Date.now()}`,
+        role: 'system',
+        content: '已停止当前任务（桌面端执行状态请以桌面端为准）',
+        created_at: new Date().toISOString(),
+      }]);
+    }, 300);
   };
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
@@ -388,14 +526,14 @@ export default function MessageView({ conversationId, conversationTitle, onBack 
     });
   };
 
-  const renderMessage = (msg: Message, index: number) => {
+  const renderMessage = (msg: ViewMessage, index: number) => {
     const isUser = msg.role === 'user';
     const isTool = msg.role === 'tool';
     const isSystem = msg.role === 'system';
     const isExpanded = expandedTools.has(msg.id);
     const isLastMessage = index === messages.length - 1;
 
-    // Tool — 轻量 pill（§25）
+    // Tool — 轻量 pill（§19 统一 Tool 状态）
     if (isTool) {
       const tr = safeParse(msg.tool_results);
       const toolName = tr?.tool_name ?? (msg.content.slice(0, 12) + '…');
@@ -414,7 +552,7 @@ export default function MessageView({ conversationId, conversationTitle, onBack 
       );
     }
 
-    // System — 极轻居中（§历史 保持）
+    // System — 极轻居中
     if (isSystem) {
       return (
         <div className="msg msg-system" key={msg.id}>
@@ -432,15 +570,33 @@ export default function MessageView({ conversationId, conversationTitle, onBack 
       } catch { /* ignore */ }
     }
 
-    // assistant 消息最后一条且仍在等待 → reasoning 处于活跃状态
-    const activeReasoning = isUser ? false : (sending && isLastMessage);
+    const activeReasoning = isUser ? false : (phaseIsActive && isLastMessage);
+
+    // 用户消息本地状态角标（§9）
+    let localBadge: React.ReactNode = null;
+    if (isUser && msg.localState) {
+      if (msg.localState === 'queued') {
+        localBadge = <span className="msg-local-badge queued">等待连接</span>;
+      } else if (msg.localState === 'failed') {
+        localBadge = (
+          <span className="msg-local-badge failed">
+            发送失败
+            <button className="msg-resend-btn" onClick={() => handleResend(msg)} aria-label="重新发送">
+              <RefreshCw size={12} />
+            </button>
+          </span>
+        );
+      } else if (msg.localState === 'sending') {
+        localBadge = <span className="msg-local-badge">发送中</span>;
+      }
+    }
 
     return (
       <div className={`msg ${isUser ? 'msg-user' : 'msg-assistant'}`} key={msg.id}>
         {isUser ? (
           <>
             <div className="msg-content">{content}</div>
-            <span className="msg-time">{formatTime(msg.created_at)}</span>
+            <div className="msg-local-row">{localBadge}<span className="msg-time">{formatTime(msg.created_at)}</span></div>
           </>
         ) : (
           <>
@@ -480,9 +636,17 @@ export default function MessageView({ conversationId, conversationTitle, onBack 
     );
   }
 
+  const subtitle = phase === 'sending' ? 'Aether 工作站 · 正在发送'
+    : phase === 'queued' ? 'Aether 工作站 · 等待连接'
+    : phase === 'processing' || phase === 'streaming' || phase === 'waiting' || phase === 'cancelling' ? 'Aether 工作站 · 正在工作'
+    : phase === 'failed' ? 'Aether 工作站 · 发送失败'
+    : online ? 'Aether 工作站 · 已同步' : 'Aether 工作站 · 连接中断';
+
+  const canSend = !phaseIsActive && (!!input.trim() || imageAttachments.length > 0 || fileAttachments.length > 0);
+
   return (
     <div className="chat-page">
-      {/* 顶栏（§19：会话名 + Aether 工作站状态） */}
+      {/* 顶栏（§34：会话名 + Aether 工作站状态） */}
       <div className="chat-header">
         <button className="chat-back" onClick={onBack} aria-label="返回">
           <ChevronLeft size={22} />
@@ -491,7 +655,7 @@ export default function MessageView({ conversationId, conversationTitle, onBack 
           <h2 className="chat-title">{conversationTitle}</h2>
           <p className="chat-subtitle">
             <span className={`sync-dot ${online ? 'online' : ''}`} />
-            {sending ? 'Aether 工作站 · 正在工作' : online ? 'Aether 工作站 · 已同步' : 'Aether 工作站 · 连接中断'}
+            {subtitle}
           </p>
         </div>
         <button className="chat-actions" onClick={() => setSettingsOpen(true)} aria-label="执行设置">
@@ -499,9 +663,20 @@ export default function MessageView({ conversationId, conversationTitle, onBack 
         </button>
       </div>
 
-      {/* 消息列表（§23 内容自然展开） */}
+      {/* 消息列表 */}
       <div className="message-list" ref={listRef}>
-        {messages.length === 0 ? (
+        {hasMoreOlder && (
+          <button className="load-older-btn" onClick={loadOlder}>
+            加载更早消息
+          </button>
+        )}
+        {loadError && messages.length === 0 ? (
+          <div className="empty-state" style={{ padding: '40px 24px' }}>
+            <h3 className="empty-state-title">加载失败</h3>
+            <p className="empty-state-desc">{loadError}</p>
+            <button className="btn-ghost" onClick={loadMessages} style={{ marginTop: 16 }}>点击重试</button>
+          </div>
+        ) : messages.length === 0 ? (
           <div className="empty-state" style={{ padding: '40px 24px' }}>
             <h3 className="empty-state-title">暂无消息</h3>
             <p className="empty-state-desc">向桌面端 Aether 发送一条指令</p>
@@ -509,21 +684,21 @@ export default function MessageView({ conversationId, conversationTitle, onBack 
         ) : (
           messages.map((m, i) => renderMessage(m, i))
         )}
-        {sending && (
+        {phaseIsActive && (
           <div className="msg msg-assistant">
             <div className="msg-asst-meta">
               <AetherMark size={14} className="msg-asst-mark" />
               <span className="msg-asst-name">Aether</span>
             </div>
             <div className="msg-content">
-              <span>正在处理…</span>
+              <span>{phase === 'queued' ? '等待连接…' : phase === 'cancelling' ? '正在停止…' : '正在处理…'}</span>
               <span className="stream-indicator" />
             </div>
           </div>
         )}
       </div>
 
-      {/* 回到底部（§29 iOS 轻量浮动） */}
+      {/* 回到底部（§58：仅不在底部时出现，显示"新消息"） */}
       {showJump && (
         <button
           className="jump-bottom"
@@ -533,11 +708,11 @@ export default function MessageView({ conversationId, conversationTitle, onBack 
           }}
         >
           <ChevronDown size={16} />
-          到底部
+          {newWhileAway ? '新消息' : '到底部'}
         </button>
       )}
 
-      {/* 思考横条（§24 中性，输入框上方） */}
+      {/* 思考横条 */}
       {liveReasoning ? (
         <div className="reasoning-bar">
           <span className="reasoning-bar-dot" />
@@ -545,29 +720,58 @@ export default function MessageView({ conversationId, conversationTitle, onBack 
         </div>
       ) : null}
 
-      {/* Command Bar（§28 Signature Floating Liquid Glass） */}
+      {/* Command Bar（§35：无内容=disabled / 有内容=active / 处理中=stop） */}
       <div className="command-bar-wrap">
         <div className="command-bar">
-          <button className="command-bar-btn" onClick={() => setTemplateOpen(!templateOpen)} title="提示词模板">
-            <Plus size={20} />
-          </button>
-          <textarea
-            className="command-input"
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            onKeyDown={handleKeyDown}
-            placeholder="输入指令…"
-            rows={1}
-            disabled={sending}
-          />
-          <button
-            className="send-btn"
-            onClick={handleSend}
-            disabled={!input.trim() || sending}
-            aria-label="发送"
-          >
-            <ArrowUp size={18} />
-          </button>
+          {/* 附件预览 */}
+          {(imageAttachments.length > 0 || fileAttachments.length > 0) && (
+            <div className="attachment-preview-row">
+              {imageAttachments.map((url, i) => (
+                <div key={i} className="attachment-chip" style={{ position: 'relative' }}>
+                  <img src={url} alt="" className="attachment-chip-img" />
+                  <button className="attachment-chip-remove" onClick={() => setImageAttachments((prev) => prev.filter((_, idx) => idx !== i))}>×</button>
+                </div>
+              ))}
+              {fileAttachments.map((f, i) => (
+                <div key={i} className="attachment-chip file">
+                  <span className="attachment-chip-name">{f.name}</span>
+                  <button className="attachment-chip-remove" onClick={() => setFileAttachments((prev) => prev.filter((_, idx) => idx !== i))}>×</button>
+                </div>
+              ))}
+            </div>
+          )}
+          <div className="command-bar-inner">
+            <button className="command-bar-btn" onClick={() => setTemplateOpen(!templateOpen)} title="提示词模板">
+              <Plus size={20} />
+            </button>
+            <button className="command-bar-btn" onClick={() => fileInputRef.current?.click()} title="上传文件">
+              <Upload size={18} />
+            </button>
+            <input ref={fileInputRef} type="file" multiple style={{ display: 'none' }} onChange={handleFileSelect} />
+            <textarea
+              className="command-input"
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              onKeyDown={handleKeyDown}
+              placeholder="输入指令…"
+              rows={1}
+              disabled={phaseIsActive}
+            />
+            {phaseIsActive ? (
+              <button className="send-btn stop" onClick={handleStop} aria-label="停止" title="停止">
+                <Square size={16} />
+              </button>
+            ) : (
+              <button
+                className="send-btn"
+                onClick={handleSend}
+                disabled={!canSend}
+                aria-label="发送"
+              >
+                <ArrowUp size={18} />
+              </button>
+            )}
+          </div>
         </div>
       </div>
 
@@ -602,12 +806,15 @@ export default function MessageView({ conversationId, conversationTitle, onBack 
         </div>
       )}
 
-      {/* 执行设置 Bottom Sheet（§8.3 功能全保留） */}
+      {/* 执行设置 Bottom Sheet（§64：状态明确影响下一次发送） */}
       {settingsOpen && (
         <div className="sheet-backdrop" onClick={() => setSettingsOpen(false)}>
           <div className="sheet settings-sheet" onClick={(e) => e.stopPropagation()}>
             <div className="sheet-handle" />
             <h3 className="sheet-title">执行设置</h3>
+            <p className="sheet-hint" style={{ fontSize: 12, color: 'var(--text-tertiary)', marginBottom: 12 }}>
+              这些设置将应用于下一次发送
+            </p>
 
             <div className="sheet-group">
               <p className="sheet-group-label">执行模式</p>

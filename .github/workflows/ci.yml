@@ -1,5 +1,5 @@
 # Aether CI — 每次 Push / PR 自动执行 typecheck / lint / unit test / build / security scan
-# 目标（P2-08）：禁止"代码写完 → 直接 Release"；Source → CI → Fail 门禁
+# 目标：Source → CI → Fail 门禁；Mobile 阶段强制检查（§71/§72/§73）
 name: CI
 
 on:
@@ -24,13 +24,9 @@ jobs:
           cache: npm
 
       - name: Install deps
-        # 整改计划第 11 章（P0/P1）：干净 runner 用 --ignore-scripts（禁用依赖安装脚本，
-        # 防止供应链攻击在 CI 执行任意代码）；lockfile 校验由 npm ci 隐式完成
-        # （lockfile 与 package.json 不同步会直接失败）
         run: npm ci --ignore-scripts --no-audit --no-fund
 
       - name: Verify lockfile consistency
-        # 整改计划第 11 章：lockfile 与 package.json 显式校验（workspaces 必须含全部 4 个子包）
         run: |
           node -e "
             const lock = require('./package-lock.json');
@@ -58,6 +54,32 @@ jobs:
 
       - name: Production build
         run: npm run build
+
+  mobile-gate:
+    name: Mobile Gate (typecheck / test / build)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install deps
+        run: npm ci --ignore-scripts --no-audit --no-fund
+
+      - name: Mobile typecheck
+        run: npm run typecheck -w src/mobile
+
+      - name: Mobile unit tests
+        run: npm test -w src/mobile
+
+      - name: Mobile build
+        run: npm run build -w src/mobile
 
   security-scan:
     name: Security Scan (secrets + sensitive patterns + audit)

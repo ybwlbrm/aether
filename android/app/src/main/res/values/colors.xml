@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Aether 品牌色（功能层：AppTheme 引用，缺失会导致 APK 构建失败） -->
+    <color name="colorPrimary">#4A8FE7</color>
+    <color name="colorPrimaryDark">#3D7FD6</color>
+    <color name="colorAccent">#5E9EFF</color>
+</resources>
