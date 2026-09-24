@@ -14,8 +14,10 @@ import { buildModelRuntime, type ModelRequest } from '../../core/models/index.js
 // P0-03 收口：取消统一走 RunCancellationRegistry（run-scoped）
 import { runCancellationRegistry } from '../../lib/run-cancellation-registry.js';
 
-// P1-7 修复：运行时自定义提示词存放在局部 Map，不再突变模块级共享的 AGENTS 数组
-const customPrompts = new Map<string, string>();
+// P0-10/§27 修复：运行时自定义提示词统一由 PromptRegistry 管理（不再使用局部 Map），
+// 与 orchestration.ts 共享同一实例 —— 前端编辑 Prompt 后所有生产路径（普通 Chat /
+// Super Worker / Orchestrator / Synth / Direct Sisyphus）立即生效。
+import { getEffectivePrompt, setPrompt, getAllPrompts } from '../../lib/prompt-registry.js';
 
 export function registerAgentRoutes(app: FastifyInstance, config: BackendConfig): void {
   // 获取 Agent 列表（含配置信息 + 系统提示词）
@@ -41,7 +43,7 @@ export function registerAgentRoutes(app: FastifyInstance, config: BackendConfig)
     const { id } = request.params as { id: string };
     const agent = AGENTS.find(a => a.id === id);
     if (!agent) throw AppError.notFound('Agent', id);
-    return { id: agent.id, name: agent.name, systemPrompt: customPrompts.get(id) ?? agent.systemPrompt };
+    return { id: agent.id, name: agent.name, systemPrompt: getEffectivePrompt(id, agent.systemPrompt) };
   });
 
   // 更新 Agent 系统提示词（运行时覆盖，不持久化到代码）
@@ -52,7 +54,7 @@ export function registerAgentRoutes(app: FastifyInstance, config: BackendConfig)
     const { systemPrompt } = request.body as { systemPrompt: string };
     const agent = AGENTS.find(a => a.id === id);
     if (!agent) throw AppError.notFound('Agent', id);
-    customPrompts.set(id, systemPrompt); // 运行时覆盖，读取方通过 customPrompts 取值
+    setPrompt(id, systemPrompt); // §27：统一写入 PromptRegistry（所有生产路径生效）
     return { success: true, id, systemPrompt };
   });
 
@@ -232,7 +234,7 @@ export function registerAgentRoutes(app: FastifyInstance, config: BackendConfig)
       const request: ModelRequest = {
         provider: activeProvider.id,
         model: activeModel,
-        systemPrompt: (customPrompts.get(sisyphus.id) ?? sisyphus.systemPrompt),
+        systemPrompt: getEffectivePrompt(sisyphus.id, sisyphus.systemPrompt),
         messages: (body.history || [])
           .filter((m: any) => m.role === 'user' || m.role === 'assistant')
           .map((m: any) => ({

@@ -175,8 +175,11 @@ export function createFetchTransport(opts: FetchTransportOptions): Transport {
         circuitBreaker.recordFailure();
         const netErr = e instanceof Error ? e : new Error(String(e));
         if (retryPolicy.shouldRetry(attempt, { code: 'NETWORK_ERROR', retryable: true })) {
+          // §14 修复：attempt 语义 = 当前失败次数（0 起）。先算 delay（attempt=0 → 2^0=base），
+          // 再 attempt += 1 进入下一次循环 —— 禁止先 +1 再算 delay（会跳过 2^0 档）。
+          const delay = retryPolicy.delayMs(attempt);
           attempt += 1;
-          await retryPolicy.sleep(retryPolicy.delayMs(attempt), signal);
+          await retryPolicy.sleep(delay, signal);
           continue;
         }
         throw new ModelError(`provider network error: ${netErr.message}`, {
@@ -205,8 +208,9 @@ export function createFetchTransport(opts: FetchTransportOptions): Transport {
         // 附加 retryAfterMs（供 RetryPolicy 尊重 Retry-After）
         const withRetryAfter = Object.assign(err, { retryAfterMs });
         if (retryPolicy.shouldRetry(attempt, withRetryAfter)) {
-          attempt += 1;
+          // §14 修复：先按当前 attempt 计算 delay，再递增 —— 首次重试用 2^0 档
           const delay = retryPolicy.delayMs(attempt, extractRetryAfterMs(withRetryAfter));
+          attempt += 1;
           await retryPolicy.sleep(delay, signal);
           continue;
         }

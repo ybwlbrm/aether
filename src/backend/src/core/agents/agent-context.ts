@@ -45,6 +45,8 @@ export type AgentContext = RuntimeContext & {
   agentId: string;
   /** Agent definition */
   definition: AgentDefinition;
+  /** §33: Run 级 seq 分配器（多 Agent 共享同一 Run 时保证 seq 唯一单调）。缺省 undefined 时回退实例自增。 */
+  runSeqAllocator?: () => number;
   /** Inbox for incoming messages/directives */
   inbox: InboxMessage[];
   /**

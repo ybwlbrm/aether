@@ -196,12 +196,12 @@ describe('model-runtime', () => {
       match(response.id, /^resp_\d+_[a-z0-9]+$/);
     });
 
-    it('defaults finishReason to stop when not provided', async () => {
+    it('§17: EOF 无 finish chunk 不得伪装成 stop — 必须标记 STREAM_INTERRUPTED/UNKNOWN_TERMINATION', async () => {
       const chunks: StreamChunk[] = [
         { type: 'block-start', index: 0, blockType: 'text' },
-        { type: 'text-delta', index: 0, text: 'Test' },
-        { type: 'block-end', index: 0, block: { kind: 'text', text: 'Test' } },
-        // No finish chunk
+        { type: 'text-delta', index: 0, text: 'Partial output' },
+        { type: 'block-end', index: 0, block: { kind: 'text', text: 'Partial output' } },
+        // 流被截断：无 finish chunk（网络中断/Provider 异常关闭）
       ];
 
       const stream = async function* () {
@@ -210,6 +210,26 @@ describe('model-runtime', () => {
 
       const response = await streamToComplete(stream);
 
+      strictEqual(
+        response.finishReason,
+        'error',
+        'EOF 无 finish 必须标记为 error（STREAM_INTERRUPTED），禁止伪装成正常 stop',
+      );
+    });
+
+    it('§17: finish chunk 明确为 stop 时才返回 stop', async () => {
+      const chunks: StreamChunk[] = [
+        { type: 'block-start', index: 0, blockType: 'text' },
+        { type: 'text-delta', index: 0, text: 'Complete' },
+        { type: 'block-end', index: 0, block: { kind: 'text', text: 'Complete' } },
+        { type: 'finish', reason: { kind: 'stop' } },
+      ];
+
+      const stream = async function* () {
+        for (const chunk of chunks) yield chunk;
+      }();
+
+      const response = await streamToComplete(stream);
       strictEqual(response.finishReason, 'stop');
     });
   });

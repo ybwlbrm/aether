@@ -81,19 +81,22 @@ export function createRetryPolicy(opts: RetryPolicyOptions = {}): RetryPolicy {
   };
 
   const sleep: RetryPolicy['sleep'] = (ms, signal) =>
-    new Promise<void>((resolve) => {
+    new Promise<void>((resolve, reject) => {
+      // §15 修复：abort 必须 reject AbortError（与 fetch-retry.ts 一致），
+      // 供 ExecutionLoop 识别为 CANCELLED → Run 正确结束。
+      // 禁止 abort 后 sleep resolve 导致继续下一次 Retry。
       if (signal?.aborted) {
-        resolve();
+        reject(new DOMException('Aborted', 'AbortError'));
         return;
       }
+      const onAbort = () => {
+        clearTimeout(timer);
+        reject(new DOMException('Aborted', 'AbortError'));
+      };
       const timer = setTimeout(() => {
         signal?.removeEventListener('abort', onAbort);
         resolve();
       }, ms);
-      const onAbort = () => {
-        clearTimeout(timer);
-        resolve();
-      };
       signal?.addEventListener('abort', onAbort, { once: true });
     });
 

@@ -580,6 +580,58 @@ describe('provider-adapter', () => {
         assert.deepEqual(textDeltas.map((d) => d.text), ['Hello', ' world']);
       });
 
+      // ── §14：attempt 偏移修复 ──
+      // attempt 0 = 第一次失败（delayMs(0) = base*2^0）
+      // attempt 1 = 第二次失败（delayMs(1) = base*2^1）
+      // 禁止先 attempt+=1 再 delayMs(attempt) 导致首次重试跳过 2^0 档
+
+      it('§14: delayMs(0)=base, delayMs(1)=base*2 — 首次重试必须用 2^0 档', () => {
+        const p = createRetryPolicy({ baseDelayMs: 100, maxDelayMs: 10000, jitter: 0 });
+        assert.equal(p.delayMs(0), 100, '第一次失败后应等待 base(2^0)');
+        assert.equal(p.delayMs(1), 200, '第二次失败后应等待 base*2(2^1)');
+        assert.equal(p.delayMs(2), 400, '第三次失败后应等待 base*4(2^2)');
+      });
+
+      it('§14: 首次网络失败后 retry delay 应为 base（不跳过 2^0 档）', async () => {
+        // 记录每次失败后实际 sleep 的毫秒数
+        const delays: number[] = [];
+        let calls = 0;
+        const fetchImpl = (async () => {
+          calls += 1;
+          throw new TypeError('network down');
+        }) as typeof fetch;
+
+        // 用 jitter=0 固定退避，注入记录 delayMs 的 retryPolicy
+        const p = createRetryPolicy({ baseDelayMs: 50, maxRetries: 3, jitter: 0, maxDelayMs: 5000 });
+        const origDelayMs = p.delayMs.bind(p);
+        (p as { delayMs: (...a: Parameters<typeof p.delayMs>) => number }).delayMs = (attempt: number) => {
+          delays.push(origDelayMs(attempt));
+          return origDelayMs(attempt);
+        };
+
+        const adapter = new OpenAICompatibleAdapter({
+          providerId: 'openai',
+          baseUrl: 'https://api.example.com/v1',
+          apiKey: 'sk-test',
+          fetchImpl,
+          allowHttpTransport: true,
+          retryPolicy: p,
+          circuitBreaker: createCircuitBreaker({ failureThreshold: 100 }),
+        } as never);
+
+        await assert.rejects(
+          async () => {
+            for await (const _c of adapter.streamMessages(createRequest())) { /* drain */ }
+          },
+          (e: unknown) => (e as Error).message.includes('network error'),
+        );
+        // 记录到 N-1 次 sleep：第 1 次失败后 delay 应为 50（base），第 2 次 100，第 3 次 200
+        assert.ok(delays.length >= 3, `应记录至少 3 次退避，实际 ${delays.length}`);
+        assert.equal(delays[0], 50, `第一次重试应等待 base(50ms)，实际 ${delays[0]}（若为 100 则存在 §14 偏移）`);
+        assert.equal(delays[1], 100, `第二次重试应等待 100ms，实际 ${delays[1]}`);
+        assert.equal(delays[2], 200, `第三次重试应等待 200ms，实际 ${delays[2]}`);
+      });
+
       // ── P1-03：streamToComplete 元数据注入 ──
 
       it('P1-03: complete() 返回的 Response 带完整 provider/model 元数据', async () => {

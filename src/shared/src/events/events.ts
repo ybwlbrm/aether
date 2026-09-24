@@ -279,6 +279,12 @@ export interface AgentFailedEvent extends BaseEvent {
   payload: AgentEventPayload & { status: 'error'; content: string; error: { message: string; code?: string } };
 }
 
+/** §32: Runtime 停止事件（区分 Runtime Lifecycle 与 Agent Task Lifecycle，不伪造任务完成） */
+export interface AgentStoppedEvent extends BaseEvent {
+  type: 'agent.stopped';
+  payload: AgentEventPayload;
+}
+
 export interface AgentInboxDirectiveEvent extends BaseEvent {
   type: 'agent.inbox.directive';
   payload: AgentEventPayload & { directive: string };
@@ -370,6 +376,7 @@ export type AgentEvent =
   | AgentSpawnedEvent
   | AgentHandoffEvent
   | AgentFailedEvent
+  | AgentStoppedEvent
   | AgentInboxDirectiveEvent
   | AgentMessageDeltaEvent
   | AgentMessageCompletedEvent
@@ -402,7 +409,7 @@ export const AGENT_EVENT_TYPES: readonly AgentEvent['type'][] = [
   'task.completed',
   'task.cancelled',
   'task.failed',
-  // Agent (11)
+  // Agent (12)
   'agent.started',
   'agent.status',
   'agent.waiting',
@@ -413,6 +420,7 @@ export const AGENT_EVENT_TYPES: readonly AgentEvent['type'][] = [
   'agent.spawned',
   'agent.handoff',
   'agent.failed',
+  'agent.stopped',
   'agent.inbox.directive',
   // Message/Reasoning/Output (5)
   'agent.message.delta',

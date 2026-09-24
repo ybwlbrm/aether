@@ -4,6 +4,14 @@
  * Base runtime implementation for agents, extending the core Runtime with agent-specific behavior.
  * Transport-agnostic: no Fastify, no SSE, no React, no zod-for-runtime deps.
  * Pure TypeScript only.
+ *
+ * §32 修复：严格区分 Runtime Lifecycle 与 Agent Task Lifecycle：
+ *   - runtime.started / runtime.stopped（由 base Runtime 发射）
+ *   - agent.started / agent.status / agent.completed / agent.failed（由 runTask 发射）
+ *   onStop() 不得再伪造 agent.completed —— 避免重复 terminal event。
+ *
+ * §33 修复：seq 由 Run 级 Sequence Allocator 统一分配（context.runSeqAllocator），
+ *   不再使用实例私有 #seq —— 多 Agent 并行时同一 Run 内 seq 唯一、单调、可回放。
  */
 
 import { Runtime, type RuntimeEvent, type RuntimeEventListener } from '../runtime/index.js';
@@ -28,7 +36,6 @@ type AgentListenerEvent = BaseEvent & { payload?: unknown };
 export class AgentRuntime extends Runtime {
   #definition: AgentDefinition;
   #context: AgentContext;
-  #seq: number = 0;
   #agentListeners: Set<RuntimeEventListener> = new Set();
 
   /**
@@ -68,10 +75,12 @@ export class AgentRuntime extends Runtime {
 
   /**
    * Called when the runtime is stopping.
-   * Emits agent.completed event.
+   * §32 修复：不再 emit agent.completed —— Runtime 停止 ≠ Agent 任务完成。
+   * 任务完成/失败由 runTask 发射 agent.completed / agent.failed；这里只反映 Runtime 生命周期。
    */
   protected override async onStop(): Promise<void> {
-    this.emitAgentEvent('agent.completed', { status: 'completed' });
+    // 主动停止（未运行任务）→ 不伪造任务终态；若任务正在运行则由上层显式处理取消。
+    this.emitAgentEvent('agent.stopped', {});
   }
 
   /**
@@ -96,7 +105,7 @@ export class AgentRuntime extends Runtime {
     try {
       const result = await this.execute(input);
 
-      // Emit completion
+      // Emit completion（任务生命周期唯一 terminal）
       this.emitAgentEvent('agent.completed', { status: 'completed' });
 
       return result;
@@ -164,6 +173,9 @@ export class AgentRuntime extends Runtime {
   /**
    * Emits an agent event with proper BaseEvent fields to agent listeners.
    *
+   * §33 修复：seq 来自 Run 级 Sequence Allocator（context 注入），
+   *   不再用实例私有计数器 —— 多 Agent 共享同一 Run 时 seq 全局唯一单调。
+   *
    * @param type - Event type
    * @param payload - Event payload
    */
@@ -171,6 +183,11 @@ export class AgentRuntime extends Runtime {
     type: AgentEvent['type'],
     payload: AgentEventPayloadForType<typeof type>
   ): void {
+    // 若上下文注入 Run 级 seq 分配器 → 使用；否则回退自增（单 Agent 独立运行兜底）
+    const seq = this.#context.runSeqAllocator
+      ? this.#context.runSeqAllocator()
+      : this.#nextSeq();
+
     const event: AgentListenerEvent = {
       eventId: crypto.randomUUID(),
       sessionId: this.#context.runId,
@@ -178,7 +195,7 @@ export class AgentRuntime extends Runtime {
       taskId: this.#context.taskId,
       agentId: this.#context.agentId,
       timestamp: new Date().toISOString(),
-      seq: this.#seq++,
+      seq,
       type,
       version: 2,
       payload,
@@ -194,6 +211,12 @@ export class AgentRuntime extends Runtime {
       }
     }
   }
+
+  /** 回退自增序列（无 Run 级分配器时，单 Agent 独立运行场景兜底） */
+  #fallbackSeq = 0;
+  #nextSeq(): number {
+    return this.#fallbackSeq++;
+  }
 }
 
 /**
@@ -206,4 +229,5 @@ type AgentEventPayloadForType<T extends AgentEvent['type']> =
   T extends 'agent.completed' ? { status: 'completed' } :
   T extends 'agent.failed' ? { status: 'error'; content: string; error: { message: string } } :
   T extends 'agent.inbox.directive' ? { directive: string } :
+  T extends 'agent.stopped' ? Record<string, unknown> :
   Record<string, unknown>;

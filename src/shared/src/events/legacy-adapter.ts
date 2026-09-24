@@ -49,6 +49,7 @@ const V1_TO_V2_TYPE: Readonly<Record<AgentEventType, AgentEvent['type']>> = {
   'agent.spawned': 'agent.spawned',
   'agent.handoff': 'agent.handoff',
   'agent.failed': 'agent.failed',
+  'agent.stopped': 'agent.stopped',
   'agent.inbox.directive': 'agent.inbox.directive',
   'agent.message.delta': 'agent.message.delta',
   'agent.message.completed': 'agent.message.completed',
@@ -90,6 +91,7 @@ const V2_TO_V1_TYPE: Readonly<Partial<Record<AgentEvent['type'], AgentEventType>
   'agent.spawned': 'agent.spawned',
   'agent.handoff': 'agent.handoff',
   'agent.failed': 'agent.failed',
+  'agent.stopped': 'agent.stopped',
   'agent.inbox.directive': 'agent.inbox.directive',
   'agent.message.delta': 'agent.message.delta',
   'agent.message.completed': 'agent.message.completed',
@@ -304,6 +306,9 @@ function buildV2Payload(envelope: AgentEventEnvelope, v2Type: AgentEvent['type']
         content: envelope.content ?? 'Agent error',
         error: { message: envelope.content ?? 'Agent error', code: envelope.metadata?.errorCode as string },
       };
+    }
+    case 'agent.stopped': {
+      return { content: envelope.content ?? '' };
     }
     case 'agent.retry': {
       return { status: 'retry' as const, content: envelope.content ?? 'Retrying...' };

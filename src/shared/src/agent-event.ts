@@ -61,6 +61,7 @@ export type AgentEventType =
   | 'agent.spawned'
   | 'agent.handoff'
   | 'agent.failed'
+  | 'agent.stopped'
   // ── inbox 指令（任务运行中 steer/followup 补充指令） ──
   | 'agent.inbox.directive'
 
@@ -115,6 +116,7 @@ export const AGENT_EVENT_TYPES: readonly AgentEventType[] = [
   'agent.spawned',
   'agent.handoff',
   'agent.failed',
+  'agent.stopped',
   'agent.inbox.directive',
   'agent.message.delta',
   'agent.message.completed',
@@ -157,8 +159,8 @@ export interface AgentEventEnvelope {
   parentEventId?: string;
   /** 扩展元数据（token 用量、耗时等） */
   metadata?: Record<string, unknown>;
-  /** 任务结束原因（task.completed 携带：stop/tool_calls/max-tokens/error/aborted/max_turns/completed/budget_exceeded） */
-  endReason?: 'stop' | 'tool_calls' | 'max-tokens' | 'error' | 'aborted' | 'max_turns' | 'completed' | 'budget_exceeded';
+  /** 任务结束原因（task.completed 携带：stop/tool_calls/max-tokens/error/aborted/max_turns/completed/budget_exceeded；task.failed 可携带 interrupted） */
+  endReason?: 'stop' | 'tool_calls' | 'max-tokens' | 'error' | 'aborted' | 'max_turns' | 'completed' | 'budget_exceeded' | 'interrupted';
 }
 
 /** 活动流渲染投影用的紧凑表示（前端可直接渲染的一条 Activity） */

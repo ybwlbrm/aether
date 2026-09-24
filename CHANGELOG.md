@@ -1,5 +1,46 @@
 # Changelog
 
+## [2.3.0] - 2026-09-23 · 全项目最终整改与架构收口版
+
+### 架构收口（四个统一）
+
+- **统一 Loop**：新增 `core/runtime/execution-loop.ts`（P0-01~06）——CompletionState / ExecutionBudget / ExecutionUsage / runExecutionLoop / finalizeOnBudgetExceeded 单一路径；普通 Chat、超级 Chat、Mobile 命令处理、Legacy ToolLoop、Core AgentRuntime 五套循环逻辑全部收敛到 ExecutionLoop + RunLifecycleManager 状态机
+- **统一 Retry**：`retry-policy.ts` sleep 在 AbortError 时立即 reject（不再吞取消继续重试）；`provider-adapter.ts` 修正 attempt 偏移（delayMs(attempt) 先于 attempt+=1，重试等待不再多等一轮）；`command-processor.ts`（Mobile）移除手写 `for attempt<4` Model 重试，统一走 retry-policy
+- **统一 Prompt**：新增 `lib/prompt-registry.ts`（getEffectivePrompt / setPrompt / getAllPrompts / clearPrompt）——普通 Chat、Worker/Synth 编排、Agent 自定义 Prompt、Direct Sisyphus、GET/PUT prompt 路由全部从单一 registry 读取，移除本地双 Map 分叉
+- **统一 Runtime**：Run 终态统一走 RunLifecycleManager（Workflow 收口、§32 重复 terminal 修复）；Run seq 统一接入 context.runSeqAllocator；token 统计统一 delta 语义（防 pause/resume 循环膨胀）
+
+### Added（新增）
+- `core/runtime/execution-loop.ts`：budgetFromAgentLimits（预算统一由 AgentDefinition limits 派生，禁止 30/50/128000 散落硬编码）+ finalizeOnBudgetExceeded + accumulateUsage
+- Prompt Registry 单一事实源（§20-29）
+- Workflow 受控并行 DAG（§41）：多根节点并行执行、maxParallelTasks 并发上限、依赖 join 逐波推进
+- Workflow 条件边显式化（§42）：`edge.condition: 'passed' | 'failed'` 替代"第一条=true/第二条=false"隐式约定
+- `ModelResponse.interrupted?: boolean`：流中断（无 finish chunk）显式标记，不再假成功
+
+### Changed（变更）
+- `model-runtime.ts` streamToComplete：无 finish chunk → finishReason='error' + interrupted=true（原静默返回截断内容）
+- `agent-runtime.ts` onStop：不再伪造 agent.completed，改发 `agent.stopped`（§32/§33）；shared 事件类型/legacy 映射同步新增 `agent.stopped`
+- `chat-handler.ts`：Run 创建失败 → 终止执行并返回 500（不再警告后继续产生 orphan run）
+- `run-lifecycle-manager.ts`：token 累加改 delta 语义（新增 input/output 增量，total 不再按全量重复叠加）
+- Workflow 执行引擎：串行 BFS → 受控并行 DAG（cycle 仍 fail-fast）
+
+### Fixed（修复）
+- Retry 取消语义：abort 后不再继续重试（sleep abort → reject AbortError）
+- Retry 等待偏移：attempt 1 先 delay 0 再执行，不再先执行再等一轮
+- Mobile 命令处理假成功：流中断标记为 failed + task.failed + run fail（§16/§18）
+- 多根 DAG 静默丢节点：全部入度 0 根节点入队执行（P0-1）
+- 条件节点隐式分支错乱：显式 condition 边求值（§42）
+- Run 创建失败吞错：事务内失败整体回滚（第 10 章 P1）
+
+### Breaking Changes（破坏性变更）
+- 无 API 破坏；`/api/health` version 更新为 2.3.0
+- Workflow 条件节点要求显式 condition 边（无 condition 的出边不再被条件节点遍历，旧隐式约定工作流需补边）
+
+### Migration（迁移）
+- 数据库 v15（本轮无新增列，schema_version 已统一）
+
+### 测试基线
+- backend 1135+ / shared 32 / frontend 62 / mobile 25 全绿；新增 ExecutionLoop 12、Prompt Registry 5、Workflow 并行 DAG 7、§36 token delta 等回归测试
+
 ## [2.2.0] - 2026-09-06 · 第三轮审计收敛版
 
 ### Added（新增）

@@ -82,73 +82,97 @@ export async function executeWorkflow(opts: ExecuteWorkflowOptions): Promise<Exe
       // LC-020 修复：检测到循环依赖 → fail-fast，不再按原顺序执行（会死循环/错乱）
       throw new Error('工作流存在循环依赖，无法执行。请检查节点连接关系。');
     }
-    // 构建边图用于条件分支遍历
-    const edgeMap = new Map<string, { source: string; target: string }[]>();
+    // §41 修复：受控并行 DAG —— 所有入度为 0 的节点同时就绪，依赖满足后逐波执行，
+    // 最多 maxParallelTasks 个节点并发（由 config.workflowMaxParallel 控制）。
+    const edgeMap = new Map<string, WorkflowEdge[]>();
     for (const e of edges) {
       if (!edgeMap.has(e.source)) edgeMap.set(e.source, []);
       edgeMap.get(e.source)!.push(e);
     }
-    // P0-1 修复：所有入度为 0 的节点（并行根节点）都必须入队执行。
-    // 原实现 queue = [ordered[0].id] 只取第一个根，多根 DAG 中其余根节点
-    // 及其下游节点被静默跳过，工作流结果不完整却仍标记 completed。
-    // 若拓扑排序失败（有环回退原始顺序），则全部节点视为根，BFS 以 visited 去重。
-    const indegreeCount = new Map<string, number>(nodes.map(n => [n.id, 0]));
+    const indegree = new Map<string, number>(nodes.map(n => [n.id, 0]));
     for (const e of edges) {
-      if (indegreeCount.has(e.target)) indegreeCount.set(e.target, (indegreeCount.get(e.target) || 0) + 1);
+      if (indegree.has(e.target)) indegree.set(e.target, (indegree.get(e.target) || 0) + 1);
     }
-    const orderedSet = new Set(ordered.map(n => n.id));
-    const allOrdered = orderedSet.size === nodes.length; // 拓扑成功
+    const nodeById = new Map(nodes.map(n => [n.id, n]));
+    const MAX_PARALLEL = typeof (config as { workflowMaxParallel?: unknown })?.workflowMaxParallel === 'number'
+      ? (config as { workflowMaxParallel: number }).workflowMaxParallel
+      : 4; // 默认最多 4 个节点并行
+
+    // ready 队列：入度 0 的根节点
+    const ready = ordered.filter(n => (indegree.get(n.id) || 0) === 0).map(n => n.id);
     const visited = new Set<string>();
-    const queue = ordered
-      .filter(n => allOrdered ? (indegreeCount.get(n.id) || 0) === 0 : true)
-      .map(n => n.id);
+    // pendingCount: 正在执行的节点数；用 Promise 队列实现受控并发
+    let runningCount = 0;
+    const waitForSlot = async (): Promise<void> => {
+      while (runningCount >= MAX_PARALLEL) {
+        await new Promise(r => setTimeout(r, 5));
+      }
+    };
 
-    while (queue.length > 0) {
-      const nodeId = queue.shift()!;
-      if (visited.has(nodeId)) continue;
-      visited.add(nodeId);
-      const node = nodes.find(n => n.id === nodeId);
-      if (!node) continue;
+    // 逐波执行：每次取一批 ready 节点，全部完成后统一推进下游（Dependency Join）
+    while (ready.length > 0) {
+      // 取出当前波次（受 maxParallel 限制）
+      const wave: string[] = [];
+      while (ready.length > 0 && wave.length < MAX_PARALLEL) {
+        const id = ready.shift()!;
+        if (visited.has(id)) continue;
+        visited.add(id);
+        wave.push(id);
+      }
+      if (wave.length === 0) break;
 
-      db.update(workflowRuns).set({ currentNodeId: node.id }).where(eq(workflowRuns.id, runId)).run();
-      // 事件：节点开始（§57 workflow.node.started）
-      emit('workflow.node.started', { nodeId: node.id, nodeType: node.type, nodeLabel: node.label });
-      const { output, data } = await executeNode(node, config, context);
-      results[node.id] = { label: node.label, type: node.type, output, data };
-      context[node.id] = output;
-      // 事件：节点完成（§57 workflow.node.completed）
-      emit('workflow.node.completed', { nodeId: node.id, nodeType: node.type, nodeLabel: node.label });
+      // 并行执行本波节点
+      const waveResults = await Promise.all(wave.map(async (nodeId) => {
+        const node = nodeById.get(nodeId);
+        if (!node) return;
+        await waitForSlot();
+        runningCount++;
+        try {
+          db.update(workflowRuns).set({ currentNodeId: node.id }).where(eq(workflowRuns.id, runId)).run();
+          emit('workflow.node.started', { nodeId: node.id, nodeType: node.type, nodeLabel: node.label });
+          const { output, data } = await executeNode(node, config, context);
+          results[node.id] = { label: node.label, type: node.type, output, data };
+          context[node.id] = output;
+          emit('workflow.node.completed', { nodeId: node.id, nodeType: node.type, nodeLabel: node.label });
+          return { node, data };
+        } finally {
+          runningCount--;
+        }
+      }));
 
-      // P1-14 修复：客户端断开连接时中止执行（避免浪费 AI 调用与副作用）
-      // 使用 socket.destroyed（TCP 连接断开 = 客户端已断开）而非 request.raw.destroyed
-      // （后者在请求体接收完毕后即被设为 true，不适合本场景）
+      // 客户端断开中止
       if (request.raw.socket?.destroyed) {
         failed = true;
         errorMsg = '客户端已断开连接，工作流执行中止';
         break;
       }
 
-      // 条件节点：根据 data.passed 决定走哪条边
-      // 边约定：第一条出边为 true 分支，第二条出边为 false 分支
-      if (node.type === 'condition') {
-        const passed = !!(data as any)?.passed;
-        const outEdges = edgeMap.get(node.id) || [];
-        if (passed) {
-          // 条件通过：走第一条边（true 分支）
-          if (outEdges.length > 0 && !visited.has(outEdges[0].target)) {
-            queue.push(outEdges[0].target);
-          }
-        } else {
-          // 条件不通过：走第二条边（false 分支），如果没有第二条边则跳过
-          if (outEdges.length > 1 && !visited.has(outEdges[1].target)) {
-            queue.push(outEdges[1].target);
-          }
-        }
-      } else {
-        // 普通节点：走所有出边
+      // Dependency Join：本波全部完成后，推进满足依赖的下一波
+      for (const waveResult of waveResults) {
+        if (!waveResult) continue;
+        const { node, data } = waveResult;
+        const passed = node.type === 'condition' ? !!(data as { passed?: boolean } | null | undefined)?.passed : null;
         const outEdges = edgeMap.get(node.id) || [];
         for (const e of outEdges) {
-          if (!visited.has(e.target)) queue.push(e.target);
+          // §42 修复：条件边显式化 —— 用 edge.condition 而非"第一条=true/第二条=false"
+          if (e.condition === 'passed' && passed !== true) continue;
+          if (e.condition === 'failed' && passed !== false) continue;
+          if (node.type === 'condition' && !e.condition) continue; // 条件节点只走显式条件边
+          if (!visited.has(e.target)) {
+            const d = (indegree.get(e.target) || 1) - 1;
+            indegree.set(e.target, d);
+            if (d === 0) ready.push(e.target);
+          }
+        }
+        // 无条件边（普通节点）直接推进下游
+        if (node.type !== 'condition') {
+          for (const e of outEdges) {
+            if (!visited.has(e.target)) {
+              const d = (indegree.get(e.target) || 1) - 1;
+              indegree.set(e.target, d);
+              if (d === 0) ready.push(e.target);
+            }
+          }
         }
       }
     }

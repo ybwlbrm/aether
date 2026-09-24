@@ -439,6 +439,8 @@ export async function processRemoteCommand(
     let lastErr: string = '';
     let streamMsgId: string = ''; // 流式消息 ID，在循环外定义，最终使用
     let lastToolResult = ''; // 最近一次工具执行结果，用于去重
+    // §16 修复：流中断标记（提升到函数级作用域，供 while 循环外收尾判断）
+    let streamInterrupted = false;
 
     // 创建 EventBus 用于发射活动事件（桌面端 ActivityStream 消费）
     const eventBus = createEventBus(getDb(), undefined, () => saveDb(backendConfig));
@@ -471,37 +473,28 @@ export async function processRemoteCommand(
     });
 
     while (maxTurns-- > 0) {
-      // 429 重试：最多 3 次，指数退避
+      // §18 修复：移除手写 for-attempt Model Retry —— ModelRuntime 内部
+      // (provider-adapter → RetryPolicy) 已统一处理 429/5xx/网络错误 + abortable sleep。
+      // Mobile 不再自己实现模型层重试；此处仅保留请求构造与流读取容错。
       let stream: AsyncIterable<any> | null = null;
-      for (let attempt = 0; attempt < 4; attempt++) {
-        try {
-          // 纵深防御：显式校验 baseUrl（虽受控但防配置篡改/注入）
-          // ModelRuntime 内部已处理，此处保留以兼容旧逻辑
-          const request = {
-            provider: provider.type,
-            model,
-            messages: apiMessages,
-            tools: activeTools,
-            toolChoice: 'auto',
-            ...(remoteDeep ? { thinking: true } : {}),
-            signal: AbortSignal.timeout(300000), // 5分钟超时
-          };
-          stream = runtime.stream(request);
-          break;
-        } catch (e: unknown) {
-          if (e instanceof Error && e.name === 'AbortError') {
-            lastErr = 'AI 请求超时（300s）';
-          } else {
-            lastErr = e instanceof Error ? e.message : String(e);
-          }
-          if (attempt >= 3) {
-            await syncAssistantError(sb, cfg, convId, commandId, command.user_id, content, `❌ ${lastErr}`, now, backendConfig);
-            return;
-          }
-          const delay = 2000 * Math.pow(2, attempt);
-          console.log(`[Sync] AI 调用失败，${delay / 1000}s 后重试 (${attempt + 1}/3): ${lastErr}`);
-          await new Promise(r => setTimeout(r, delay));
-        }
+      try {
+        // 纵深防御：显式校验 baseUrl（虽受控但防配置篡改/注入）
+        const request = {
+          provider: provider.type,
+          model,
+          messages: apiMessages,
+          tools: activeTools,
+          toolChoice: 'auto',
+          ...(remoteDeep ? { thinking: true } : {}),
+          signal: AbortSignal.timeout(300000), // 5分钟超时
+        };
+        stream = runtime.stream(request);
+      } catch (e: unknown) {
+        // stream() 同步抛出（配置错误等）→ 直接失败，不做静默重试
+        lastErr = e instanceof Error ? e.message : String(e);
+        console.error('[Sync] AI 流初始化失败:', lastErr);
+        await syncAssistantError(sb, cfg, convId, commandId, command.user_id, content, `❌ ${lastErr}`, now, backendConfig);
+        return;
       }
 
       if (!stream) {
@@ -574,6 +567,8 @@ export async function processRemoteCommand(
       };
 
       // 流式过程：每收到 StreamChunk 立即调度
+      // §16 修复：流中断（已产生部分输出）不得静默当作正常完成 ——
+      // 标记 streamInterrupted，收尾时体现 interrupted/failed 语义。
       try {
         for await (const chunk of stream) {
           switch (chunk.type) {
@@ -614,7 +609,9 @@ export async function processRemoteCommand(
           }
         }
       } catch (e: unknown) {
-        // StreamError：sync 上下文不炸整体流程，记日志并走正常收尾（已产出内容已同步）
+        // StreamError / 流中断：sync 上下文不炸整体流程，但必须标记 interrupted
+        // §16 修复：已产生部分输出时不得伪装成正常完成（禁止静默重放整条请求）
+        streamInterrupted = true;
         if (e instanceof Error) console.warn(`[Sync] AI 流式解析中断: ${e.message}`);
       }
 
@@ -817,11 +814,14 @@ export async function processRemoteCommand(
       updated_at: new Date().toISOString(),
     }, { onConflict: 'id' });
 
-    // 标记命令完成，同时写入 conversation_id 供手机端追踪
+    // 标记命令完成/中断，同时写入 conversation_id 供手机端追踪
+    // §16 修复：流中断（streamInterrupted）时不得伪装 completed —— 标记 failed + interrupted 语义
+    const finalStatus = streamInterrupted ? 'failed' : 'completed';
     await sb.from('remote_commands').update({
-      status: 'completed',
+      status: finalStatus,
       conversation_id: convId,
-      result_summary: aiContentFinal.slice(0, 200),
+      result_summary: streamInterrupted ? `⚠️ 流式输出中断（部分内容已同步）: ${aiContentFinal.slice(0, 160)}` : aiContentFinal.slice(0, 200),
+      error: streamInterrupted ? 'stream interrupted before finish' : null,
       processed_at: new Date().toISOString(),
     }).eq('id', commandId);
 
@@ -830,23 +830,30 @@ export async function processRemoteCommand(
       device_id: cfg.deviceId,
       user_id: command.user_id ?? null,
       action: 'remote_command',
-      status: 'success',
-      details: `命令已处理: ${content.slice(0, 100)}`,
+      status: streamInterrupted ? 'failed' : 'success',
+      details: `${streamInterrupted ? '命令流中断' : '命令已处理'}: ${content.slice(0, 100)}`,
       created_at: new Date().toISOString(),
     });
 
     // 持久化本地数据库
     saveDb(backendConfig);
 
-    // 发射 task.completed 事件（桌面端 ActivityStream 显示任务完成状态）
-    eventBus.emit(convId, 'task.completed', {
-      taskId: runTaskId, agentId: 'main', agentType: 'conversation',
-      status: 'completed', content: '完成', endReason: 'completed',
-    });
+    // 发射 task.completed / task.failed 事件（桌面端 ActivityStream 显示任务终态）
+    if (streamInterrupted) {
+      eventBus.emit(convId, 'task.failed', {
+        taskId: runTaskId, agentId: 'main', agentType: 'conversation',
+        status: 'interrupted', content: '流式输出中断', endReason: 'interrupted',
+      });
+    } else {
+      eventBus.emit(convId, 'task.completed', {
+        taskId: runTaskId, agentId: 'main', agentType: 'conversation',
+        status: 'completed', content: '完成', endReason: 'completed',
+      });
+    }
     // P0-05 收口：Remote Command Run 终态统一经 RunLifecycleManager
     try {
-      runLifecycle?.transition(runTaskId, 'complete', {
-        endReason: 'completed',
+      runLifecycle?.transition(runTaskId, streamInterrupted ? 'fail' : 'complete', {
+        endReason: streamInterrupted ? 'interrupted' : 'completed',
         totalTokens: usageTotal.total_tokens || 0,
       });
     } catch (err) {

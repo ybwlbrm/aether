@@ -86,6 +86,21 @@ describe('core/runtime/run-lifecycle-manager', () => {
     assert.ok(row.completedAt, 'completedAt 应被设置');
   });
 
+  it('§36 token 累加防膨胀：running 期间多次增量更新不重复累计 total', () => {
+    const lm = new RunLifecycleManager(getDb());
+    lm.createAndStart({ runId: 'r-tok-delta', mode: 'normal' });
+    // 第一轮增量：input 100, output 30（running → waiting，token 随 transition 累加）
+    lm.transition('r-tok-delta', 'pause', { inputTokens: 100, outputTokens: 30 });
+    // 第二轮增量：input 50, output 10（waiting → running）
+    lm.transition('r-tok-delta', 'resume', { inputTokens: 50, outputTokens: 10 });
+    // 终态 complete（running → completed）
+    lm.transition('r-tok-delta', 'complete', { endReason: 'completed' });
+    const row = lm.get('r-tok-delta');
+    assert.equal(row?.inputTokens, 150, 'input 应累加 100+50');
+    assert.equal(row?.outputTokens, 40, 'output 应累加 30+10');
+    assert.equal(row?.totalTokens, 190, 'total 应为 150+40（不膨胀）');
+  });
+
   it('transition cancel：waiting → cancelled', () => {
     const lm = new RunLifecycleManager(getDb());
     lm.createAndStart({ runId: 'r-cancel', mode: 'normal' });

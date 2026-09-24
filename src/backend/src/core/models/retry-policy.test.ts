@@ -65,14 +65,41 @@ describe('core/models/retry-policy', () => {
     assert.ok(p.delayMs(10) <= 1000, '指数退避有上界');
   });
 
-  it('abortable sleep：signal 中止立即返回（不等满 delay）', async () => {
+  it('abortable sleep：signal 中止立即返回并 reject AbortError（不等满 delay）', async () => {
     const p = createRetryPolicy();
     const ac = new AbortController();
     const started = Date.now();
     const sleepPromise = p.sleep(5000, ac.signal);
     ac.abort();
-    await sleepPromise;
+    await assert.rejects(sleepPromise, (err: unknown) => {
+      assert.ok(err instanceof Error);
+      assert.equal((err as Error).name, 'AbortError');
+      return true;
+    });
     assert.ok(Date.now() - started < 1000, 'abort 后 sleep 应即时返回');
+  });
+
+  it('§15: abort 后 sleep 必须 reject AbortError（而非 resolve 继续下一次 retry）', async () => {
+    const p = createRetryPolicy();
+    const ac = new AbortController();
+    const sleepPromise = p.sleep(5000, ac.signal);
+    ac.abort();
+    await assert.rejects(sleepPromise, (err: unknown) => {
+      assert.ok(err instanceof Error);
+      assert.equal((err as Error).name, 'AbortError', '中止必须抛 AbortError，供 ExecutionLoop 识别为 CANCELLED');
+      return true;
+    });
+  });
+
+  it('§15: 已 aborted 的 signal 调用 sleep 立即 reject AbortError', async () => {
+    const p = createRetryPolicy();
+    const ac = new AbortController();
+    ac.abort();
+    await assert.rejects(p.sleep(1000, ac.signal), (err: unknown) => {
+      assert.ok(err instanceof Error);
+      assert.equal((err as Error).name, 'AbortError');
+      return true;
+    });
   });
 });
 

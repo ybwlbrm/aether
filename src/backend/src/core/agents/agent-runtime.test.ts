@@ -103,7 +103,7 @@ describe('agent-runtime', () => {
       assert.deepStrictEqual(statusEvent?.payload, { status: 'running' });
     });
 
-    it('should stop and emit agent.completed', async () => {
+    it('§32: should stop and emit agent.stopped（不伪造 agent.completed）', async () => {
       await runtime.start();
 
       const events: Array<{ type: string; payload?: unknown }> = [];
@@ -114,10 +114,24 @@ describe('agent-runtime', () => {
       assert.strictEqual(runtime.state, 'stopped');
       assert.strictEqual(runtime.isRunning, false);
 
+      // §32：Runtime 停止 ≠ 任务完成 —— 不得伪造 agent.completed
       const completedEvent = events.find((e) => e.type === 'agent.completed');
-      assert.ok(completedEvent, 'agent.completed event should be emitted');
-      assert.deepStrictEqual(completedEvent?.payload, { status: 'completed' });
+      assert.ok(!completedEvent, 'stop 不得伪造 agent.completed（Runtime 停止 ≠ 任务完成）');
+      const stoppedEvent = events.find((e) => e.type === 'agent.stopped');
+      assert.ok(stoppedEvent, 'agent.stopped event should be emitted on runtime stop');
 
+      unsubscribe();
+    });
+
+    it('§32: runTask 成功发射 agent.completed（唯一任务 terminal）', async () => {
+      await runtime.start();
+      const events: Array<{ type: string; payload?: unknown }> = [];
+      const unsubscribe = runtime.onEvent((e) => events.push({ type: e.type, payload: e.payload }));
+
+      await runtime.runTask({ test: 'x' });
+
+      const completed = events.filter((e) => e.type === 'agent.completed');
+      assert.equal(completed.length, 1, 'runTask 成功只应发射一次 agent.completed');
       unsubscribe();
     });
 

@@ -21,6 +21,9 @@ import { SSE_CHUNK_TIMEOUT_MS, startHeartbeat } from '../../lib/sse-utils.js';
 import { createPendingApproval } from '../../lib/approvals-center.js';
 import { drainDirectives } from '../../lib/inbox.js';
 import { MANDATORY_COMPLIANCE_PROMPT, SISYPHUS_SYSTEM_PROMPT, SISYPHUS_SYNTH_SYSTEM_PROMPT } from '../../lib/system-prompts.js';
+// §27 修复：运行时自定义提示词统一由 PromptRegistry 管理（不再使用局部 Map），
+// 消除 orchestration.ts / index.ts 双 Map 漂移 —— 前端编辑 Prompt 后所有生产路径生效。
+import { getEffectivePrompt, getAllPrompts } from '../../lib/prompt-registry.js';
 import { truncateHistoryByTokenBudget } from '../../lib/context-window.js';
 import { AGENTS, routeMessage } from './agent-definitions.js';
 import { setupSse, cleanupSse, sendErrorAndEnd, type SseContext } from './sse-handler.js';
@@ -40,9 +43,6 @@ import { runCancellationRegistry } from '../../lib/run-cancellation-registry.js'
 // P0-02/P0-04/P0-05: 统一 Run 上下文（单 ID）+ RunLifecycleManager（唯一状态机写入入口）
 import { createRunContext } from '../../core/runtime/index.js';
 import { RunLifecycleManager } from '../../core/runtime/index.js';
-
-// P1-7 修复：运行时自定义提示词存放在局部 Map，不再突变模块级共享的 AGENTS 数组
-const customPrompts = new Map<string, string>();
 
 // Aether 2.0 Model Runtime registry (FIX-6): shared registry warmed from the
 // providers table by handleOrchestrate; call sites can resolve runtimes here.
@@ -423,8 +423,8 @@ void emitV2Event({ runId: runTaskId, sessionId: convId, taskId: runTaskId, agent
           ? `\n\n## 权限说明\n- 当前为 Level 3（超级）权限，你可以访问整个文件系统的任何路径，无目录限制。\n- 直接使用绝对路径调用 list_files、read_file、write_file 等工具操作任意文件。`
           : `\n\n## 权限说明\n- 文件操作仅限 ${allowedDirs.join('、')} 目录及其子目录内。`;
         let agentMessages = [
-          // P1-7 修复：优先使用运行时自定义提示词（局部 Map），回退到内置提示词
-          { role: 'system', content: MANDATORY_COMPLIANCE_PROMPT + '\n\n' + (customPrompts.get(agent.id) ?? agent.systemPrompt) + crossContext + memoryBlock + imageHint + permHint + fileAttachmentsHint + '\n\n## 任务清单\n- 执行多步骤任务时，先用 todo_write 建立待办清单，每完成一步更新一次（DeepSeek Harness 风格：计划先行、逐项勾选）。' },
+          // §27 修复：统一从 Prompt Registry 读取运行时自定义提示词（前端编辑全路径生效）
+          { role: 'system', content: MANDATORY_COMPLIANCE_PROMPT + '\n\n' + getEffectivePrompt(agent.id, agent.systemPrompt) + crossContext + memoryBlock + imageHint + permHint + fileAttachmentsHint + '\n\n## 任务清单\n- 执行多步骤任务时，先用 todo_write 建立待办清单，每完成一步更新一次（DeepSeek Harness 风格：计划先行、逐项勾选）。' },
           ...(function() {
             // 上下文窗口管理：限制历史消息 token 预算（共享实现，含 CJK 估算修正 AI-007）
             const history2 = (body.history || []).filter((m: any) => m.role === 'user' || m.role === 'assistant');
@@ -454,7 +454,7 @@ void emitV2Event({ runId: runTaskId, sessionId: convId, taskId: runTaskId, agent
           eventBus,
           db,
           config,
-          customPrompts,
+          customPrompts: getAllPrompts(),
           otherAgentsInfo,
           imageHint,
           fileAttachmentsHint,
@@ -545,10 +545,12 @@ ${errorResults.length > 0 ? `\n注意：以下 Agent 执行失败，结果不可
     };
     try {
       // P0-01/P0-02: 使用 Model Runtime Bridge 进行流式完成（汇总阶段）
+      // §26 修复：Synth 汇总阶段也读取 Prompt Registry（前端编辑 Sisyphus Prompt 后此处生效）
+      const synthPromptText = getEffectivePrompt('sisyphus', SISYPHUS_SYNTH_SYSTEM_PROMPT);
       const sisyphusRuntime = buildRuntimeForProvider(db, 'sisyphus', config.encryptionKey);
       if (sisyphusRuntime) {
         const messages: Array<Record<string, unknown>> = [
-          { role: 'system', content: MANDATORY_COMPLIANCE_PROMPT + '\n\n' + SISYPHUS_SYNTH_SYSTEM_PROMPT },
+          { role: 'system', content: MANDATORY_COMPLIANCE_PROMPT + '\n\n' + synthPromptText },
           { role: 'user', content: synthPrompt },
           // 修复3：汇总阶段也附加用户上传的图片（多模态可见，避免依赖子 Agent 文本转述）
           ...(hasImages ? body.images!.map(img => ({ role: 'user' as const, content: [{ type: 'image_url', image_url: { url: img } }] })) : []),
@@ -617,7 +619,7 @@ ${errorResults.length > 0 ? `\n注意：以下 Agent 执行失败，结果不可
           body: JSON.stringify(buildChatRequestBody({
             model: sisyphusEp.model,
             messages: [
-              { role: 'system', content: MANDATORY_COMPLIANCE_PROMPT + '\n\n' + SISYPHUS_SYNTH_SYSTEM_PROMPT },
+              { role: 'system', content: MANDATORY_COMPLIANCE_PROMPT + '\n\n' + synthPromptText },
               { role: 'user', content: synthPrompt },
               // 修复3：汇总阶段也附加用户上传的图片（多模态可见，避免依赖子 Agent 文本转述）
               ...(hasImages ? body.images!.map(img => ({ role: 'user' as const, content: [{ type: 'image_url', image_url: { url: img } }] })) : []),

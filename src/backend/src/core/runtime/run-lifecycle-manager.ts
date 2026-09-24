@@ -189,13 +189,17 @@ export class RunLifecycleManager {
       patch.endReason = opts.endReason;
     }
     if (opts?.error !== undefined) patch.error = opts.error;
-    // token 累计：终态写入快照；totalTokens 缺省时按 input+output 计算
-    const inputTokens = (row.inputTokens ?? 0) + (opts?.inputTokens ?? 0);
-    const outputTokens = (row.outputTokens ?? 0) + (opts?.outputTokens ?? 0);
-    const totalTokens = (row.totalTokens ?? 0) + (opts?.totalTokens ?? inputTokens + outputTokens);
+    // token 累计（§36 修复：Delta 语义，防膨胀）
+    // - inputTokens = 旧累计 + 本次增量
+    // - outputTokens = 旧累计 + 本次增量
+    // - totalTokens = 新的 input + 新的 output（若调用方显式给 totalTokens 则用显式值累加）
+    // 旧实现 `oldTotal + (input+output)` 会重复累加旧的 input+output → 膨胀。
+    const newInput = (row.inputTokens ?? 0) + (opts?.inputTokens ?? 0);
+    const newOutput = (row.outputTokens ?? 0) + (opts?.outputTokens ?? 0);
+    const totalTokens = (row.totalTokens ?? 0) + (opts?.totalTokens ?? (opts?.inputTokens ?? 0) + (opts?.outputTokens ?? 0));
     if (opts?.inputTokens !== undefined || opts?.outputTokens !== undefined || opts?.totalTokens !== undefined) {
-      patch.inputTokens = inputTokens;
-      patch.outputTokens = outputTokens;
+      patch.inputTokens = newInput;
+      patch.outputTokens = newOutput;
       patch.totalTokens = totalTokens;
     }
 

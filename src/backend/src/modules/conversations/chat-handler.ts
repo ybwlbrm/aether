@@ -21,6 +21,7 @@ import { parseSse, withChunkTimeout, SseStreamError } from '../../lib/sse-parser
 import { translate, buildChatRequestBody, parseToolArgsSafe } from '../../lib/stream-translate.js';
 import { SSE_CHUNK_TIMEOUT_MS, startHeartbeat } from '../../lib/sse-utils.js';
 import { SISYPHUS_SYSTEM_PROMPT, MANDATORY_COMPLIANCE_PROMPT } from '../../lib/system-prompts.js';
+import { getEffectivePrompt } from '../../lib/prompt-registry.js';
 import { compactRemovedHistory, buildCompactionSystemMessage } from '../../lib/compaction.js';
 import { createPendingApproval } from '../../lib/approvals-center.js';
 import { pushDirective, drainDirectives } from '../../lib/inbox.js';
@@ -157,8 +158,10 @@ export async function handleSendMessage(
     agentType: runCtx.agentType as 'conversation',
   };
   // P0-04: 普通 Chat 同样进入统一 Run 架构（runs 行 + created→running 状态机）
+  // §35 修复：Run 是执行根实体，创建失败必须终止当前执行并明确返回错误 ——
+  // 不得继续生成一个不存在完整 Run 的任务（避免幽灵数据）。
+  const runLifecycle = new RunLifecycleManager(db);
   try {
-    const runLifecycle = new RunLifecycleManager(db);
     runLifecycle.createAndStart({
       runId: runCtx.runId,
       conversationId: id,
@@ -166,7 +169,18 @@ export async function handleSendMessage(
       rootAgentId: 'main',
     });
   } catch (e: unknown) {
-    console.error('[Chat] runs 行创建失败:', e instanceof Error ? e.message : String(e));
+    const msg = e instanceof Error ? e.message : String(e);
+    console.error('[Chat] runs 行创建失败，终止执行:', msg);
+    try {
+      syncMessageToSupabase(id, {
+        id: `run-err-${Date.now()}`,
+        role: 'assistant',
+        content: `❌ 运行初始化失败，本次消息未处理：${msg}`,
+        createdAt: now,
+      });
+    } catch { /* ignore */ }
+    try { initSseHeaders(reply); } catch { /* ignore */ }
+    return reply.code(500).send({ error: `运行创建失败: ${msg}` });
   }
 
   // 设置 SSE 响应头
@@ -266,9 +280,11 @@ export async function handleSendMessage(
     const fileAttachmentsHint = hasFiles
       ? `- **用户上传了 ${body.files!.length} 个文件**，文件路径如上所示。请直接使用 read_file 读取指定文件来分析，不要用 list_files 列出目录。`
       : '';
+    // §26 修复：普通 Chat 也读取 Prompt Registry —— 前端编辑 Sisyphus Prompt 后此处生效
+    const sisyphusPrompt = getEffectivePrompt('sisyphus', SISYPHUS_SYSTEM_PROMPT);
     const systemPrompt = `${MANDATORY_COMPLIANCE_PROMPT}
 
-${SISYPHUS_SYSTEM_PROMPT}
+${sisyphusPrompt}
 
 ## 用户记忆
 ${memories || '无'}

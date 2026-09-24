@@ -121,8 +121,8 @@ describe('v2 AgentEvent protocol', () => {
       { type: 'token.usage', create: () => ({ ...baseEvent(), type: 'token.usage', payload: { inputTokens: 100, outputTokens: 200, totalTokens: 300 } }) as TokenUsageEvent },
     ];
 
-    it('AGENT_EVENT_TYPES has exactly 37 entries', () => {
-      assert.equal(AGENT_EVENT_TYPES.length, 37);
+    it('AGENT_EVENT_TYPES has exactly 38 entries', () => {
+      assert.equal(AGENT_EVENT_TYPES.length, 38);
     });
 
     it('each event type constructs and matches its discriminant', () => {
@@ -133,11 +133,11 @@ describe('v2 AgentEvent protocol', () => {
       }
     });
 
-    it('AGENT_EVENT_TYPES contains all 37 discriminants in correct order', () => {
+    it('AGENT_EVENT_TYPES contains all 38 discriminants in correct order', () => {
       const expected = [
         'run.created', 'run.started', 'run.paused', 'run.resumed', 'run.completed', 'run.failed', 'run.cancelled', 'run.interrupted',
         'task.started', 'task.plan', 'task.progress', 'task.ask-confirm', 'task.completed', 'task.cancelled', 'task.failed',
-        'agent.started', 'agent.status', 'agent.waiting', 'agent.resumed', 'agent.completed', 'agent.error', 'agent.retry', 'agent.spawned', 'agent.handoff', 'agent.failed', 'agent.inbox.directive',
+        'agent.started', 'agent.status', 'agent.waiting', 'agent.resumed', 'agent.completed', 'agent.error', 'agent.retry', 'agent.spawned', 'agent.handoff', 'agent.failed', 'agent.stopped', 'agent.inbox.directive',
         'agent.message.delta', 'agent.message.completed', 'agent.reasoning.delta',
         'agent.output.delta', 'agent.output.completed',
         'tool.started', 'tool.progress', 'tool.completed', 'tool.error', 'tool.retry',
@@ -177,6 +177,7 @@ describe('v2 AgentEvent protocol', () => {
         case 'agent.spawned': return 'agent-spawned';
         case 'agent.handoff': return 'agent-handoff';
         case 'agent.failed': return 'agent-failed';
+        case 'agent.stopped': return 'agent-stopped';
         case 'agent.inbox.directive': return 'agent-inbox-directive';
         case 'agent.message.delta': return 'agent-message-delta';
         case 'agent.message.completed': return 'agent-message-completed';

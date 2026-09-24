@@ -91,6 +91,8 @@ export interface ModelResponse {
   }>;
   /** Finish reason from the model */
   finishReason: FinishReason['kind'];
+  /** §17: 流被截断（EOF 无 finish chunk）标记 —— true 表示中断而非正常 stop */
+  interrupted?: boolean;
   /** Token usage (if provided by provider) */
   usage?: TokenUsage;
 }
@@ -244,6 +246,12 @@ export async function streamToComplete(
   // Generate a response ID if not provided by the stream
   const responseId = acc.id || `resp_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
 
+  // §17 修复：EOF 无 finish chunk = 流被截断（STREAM_INTERRUPTED），
+  // 禁止伪装成正常 stop。只有收到明确 finish 才成立 finishReason；
+  // 否则标记 'error'（由调用方结合 interrupted 标志识别中断），由上层决定恢复策略。
+  const interrupted = acc.finishReason === null;
+  const finishReason: ModelResponse['finishReason'] = acc.finishReason ?? 'error';
+
   return {
     id: responseId,
     provider: acc.provider,
@@ -251,7 +259,8 @@ export async function streamToComplete(
     content: acc.content,
     reasoningContent: acc.reasoningContent || undefined,
     toolCalls: acc.toolCalls.size > 0 ? Array.from(acc.toolCalls.values()) : undefined,
-    finishReason: acc.finishReason ?? 'stop',
+    finishReason,
     usage: acc.usage ?? undefined,
+    ...(interrupted ? { interrupted: true as const } : {}),
   };
 }
