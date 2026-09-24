@@ -25,6 +25,8 @@ import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { buildRuntimeForProvider } from '../../lib/model-runtime-bridge.js';
 // P0-04 收口：Remote Command 也进入统一 Run 架构（runs 表 + RunLifecycleManager 状态机）
 import { RunLifecycleManager } from '../../core/runtime/index.js';
+// §30/§31 收口：预算统一来源 —— AgentDefinition limits → budgetFromAgentLimits（Remote 命令不再散落 30 硬编码）
+import { budgetFromAgentLimits } from '../../core/runtime/execution-loop.js';
 
 // ============================================================
 // 处理远程命令（手机端发来的指令）
@@ -435,7 +437,10 @@ export async function processRemoteCommand(
 
     let aiContentFinal = '';
     let usageTotal = { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 };
-    let maxTurns = remoteLoop ? 30 : 30; // 整改计划第 5 章（P1）：循环模式默认上限从 500 降到安全值 30
+    // §30/§31 收口：预算统一来源 —— budgetFromAgentLimits（Remote 无显式 AgentDefinition limits，
+    // 走统一 Normal/Loop 基线预算，循环模式默认上限收敛到统一函数，不再散落 30 硬编码）
+    const unifiedBudget = budgetFromAgentLimits(undefined, !!remoteLoop);
+    let maxTurns = unifiedBudget.maxTurns;
     let lastErr: string = '';
     let streamMsgId: string = ''; // 流式消息 ID，在循环外定义，最终使用
     let lastToolResult = ''; // 最近一次工具执行结果，用于去重

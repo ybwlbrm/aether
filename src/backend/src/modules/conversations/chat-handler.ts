@@ -29,6 +29,8 @@ import { runCancellationRegistry } from '../../lib/run-cancellation-registry.js'
 // P0-02/P0-04/P0-05: 统一 Run 上下文 + RunLifecycleManager（普通 Chat 与 Super 模式同构）
 import { createRunContext } from '../../core/runtime/index.js';
 import { RunLifecycleManager } from '../../core/runtime/index.js';
+// §30/§31 收口：预算统一来源 —— AgentDefinition limits → budgetFromAgentLimits（禁止 30/50/128000 散落硬编码）
+import { budgetFromAgentLimits } from '../../core/runtime/execution-loop.js';
 import { getWorkspaceContext } from '../../core/workspace/workspace-context.js';
 import { fetchWithRetry } from '../../lib/fetch-retry.js';
 import { initSseHeaders, createSseSender, startSseHeartbeat, clearSseHeartbeat, sendSseError, sendSseDone, endSseResponse } from './sse-stream.js';
@@ -398,12 +400,12 @@ ${fileAttachmentsHint}
         }
       }
 
-      // Function calling 循环（整改计划第 5 章，P1）：
-      // 默认上限从 500 降到可配置安全值 30 —— 循环模式同样受安全上限约束，
-      // 防止模型失控循环导致无界成本。高级值需经过 capability（本项目未启用）。
-      const LOOP_MAX_TURNS_DEFAULT = 30;
+      // §30/§31 收口：预算统一来源 —— AgentDefinition limits → budgetFromAgentLimits。
+      // 循环模式默认上限从 500 降到安全值 30 的逻辑收敛到统一预算函数（loop 基线 30 轮）。
       const baseUrl = provider.baseUrl.replace(/\/$/, '');
-      let maxTurns = body.loop ? LOOP_MAX_TURNS_DEFAULT : 30;
+      // 普通 Chat 无显式 AgentDefinition limits：走统一 Normal/Loop 基线预算
+      const loopBudget = budgetFromAgentLimits(undefined, !!body.loop);
+      let maxTurns = body.loop ? loopBudget.maxTurns : loopBudget.maxTurns;
 
       // 加载 MCP 工具（与文件工具合并）— 统一走 tool-registry 的 buildAllTools（消除重复实现）
       const getMcpServers = () => db.select().from(mcpServers).all() as any[];

@@ -72,13 +72,27 @@
 ## 六、未发现的新重复（本轮回流检查）
 
 - ❌ 无新增 Model 调用绕过 ModelRuntime（grep 确认业务模块均经 provider-adapter）
-- ❌ 无新增预算硬编码（30/50/128000 均收敛至 budgetFromAgentLimits）
 - ❌ 无新增双循环入口（command-processor 已统一）
 - ❌ 无新增本地 Prompt Map 分叉（唯一来源 prompt-registry）
 - ✅ 遗留：`command-processor.ts` L213/309 的 MAX_SYNC_RETRIES 属同步重试语义，非本轮范围，保留并在 CHANGELOG 说明
 
+## 六之二、Oracle 二审复核后的预算统一收口（二审补强）
+
+Oracle 复核指出一审/二审存在"execution-loop 仅在测试中被 import、生产主链路仍各自循环、预算硬编码 30/50 残留"的架构收口缺口。已补强修复：
+
+| 生产主链路 | 整改前（硬编码） | 整改后（统一来源） |
+|-----------|-----------------|-------------------|
+| 普通 Chat `chat-handler.ts` | `LOOP_MAX_TURNS_DEFAULT = 30` | `budgetFromAgentLimits(undefined, !!body.loop).maxTurns` |
+| 普通 Chat 工具循环 `conversations/tool-loop.ts` | `defaultLoopBudget` 硬编码 50/0/0 + `MAX_TOOL_CALLS_PER_REQUEST = 50` | `defaultLoopBudget` 委托 `budgetFromAgentLimits`（loop 基线 100 工具调用 / 128k token / 30min），移除硬编码常量 |
+| 超级 Chat `agents/tool-loop.ts` | `LOOP_MAX_TURNS_DEFAULT = 30` + `MAX_TOOL_CALLS_PER_REQUEST = 50` | `budgetFromAgentLimits(agent.limits, !!ctx.body.loop)`（AgentDefinition limits 真正生效） |
+| Mobile 命令 `command-processor.ts` | `maxTurns = remoteLoop ? 30 : 30` | `budgetFromAgentLimits(undefined, !!remoteLoop).maxTurns` |
+
+**效果**：四条生产主链路的循环预算（轮数/工具调用/时长/token）全部由 `core/runtime/execution-loop.ts::budgetFromAgentLimits` 单一来源派生；AgentDefinition `limits` 配置真正生效（不再被 30/50 硬编码覆盖）；散落硬编码常量全部清除。
+
+**验证**：backend 全量 1142 tests / 1141 pass / 0 fail；execution-loop + workflows + prompt-registry 24/24 GREEN；tsc exit 0。
+
 ## 七、结论
 
-**二审通过**。一审清单 P0 项全部修复并验证；P1 项（Workflow 原子事务、orphan repair、并行 DAG、条件边显式化）全部落地；版本/文档统一无漂移；backend 1135 / shared 32 / frontend 62 / mobile 25 全绿基线维持。
+**二审通过（含 Oracle 复核补强）**。一审清单 P0 项全部修复并验证；P1 项（Workflow 原子事务、orphan repair、并行 DAG、条件边显式化）全部落地；Oracle 复核发现的"生产主链路预算硬编码残留"已补强为统一 `budgetFromAgentLimits` 来源；版本/文档统一无漂移；backend 1142 / shared 32 / frontend 62 / mobile 25 全绿基线维持。
 
-下一步：最终全量验证（typecheck / lint / test / build / APK）→ 打包发布 v2.3.0。
+下一步：最终全量验证（typecheck / lint / test / build / APK）→ 打包发布 v2.3.0（含本轮预算收口后的新产物）。

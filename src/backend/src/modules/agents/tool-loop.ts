@@ -14,6 +14,8 @@ import { messages, conversations, mcpServers } from '../../db/schema/index.js';
 import { AppError } from '@pacc/shared';
 // P0-01 收口：统一生产工具执行器（Agent → ToolRuntime → PolicyEngine → Approval → ToolExecutor）
 import { createProductionToolExecutor, type ProductionToolExecutor } from '../../lib/production-tool-executor.js';
+// §30/§31 收口：预算统一来源 —— AgentDefinition limits → budgetFromAgentLimits（禁止 30/50/128000 散落硬编码）
+import { budgetFromAgentLimits } from '../../core/runtime/execution-loop.js';
 
 export interface ToolLoopContext {
   agent: any;
@@ -53,18 +55,17 @@ export interface ToolLoopResult {
   toolCallCount: number;
 }
 
-const MAX_TOOL_CALLS_PER_REQUEST = 50;
-
 export async function runAgentToolLoop(ctx: ToolLoopContext): Promise<ToolLoopResult> {
   let agentReply = '';
   let agentTokens = 0;
   let lastToolResult = '';
   let toolCallCount = 0;
 
-  // 整改计划第 5 章（P1）：循环模式默认上限从 500 降到安全值 30 ——
-  // 防模型失控循环导致无界成本；高级值需经过 capability（本项目未启用）。
-  const LOOP_MAX_TURNS_DEFAULT = 30;
-  let fcTurns = ctx.body.loop ? LOOP_MAX_TURNS_DEFAULT : 30;
+  // §30/§31 收口：预算统一来源 —— AgentDefinition limits → budgetFromAgentLimits
+  // 循环模式默认上限从 500 降到安全值 30 的逻辑收敛到统一预算函数（loop 基线 30 轮 / 100 工具调用）
+  const agentLimits = (ctx.agent as { limits?: { maxTurns?: number; maxToolCalls?: number; maxTimeMs?: number; maxTokens?: number } } | undefined)?.limits;
+  const unifiedBudget = budgetFromAgentLimits(agentLimits, !!ctx.body.loop);
+  let fcTurns = ctx.body.loop ? unifiedBudget.maxTurns : unifiedBudget.maxTurns;
 
   // P0-01 收口：统一生产工具执行器（PolicyEngine 唯一裁决 + Approval 完整绑定 + Timeout + Cancel）
   // 在循环外构建一次（工具注册只做一遍），循环内复用。
@@ -217,10 +218,10 @@ export async function runAgentToolLoop(ctx: ToolLoopContext): Promise<ToolLoopRe
       });
 
       for (const tc of currentToolCalls) {
-        // PF-02: 工具调用预算检查 — 超过 50 次则优雅终止
+        // §30/§31 收口：工具调用预算统一来自 unifiedBudget（budgetFromAgentLimits 派生）
         toolCallCount++;
-        if (toolCallCount > MAX_TOOL_CALLS_PER_REQUEST) {
-          const budgetMsg = `⚠️ 已达到工具调用上限 (${MAX_TOOL_CALLS_PER_REQUEST} 次)，本次请求停止执行。如需继续，请发送新消息。`;
+        if (toolCallCount > unifiedBudget.maxToolCalls) {
+          const budgetMsg = `⚠️ 已达到工具调用上限 (${unifiedBudget.maxToolCalls} 次)，本次请求停止执行。如需继续，请发送新消息。`;
           ctx.sseSend('message', JSON.stringify({ content: budgetMsg }));
           if (ctx.body.conversationId) {
             ctx.eventBus.emit(ctx.convId, 'agent.message.delta', {
@@ -318,8 +319,8 @@ export async function runAgentToolLoop(ctx: ToolLoopContext): Promise<ToolLoopRe
         }
       }
 
-      // PF-02: 若工具调用预算耗尽，跳出外层 while 循环
-      if (toolCallCount > MAX_TOOL_CALLS_PER_REQUEST) {
+      // §30/§31 收口：工具调用预算统一来自 unifiedBudget（budgetFromAgentLimits 派生）
+      if (toolCallCount > unifiedBudget.maxToolCalls) {
         break;
       }
     } else {

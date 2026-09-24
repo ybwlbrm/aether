@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+﻿import { randomUUID } from 'node:crypto';
 import { buildToolPayload } from '@pacc/shared';
 import { parseToolArgsSafe, buildChatRequestBody } from '../../lib/stream-translate.js';
 import { drainDirectives } from '../../lib/inbox.js';
@@ -6,6 +6,8 @@ import { buildModelRuntime, type ModelRequest } from '../../core/models/index.js
 import { messages } from '../../db/schema/index.js';
 // P0-01 收口：统一生产工具执行器（Agent → ToolRuntime → PolicyEngine → Approval → ToolExecutor）
 import { createProductionToolExecutor, type ProductionToolExecutor } from '../../lib/production-tool-executor.js';
+// §30/§31 收口：预算统一来源 —— AgentDefinition limits → budgetFromAgentLimits（禁止 30/50/128000 散落硬编码）
+import { budgetFromAgentLimits, type AgentLimitsLike } from '../../core/runtime/execution-loop.js';
 
 export interface ToolLoopConfig {
   apiMessages: any[];
@@ -65,20 +67,22 @@ export interface LoopBudget {
   maxCostCny: number;
 }
 
-/** 构造默认预算（可在 chat-handler 中覆盖） */
-export function defaultLoopBudget(maxTurns: number): LoopBudget {
+/** 构造默认预算（可在 chat-handler 中覆盖）—— 统一来源 budgetFromAgentLimits（§30/§31） */
+export function defaultLoopBudget(maxTurns: number, agentLimits?: AgentLimitsLike): LoopBudget {
+  // 统一预算：AgentDefinition limits 优先，缺省走 execution-loop 的 Normal/Loop 基线预算
+  const unified = budgetFromAgentLimits(agentLimits, maxTurns > 8);
   return {
-    maxTurns,
-    maxDurationMs: 0,     // 默认不限时长
-    maxTokens: 0,         // 默认不限 token
-    maxToolCalls: 50,     // 与 MAX_TOOL_CALLS_PER_REQUEST 对齐
-    maxCostCny: 0,        // 默认不限费用
+    maxTurns: maxTurns > 0 ? maxTurns : unified.maxTurns,
+    maxDurationMs: unified.maxTimeMs,     // 默认按统一预算（loop 30min / normal 5min）
+    maxTokens: unified.maxTokens,         // 默认按统一预算（loop 128k / normal 64k）
+    maxToolCalls: unified.maxToolCalls,   // 统一预算（loop 100 / normal 30）
+    maxCostCny: unified.maxCostCny,       // 默认不限费用
   };
 }
 
 /**
  * 执行工具调用循环（Function Calling Loop）
- * PF-02: 硬性工具调用总预算 MAX_TOOL_CALLS_PER_REQUEST = 50，防止失控成本
+ * PF-02: 工具调用总预算统一由 budget（budgetFromAgentLimits 派生）控制，防止失控成本
  * BE-05: 传递 abort signal 到工具执行，支持客户端断连时取消
  */
 export async function executeToolLoop(
@@ -115,8 +119,7 @@ export async function executeToolLoop(
   const loopStartedAt = Date.now();
   let turnsUsed = 0;
 
-  // PF-02: 硬性工具调用总预算，防止失控成本
-  const MAX_TOOL_CALLS_PER_REQUEST = 50;
+  // §30/§31 收口：工具调用预算统一来自 budget（budgetFromAgentLimits 派生，不再散落硬编码 50）
   let toolCallCount = 0;
 
   let aiContent = '';
@@ -302,7 +305,7 @@ export async function executeToolLoop(
         // PF-02: 工具调用预算检查 — 超过上限则优雅终止
         toolCallCount++;
         // 整改计划第 5 章（P1）：工具调用预算 —— 统一使用 budget.maxToolCalls（默认 50）
-        const toolBudgetLimit = budget.maxToolCalls > 0 ? budget.maxToolCalls : MAX_TOOL_CALLS_PER_REQUEST;
+        const toolBudgetLimit = budget.maxToolCalls > 0 ? budget.maxToolCalls : 50; // fallback（正常情况下 budget 已含工具调用上限）
         if (toolCallCount > toolBudgetLimit) {
           budgetExceeded = 'tool_calls';
           const budgetMsg = `⚠️ 已达到工具调用上限 (${toolBudgetLimit} 次)，本次请求停止执行。如需继续，请发送新消息。`;
@@ -410,7 +413,7 @@ export async function executeToolLoop(
       }
 
       // PF-02: 若工具调用预算耗尽，跳出外层 while 循环
-      const toolBudgetLimit = budget.maxToolCalls > 0 ? budget.maxToolCalls : MAX_TOOL_CALLS_PER_REQUEST;
+      const toolBudgetLimit = budget.maxToolCalls > 0 ? budget.maxToolCalls : 50; // fallback（正常情况下 budget 已含工具调用上限）
       if (toolCallCount > toolBudgetLimit) {
         budgetExceeded = 'tool_calls';
         break;
