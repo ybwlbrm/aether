@@ -15,24 +15,38 @@ export async function utilityOp(op: string, input?: string, options?: any): Prom
     case 'url-encode': return { success: true, result: encodeURIComponent(input || '') };
     case 'url-decode': return { success: true, result: decodeURIComponent(input || '') };
     case 'timestamp-to-date': {
-      const ts = Number(input) || 0;
-      return { success: true, result: new Date(ts * 1000).toLocaleString('zh-CN') };
+      // P1-6 修复（审计）：同时支持 10 位秒级与 13 位毫秒级时间戳
+      const raw = String(input || '').trim();
+      const ts = Number(raw) || 0;
+      const ms = /^\d{13}$/.test(raw) ? ts : ts * 1000; // 13 位=毫秒，10 位=秒
+      return { success: true, result: new Date(ms).toLocaleString('zh-CN') };
     }
     case 'date-to-timestamp': {
       const ts = Date.parse(input || '') / 1000;
       return { success: true, result: String(Number.isFinite(ts) ? Math.floor(ts) : 0) };
     }
     case 'hex-rgb': {
-      const hex = (input || '').replace('#', '').trim();
-      if (!/^[0-9a-fA-F]{6}$/.test(hex)) throw new Error('请输入 6 位 hex 颜色');
+      // P2-2 修复（审计）：支持 3 位与 6 位 hex（#fff / #ffffff）
+      let hex = (input || '').replace('#', '').trim();
+      if (!/^[0-9a-fA-F]{3}(?:[0-9a-fA-F]{3})?$/.test(hex)) throw new Error('请输入 3 位或 6 位 hex 颜色（如 #fff / #ffffff）');
+      if (hex.length === 3) {
+        hex = hex.split('').map(c => c + c).join('');
+      }
       const r = parseInt(hex.slice(0, 2), 16), g = parseInt(hex.slice(2, 4), 16), b = parseInt(hex.slice(4, 6), 16);
       return { success: true, result: `rgb(${r}, ${g}, ${b})` };
     }
     case 'rgb-hex': {
       const m = (input || '').match(/rgb\s*\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*\)/i);
       if (!m) throw new Error('请输入 rgb(r,g,b) 格式');
+      // P2-1 修复（审计）：RGB 各通道必须 0-255
+      const r = Number(m[1]), g = Number(m[2]), b = Number(m[3]);
+      for (const [name, v] of [['R', r], ['G', g], ['B', b]] as const) {
+        if (!Number.isInteger(v) || v < 0 || v > 255) {
+          throw new Error(`${name} 通道必须在 0-255 之间（收到 ${v}）`);
+        }
+      }
       const toHex = (n: number) => n.toString(16).padStart(2, '0');
-      return { success: true, result: `#${toHex(Number(m[1]))}${toHex(Number(m[2]))}${toHex(Number(m[3]))}`.toUpperCase() };
+      return { success: true, result: `#${toHex(r)}${toHex(g)}${toHex(b)}`.toUpperCase() };
     }
     case 'gbk-utf8': {
       // 输入按二进制字节读取，按 GBK 解码为 UTF-8 文本

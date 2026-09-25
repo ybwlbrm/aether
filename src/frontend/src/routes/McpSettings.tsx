@@ -188,11 +188,11 @@ export function McpSettings() {
             <h3 style={{ fontSize: 16, fontWeight: 600, marginBottom: 16 }}>{editing ? '编辑 MCP 服务器' : '添加 MCP 服务器'}</h3>
             <div className="grid grid-cols-2 gap-4" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
               <div>
-                <label style={{ fontSize: 12, color: 'var(--text-secondary)', marginBottom: 4, display: 'block' }}>名称</label>
+                <label style={{ fontSize: 12, color: 'var(--text-secondary)', marginBottom: 8, display: 'block' }}>名称</label>
                 <input className="input w-full" value={form.name} onChange={e => setForm({ ...form, name: e.target.value })} placeholder="如 nuphus-mcp" />
               </div>
               <div>
-                <label style={{ fontSize: 12, color: 'var(--text-secondary)', marginBottom: 4, display: 'block' }}>类型</label>
+                <label style={{ fontSize: 12, color: 'var(--text-secondary)', marginBottom: 8, display: 'block' }}>类型</label>
                 <select className="input w-full" value={form.type} onChange={e => setForm({ ...form, type: e.target.value as any })}>
                   <option value="local">Local（本地进程）</option>
                   <option value="remote">Remote（HTTP/S）</option>
@@ -201,15 +201,15 @@ export function McpSettings() {
               {form.type === 'local' ? (
                 <>
                   <div className="col-span-2" style={{ gridColumn: 'span 2' }}>
-                    <label style={{ fontSize: 12, color: 'var(--text-secondary)', marginBottom: 4, display: 'block' }}>命令（空格分隔）</label>
+                    <label style={{ fontSize: 12, color: 'var(--text-secondary)', marginBottom: 8, display: 'block' }}>命令（空格分隔）</label>
                     <input className="input w-full" value={form.command} onChange={e => setForm({ ...form, command: e.target.value })} placeholder="node D:/app/mcp-server/index.js" />
                   </div>
-                  <div><label style={{ fontSize: 12, color: 'var(--text-secondary)', marginBottom: 4, display: 'block' }}>工作目录</label>
+                  <div><label style={{ fontSize: 12, color: 'var(--text-secondary)', marginBottom: 8, display: 'block' }}>工作目录</label>
                     <input className="input w-full" value={form.cwd} onChange={e => setForm({ ...form, cwd: e.target.value })} placeholder="可选" /></div>
-                  <div><label style={{ fontSize: 12, color: 'var(--text-secondary)', marginBottom: 4, display: 'block' }}>超时 (ms)</label>
+                  <div><label style={{ fontSize: 12, color: 'var(--text-secondary)', marginBottom: 8, display: 'block' }}>超时 (ms)</label>
                     <input className="input w-full" type="number" value={form.timeout} onChange={e => setForm({ ...form, timeout: Number(e.target.value) })} /></div>
                   <div className="col-span-2" style={{ gridColumn: 'span 2' }}>
-                    <label style={{ fontSize: 12, color: 'var(--text-secondary)', marginBottom: 4, display: 'block' }}>环境变量（每行 KEY=VALUE）</label>
+                    <label style={{ fontSize: 12, color: 'var(--text-secondary)', marginBottom: 8, display: 'block' }}>环境变量（每行 KEY=VALUE）</label>
                     <textarea className="input w-full" rows={3} value={form.environment} onChange={e => setForm({ ...form, environment: e.target.value })} placeholder="KEY=VALUE" /></div>
                   {/* 视觉模型 API 专用配置 */}
                   <div className="col-span-2" style={{ gridColumn: 'span 2', padding: 16, borderRadius: 12, background: 'rgba(139,92,246,0.06)', border: '1px solid rgba(139,92,246,0.2)' }}>
@@ -241,10 +241,10 @@ export function McpSettings() {
               ) : (
                 <>
                   <div className="col-span-2" style={{ gridColumn: 'span 2' }}>
-                    <label style={{ fontSize: 12, color: 'var(--text-secondary)', marginBottom: 4, display: 'block' }}>URL</label>
+                    <label style={{ fontSize: 12, color: 'var(--text-secondary)', marginBottom: 8, display: 'block' }}>URL</label>
                     <input className="input w-full" value={form.url} onChange={e => setForm({ ...form, url: e.target.value })} placeholder="https://example.com/mcp" /></div>
                   <div className="col-span-2" style={{ gridColumn: 'span 2' }}>
-                    <label style={{ fontSize: 12, color: 'var(--text-secondary)', marginBottom: 4, display: 'block' }}>Headers（JSON）</label>
+                    <label style={{ fontSize: 12, color: 'var(--text-secondary)', marginBottom: 8, display: 'block' }}>Headers（JSON）</label>
                     <textarea className="input w-full" rows={3} value={form.headers} onChange={e => setForm({ ...form, headers: e.target.value })} placeholder='{"Authorization": "Bearer xxx"}' /></div>
                 </>
               )}

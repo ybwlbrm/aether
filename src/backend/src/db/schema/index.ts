@@ -112,6 +112,8 @@ export const agentConfigs = sqliteTable('agent_configs', {
   agentId: text('agent_id').notNull().unique(),
   providerId: text('provider_id').notNull(),
   model: text('model').notNull(),
+  /** §27/P0-10 持久化：运行时自定义 Prompt（Prompt Registry 持久层；空 = 未覆盖） */
+  systemPrompt: text('system_prompt'),
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
 });

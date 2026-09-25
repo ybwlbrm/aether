@@ -3,7 +3,6 @@ import type { BackendConfig } from '../../config/index.js';
 import { getProviderByCapability, getProviderById, providerSupportsThinking } from '../../lib/provider.js';
 import { getDb, saveDb } from '../../db/client.js';
 import { conversations, messages, agentConfigs, providers, mcpServers } from '../../db/schema/index.js';
-import { fetchWithRetry } from '../../lib/fetch-retry.js';
 import { eq, sql } from 'drizzle-orm';
 import { randomUUID } from 'node:crypto';
 import { resolve } from 'node:path';
@@ -11,11 +10,10 @@ import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { getActiveMemoriesFormatted, getSettings } from '../../lib/dal.js';
 import { clearReadFileCache } from '../../lib/files.js';
 import { listMcpTools } from '../../lib/mcp-client.js';
-import { AppError, StreamError } from '@pacc/shared';
-import { createEventBus } from '../../lib/event-bus.js';
+import { StreamError } from '@pacc/shared';
 import { buildAllTools, filterToolsByWebSearch } from '../../lib/tool-registry.js';
-import { parseSse, withChunkTimeout, SseStreamError } from '../../lib/sse-parser.js';
-import { translate, buildChatRequestBody, parseToolArgsSafe } from '../../lib/stream-translate.js';
+import { SseStreamError } from '../../lib/sse-parser.js';
+import { parseToolArgsSafe } from '../../lib/stream-translate.js';
 import type { StreamChunk } from '@pacc/shared';
 import { SSE_CHUNK_TIMEOUT_MS, startHeartbeat } from '../../lib/sse-utils.js';
 import { createPendingApproval } from '../../lib/approvals-center.js';
@@ -37,7 +35,7 @@ import { emitV2Event } from '../../lib/event-store-runtime.js';
 // into the core ModelRuntime/ModelRegistry so the bridge runs in production
 // instead of being dead code. Legacy fetch path is untouched (Adapter §2.1).
 import { buildAllRuntimes, buildRuntimeForProvider } from '../../lib/model-runtime-bridge.js';
-import { ModelRegistry } from '../../core/models/index.js';
+import { ModelRegistry, buildModelRuntime } from '../../core/models/index.js';
 // P0-01/P0-02: Run-scoped cancellation registry (replaces conversation-scoped activeRequests)
 import { runCancellationRegistry } from '../../lib/run-cancellation-registry.js';
 // P0-02/P0-04/P0-05: 统一 Run 上下文（单 ID）+ RunLifecycleManager（唯一状态机写入入口）
@@ -264,23 +262,30 @@ export async function handleOrchestrate(
           }
         }
       } else {
-        // 回退到 legacy fetchWithRetry（bridge 未就绪时）
-        const analysisRes = await fetchWithRetry(`${sisyphusEp.baseUrl}/chat/completions`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${sisyphusEp.apiKey}` },
-          body: JSON.stringify({
-            model: sisyphusEp.model,
-            messages: [{ role: 'user', content: analysisPrompt }],
-            max_tokens: 300,
-            temperature: 0,
-            stream: false,
-          }),
+        // Phase 6 收口：legacy fetchWithRetry fallback → 统一 ModelRuntime（RetryPolicy 覆盖全路径）
+        // （bridge 未就绪时用 endpoint 直接构造 ModelRuntime，业务层不再自己写 retry/sleep）
+        const fallbackProviderConfig = {
+          id: 'sisyphus',
+          name: 'sisyphus',
+          type: 'openai',
+          apiKey: sisyphusEp.apiKey,
+          baseUrl: sisyphusEp.baseUrl,
+          defaultModel: sisyphusEp.model,
+          models: [sisyphusEp.model],
+          capabilities: ['text', 'tool_calling'],
+        };
+        const fallbackRuntime = buildModelRuntime(fallbackProviderConfig);
+        const analysisRes = await fallbackRuntime.complete({
+          provider: fallbackProviderConfig.id,
+          model: sisyphusEp.model,
+          messages: [{ role: 'user', content: analysisPrompt }],
+          maxTokens: 300,
+          temperature: 0,
           signal: clientAbort.signal,
-        }, sseSend);
+        });
 
-        if (analysisRes.ok) {
-          const analysisData = await analysisRes.json() as any;
-          const text = (analysisData.choices?.[0]?.message?.content || '').trim();
+        if (analysisRes.content) {
+          const text = analysisRes.content.trim();
           try {
             const parsed = JSON.parse(text);
             if (Array.isArray(parsed)) {
@@ -302,8 +307,7 @@ export async function handleOrchestrate(
             }
           }
         } else {
-          const errText = await analysisRes.text().catch(() => '');
-          console.warn('[Agents] AI 分析请求失败，状态码:', analysisRes.status, '响应:', errText.slice(0, 200), '将回退到关键词路由');
+          console.warn('[Agents] AI 分析请求失败（空响应），将回退到关键词路由');
         }
       }
     } catch (e: unknown) {
@@ -420,7 +424,9 @@ void emitV2Event({ runId: runTaskId, sessionId: convId, taskId: runTaskId, agent
         // 权限级别提示（Level 3 = 超级，可访问整个文件系统）
         const permLevel = agentSettings.permissionLevel ?? 2;
         const permHint = permLevel === 3
-          ? `\n\n## 权限说明\n- 当前为 Level 3（超级）权限，你可以访问整个文件系统的任何路径，无目录限制。\n- 直接使用绝对路径调用 list_files、read_file、write_file 等工具操作任意文件。`
+          // P2-5 修复（审计）：文案与 PathGuard 实际规则一致 —— Level 3 可访问绝大多数路径，
+          // 但系统敏感路径（Windows/System32/.git/.config/AppData 等）仍受保护。
+          ? `\n\n## 权限说明\n- 当前为 Level 3（超级）权限，可访问整个文件系统的绝大多数路径（无目录限制），可直接使用绝对路径操作文件。\n- 注意：系统敏感路径（如 Windows、System32、.git、.config、AppData 等）仍受保护不可访问。`
           : `\n\n## 权限说明\n- 文件操作仅限 ${allowedDirs.join('、')} 目录及其子目录内。`;
         let agentMessages = [
           // §27 修复：统一从 Prompt Registry 读取运行时自定义提示词（前端编辑全路径生效）
@@ -468,6 +474,22 @@ void emitV2Event({ runId: runTaskId, sessionId: convId, taskId: runTaskId, agent
         };
 
         const toolLoopResult = await runAgentToolLoop(toolLoopCtx);
+
+        // §16/§17 收口：流中断不得伪装成功 —— 子 Agent 断流 → 标记 agent.error（非 agent.completed）
+        if (toolLoopResult.interrupted) {
+          // SSE error 事件（旧协议：断流显式上报，前端据此显示"响应流中断"）
+          sseSend('error', JSON.stringify({ message: toolLoopResult.agentReply || 'AI 响应流中断（未收到完整结束标记）' }));
+          const errResult = { agentId: agent.id, name: agent.name, icon: agent.icon, role: agent.role, status: 'error', reply: toolLoopResult.agentReply || '响应流中断' };
+          results[targetIndex] = errResult;
+          sseSend('agent-result', JSON.stringify(errResult));
+          if (body.conversationId) {
+            eventBus.emit(convId, 'agent.error', {
+              taskId: runTaskId, agentId: agent.id, agentType: agentOf(agent.id).agentType,
+              status: 'error', content: errResult.reply,
+            });
+          }
+          return;
+        }
 
         const doneResult = {
           agentId: agent.id,
@@ -606,83 +628,87 @@ ${errorResults.length > 0 ? `\n注意：以下 Agent 执行失败，结果不可
             });
           }
         } catch (e: unknown) {
-          if (e instanceof SseStreamError) {
-            sseSend('error', JSON.stringify({ message: `AI 响应流中断: ${e.message}` }));
+          // 断流错误统一显式上报（SseStreamError=旧解析器 / StreamError=统一 ModelRuntime，
+          // 二者都是"EOF 无 [DONE]"的 STREAM_CLOSED 语义，不得静默吞掉）
+          if (e instanceof SseStreamError || e instanceof StreamError) {
+            sseSend('error', JSON.stringify({ message: `AI 响应流中断: ${e instanceof Error ? e.message : String(e)}` }));
           }
           throw e;
         }
       } else {
-        // 回退到 legacy fetchWithRetry（bridge 未就绪时）
-        const synthRes = await fetchWithRetry(`${sisyphusEp.baseUrl}/chat/completions`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${sisyphusEp.apiKey}` },
-          body: JSON.stringify(buildChatRequestBody({
-            model: sisyphusEp.model,
-            messages: [
-              { role: 'system', content: MANDATORY_COMPLIANCE_PROMPT + '\n\n' + synthPromptText },
-              { role: 'user', content: synthPrompt },
-              // 修复3：汇总阶段也附加用户上传的图片（多模态可见，避免依赖子 Agent 文本转述）
-              ...(hasImages ? body.images!.map(img => ({ role: 'user' as const, content: [{ type: 'image_url', image_url: { url: img } }] })) : []),
-            ],
-            deepThinking: body.deepThinking,
-            reasoningEffort: body.reasoningEffort,
-            supportsThinking: providerSupportsThinking({ baseUrl: sisyphusEp.baseUrl, defaultModel: sisyphusEp.model, models: [sisyphusEp.model] } as never),
-            max_tokens: 2048,
-          })),
+        // Phase 6 收口：legacy fetchWithRetry fallback → 统一 ModelRuntime 流式（RetryPolicy 覆盖全路径）
+        const fallbackProviderConfig = {
+          id: 'sisyphus',
+          name: 'sisyphus',
+          type: 'openai',
+          apiKey: sisyphusEp.apiKey,
+          baseUrl: sisyphusEp.baseUrl,
+          defaultModel: sisyphusEp.model,
+          models: [sisyphusEp.model],
+          capabilities: ['text', 'tool_calling'],
+        };
+        const fallbackRuntime = buildModelRuntime(fallbackProviderConfig);
+        const synthStream = fallbackRuntime.stream({
+          provider: fallbackProviderConfig.id,
+          model: sisyphusEp.model,
+          messages: [
+            { role: 'system', content: MANDATORY_COMPLIANCE_PROMPT + '\n\n' + synthPromptText },
+            { role: 'user', content: synthPrompt },
+            // 修复3：汇总阶段也附加用户上传的图片（多模态可见，避免依赖子 Agent 文本转述）
+            ...(hasImages ? body.images!.map(img => ({ role: 'user' as const, content: [{ type: 'image_url', image_url: { url: img } }] })) : []),
+          ],
+          maxTokens: 2048,
           signal: clientAbort.signal,
-        }, sseSend);
+        });
 
         let synthReasoning = ''; // 汇总阶段 thinking 截获（用于 completion 事件回传）
-        if (synthRes.ok && synthRes.body) {
-          const reader = synthRes.body.getReader();
-          // 最终输出专属事件：agent.output.delta（过程与最终回答分离的关键——前端只在 process 面板展示过程）
-          try {
-            for await (const c of translate(parseSse(withChunkTimeout(reader, SSE_CHUNK_TIMEOUT_MS, clientAbort.signal)))) {
-              switch (c.type) {
-                case 'reasoning-delta': {
-                  synthReasoning += c.text;
-                  sseSend('reasoning', JSON.stringify({ content: c.text }));
-                  if (body.conversationId) {
-                    eventBus.emit(convId, 'agent.reasoning.delta', {
-                      taskId: runTaskId, agentId: 'sisyphus', agentType: 'orchestrator', content: c.text,
-                    });
-                  }
-                  break;
+        try {
+          for await (const c of synthStream) {
+            switch (c.type) {
+              case 'reasoning-delta': {
+                synthReasoning += c.text;
+                sseSend('reasoning', JSON.stringify({ content: c.text }));
+                if (body.conversationId) {
+                  eventBus.emit(convId, 'agent.reasoning.delta', {
+                    taskId: runTaskId, agentId: 'sisyphus', agentType: 'orchestrator', content: c.text,
+                  });
                 }
-                case 'text-delta': {
-                  finalReply += c.text;
-                  sseSend('message', JSON.stringify({ content: c.text }));
-                  if (body.conversationId) {
-                    eventBus.emit(convId, 'agent.output.delta', {
-                      taskId: runTaskId, agentId: 'sisyphus', agentType: 'orchestrator', content: c.text,
-                    });
-                  }
-                  break;
-                }
-                case 'usage': {
-                  totalAgentTokens += c.usage.totalTokens ?? (c.usage.inputTokens + c.usage.outputTokens);
-                  break;
-                }
-                case 'finish': {
-                  if (c.reason.kind === 'error') throw new Error(c.reason.message || '汇总生成失败');
-                  break;
-                }
-                default: break;
+                break;
               }
+              case 'text-delta': {
+                finalReply += c.text;
+                sseSend('message', JSON.stringify({ content: c.text }));
+                if (body.conversationId) {
+                  eventBus.emit(convId, 'agent.output.delta', {
+                    taskId: runTaskId, agentId: 'sisyphus', agentType: 'orchestrator', content: c.text,
+                  });
+                }
+                break;
+              }
+              case 'usage': {
+                totalAgentTokens += c.usage?.totalTokens ?? (c.usage?.inputTokens ?? 0) + (c.usage?.outputTokens ?? 0);
+                break;
+              }
+              case 'finish': {
+                if (c.reason.kind === 'error') throw new Error(c.reason.message || '汇总生成失败');
+                break;
+              }
+              default: break;
             }
-            // 最终回答完成事件（含完整文本；username 前端据此投影最终气泡）
-            if (body.conversationId) {
-              eventBus.emit(convId, 'agent.output.completed', {
-                taskId: runTaskId, agentId: 'sisyphus', agentType: 'orchestrator',
-                status: 'completed', content: finalReply,
-              });
-            }
-          } catch (e: unknown) {
-            if (e instanceof SseStreamError) {
-              sseSend('error', JSON.stringify({ message: `AI 响应流中断: ${e.message}` }));
-            }
-            throw e;
           }
+          // 最终回答完成事件（含完整文本；username 前端据此投影最终气泡）
+          if (body.conversationId) {
+            eventBus.emit(convId, 'agent.output.completed', {
+              taskId: runTaskId, agentId: 'sisyphus', agentType: 'orchestrator',
+              status: 'completed', content: finalReply,
+            });
+          }
+        } catch (e: unknown) {
+          // 断流错误统一显式上报（SseStreamError=旧解析器 / StreamError=统一 ModelRuntime）
+          if (e instanceof SseStreamError || e instanceof StreamError) {
+            sseSend('error', JSON.stringify({ message: `AI 响应流中断: ${e instanceof Error ? e.message : String(e)}` }));
+          }
+          throw e;
         }
       }
     } catch { /* 汇总失败 → P1-37 修复：选最高置信度成功结果，而非 results[0]（可能只是最先完成的 Agent） */

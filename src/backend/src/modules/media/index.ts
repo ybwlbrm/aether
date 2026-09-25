@@ -239,37 +239,47 @@ export function registerMediaRoutes(app: FastifyInstance, config: BackendConfig)
             }
 
             const data = await response.json() as any;
-            // 优先检查直接返回的视频 URL
-            const directUrl = data?.video_url || data?.url || data?.data?.url || data?.output?.url;
-            if (directUrl) {
-              // SEC-009: SSRF 校验 — 验证 AI 返回的 URL 安全性
-              if (!isSafeProviderUrl(directUrl, provider.baseUrl)) {
-                throw new Error('AI 返回的视频 URL 被拒绝：不安全的地址（疑似 SSRF）');
+            // 优先检查直接返回的视频 URL（支持 URL 与 Base64 data: 两种格式）
+            const directRaw = data?.video_url || data?.url || data?.data?.url || data?.output?.url
+              || (typeof data?.b64_json === 'string' ? `data:video/mp4;base64,${data.b64_json}` : '');
+            if (directRaw) {
+              if (directRaw.startsWith('data:')) {
+                // P2-3 修复：支持 data:video/mp4;base64,... 直接返回（此前抛"格式不支持"）
+                const b64 = directRaw.split(',')[1];
+                fileBuffer = Buffer.from(b64, 'base64');
+              } else {
+                // SEC-009: SSRF 校验 — 验证 AI 返回的 URL 安全性
+                if (!isSafeProviderUrl(directRaw, provider.baseUrl)) {
+                  throw new Error('AI 返回的视频 URL 被拒绝：不安全的地址（疑似 SSRF）');
+                }
+                // P1-3 修复：下载携带 Provider Authorization（此前裸 fetch 无鉴权头）
+                const downloadHeaders: Record<string, string> = {};
+                if (provider.apiKey) downloadHeaders['Authorization'] = `Bearer ${provider.apiKey}`;
+                const videoRes = await fetch(directRaw, { headers: downloadHeaders, signal: AbortSignal.timeout(120000) });
+                if (!videoRes.ok) throw new Error(`视频下载失败: ${videoRes.status}`);
+                fileBuffer = Buffer.from(await videoRes.arrayBuffer());
               }
-              // 直接下载
-              const videoRes = await fetch(directUrl, { signal: AbortSignal.timeout(120000) });
-              if (!videoRes.ok) throw new Error(`视频下载失败: ${videoRes.status}`);
-              fileBuffer = Buffer.from(await videoRes.arrayBuffer());
             } else {
               // 视频任务可能返回 task_id，需要轮询结果
               const taskId = data.task_id || data.id || data.data?.id;
               if (taskId) {
                 // 轮询视频结果（最多 5 分钟）
                 let videoUrl: string | null = null;
-                const rootUrl = baseUrl.replace(/\/v1\/?$/, '');
+                // P1-2 修复：轮询路径与创建路径保持一致（不再错误去掉 /v1）——
+                // 创建用 ${baseUrl}/videos，轮询同样用 ${baseUrl}/videos/{taskId}。
                 for (let poll = 0; poll < 60; poll++) {
                   if (request.raw.destroyed) break;
                   await new Promise(r => setTimeout(r, 5000));
                   try {
                     // 通用轮询：先尝试标准格式，再试 Agnes 专用格式
-                    let queryUrl = `${rootUrl}/videos/${encodeURIComponent(taskId)}`;
+                    let queryUrl = `${baseUrl}/videos/${encodeURIComponent(taskId)}`;
                     let pollRes = await fetch(queryUrl, {
                       headers: { 'Authorization': `Bearer ${provider.apiKey}` },
                       signal: AbortSignal.timeout(10000),
                     });
                     if (!pollRes.ok) {
                       // 回退到 Agnes 格式
-                      queryUrl = `${rootUrl}/agnesapi?video_id=${encodeURIComponent(taskId)}&model_name=${encodeURIComponent(body.model || 'agnes-video-v2.0')}`;
+                      queryUrl = `${baseUrl}/agnesapi?video_id=${encodeURIComponent(taskId)}&model_name=${encodeURIComponent(body.model || 'agnes-video-v2.0')}`;
                       pollRes = await fetch(queryUrl, {
                         headers: { 'Authorization': `Bearer ${provider.apiKey}` },
                         signal: AbortSignal.timeout(10000),
@@ -278,7 +288,16 @@ export function registerMediaRoutes(app: FastifyInstance, config: BackendConfig)
                     if (pollRes.ok) {
                       const pollData = await pollRes.json() as any;
                       if (pollData.status === 'completed' || pollData.state === 'completed') {
-                        videoUrl = pollData.video_url || pollData.url || pollData.data?.url || pollData.output?.url;
+                        const pollRaw = pollData.video_url || pollData.url || pollData.data?.url || pollData.output?.url
+                          || (typeof pollData.b64_json === 'string' ? `data:video/mp4;base64,${pollData.b64_json}` : '');
+                        if (pollRaw.startsWith('data:')) {
+                          // P2-3 修复：轮询结果也支持 Base64
+                          const b64 = pollRaw.split(',')[1];
+                          fileBuffer = Buffer.from(b64, 'base64');
+                          videoUrl = pollRaw; // 标记已拿到数据
+                          break;
+                        }
+                        videoUrl = pollRaw || null;
                         // SEC-009: SSRF 校验 — 验证轮询返回的视频 URL 安全性
                         if (videoUrl && !isSafeProviderUrl(videoUrl, provider.baseUrl)) {
                           throw new Error('AI 返回的视频 URL 被拒绝：不安全的地址（疑似 SSRF）');
@@ -291,14 +310,20 @@ export function registerMediaRoutes(app: FastifyInstance, config: BackendConfig)
                   } catch { /* continue polling */ }
                 }
                 if (!videoUrl) throw new Error('视频生成超时，请检查 Provider 是否支持视频生成');
-                // SEC-009: SSRF 校验 — 验证轮询返回的视频 URL 安全性（二次校验，防御深度）
-                if (!isSafeProviderUrl(videoUrl, provider.baseUrl)) {
-                  throw new Error('AI 返回的视频 URL 被拒绝：不安全的地址（疑似 SSRF）');
+                if (fileBuffer) {
+                  // 已通过 Base64 分支拿到数据，无需再下载
+                } else {
+                  // SEC-009: SSRF 校验 — 验证轮询返回的视频 URL 安全性（二次校验，防御深度）
+                  if (!isSafeProviderUrl(videoUrl, provider.baseUrl)) {
+                    throw new Error('AI 返回的视频 URL 被拒绝：不安全的地址（疑似 SSRF）');
+                  }
+                  // P1-3 修复：下载携带 Provider Authorization（此前裸 fetch 无鉴权头）
+                  const downloadHeaders: Record<string, string> = {};
+                  if (provider.apiKey) downloadHeaders['Authorization'] = `Bearer ${provider.apiKey}`;
+                  const videoRes = await fetch(videoUrl, { headers: downloadHeaders, signal: AbortSignal.timeout(120000) });
+                  if (!videoRes.ok) throw new Error(`视频下载失败: ${videoRes.status}`);
+                  fileBuffer = Buffer.from(await videoRes.arrayBuffer());
                 }
-                // 下载视频
-                const videoRes = await fetch(videoUrl, { signal: AbortSignal.timeout(120000) });
-                if (!videoRes.ok) throw new Error(`视频下载失败: ${videoRes.status}`);
-                fileBuffer = Buffer.from(await videoRes.arrayBuffer());
               } else {
                 // 直接返回视频数据（部分 API 直接返回 base64）
                 throw new Error('视频 API 响应格式不支持，请检查 Provider 配置');
@@ -354,11 +379,33 @@ export function registerMediaRoutes(app: FastifyInstance, config: BackendConfig)
       }
 
       if (!fileBuffer) {
-        // 生成 SVG 占位图
+        if (body.type === 'video') {
+          // P0-3 修复（审计）：视频生成失败时绝不把 SVG 假图伪装成 .mp4。
+          // 返回失败态（results 不含该资产 + status=failed），前端不得显示"生成成功"。
+          console.warn(`[Media] 视频生成失败（${apiError || '未配置 API Key'}），跳过伪产物生成`);
+          continue;
+        }
+        // 图片生成失败 → 保留 SVG 占位图（图片可无损展示失败占位，语义正确）
         const placeholderText = apiError
           ? `API 调用失败: ${apiError}`
           : `未配置 API Key (${provider?.name || 'default'})`;
         fileBuffer = svgToBuffer(generatePlaceholderSVG(body.type as 'image' | 'video', placeholderText));
+      }
+
+      // P2-5 修复（审计）：视频输出必须做真实格式验证 —— 防止错误页面/JSON/HTML 被存成 .mp4。
+      // 魔数检查：MP4 = 前 32 字节内出现 'ftyp' 盒（offset 4 或前导 free/mdat 后），
+      // WebM/Matroska = EBML 头 0x1A 0x45 0xDF 0xA3。搜索范围放宽避免误伤合法视频。
+      if (body.type === 'video' && fileBuffer) {
+        const buf = fileBuffer as Buffer;
+        const head = buf.subarray(0, Math.min(64, buf.length)).toString('latin1');
+        const isMp4 = buf.length >= 12 && head.includes('ftyp');
+        const isWebM = buf.length >= 4 && buf[0] === 0x1A && buf[1] === 0x45 && buf[2] === 0xDF && buf[3] === 0xA3;
+        if (!isMp4 && !isWebM) {
+          const preview = buf.toString('utf8', 0, Math.min(200, buf.length));
+          console.warn(`[Media] 视频响应内容不是有效视频（疑似错误页/JSON），已拒绝保存: ${preview.slice(0, 120)}`);
+          apiError = apiError || 'Provider 返回的内容不是有效视频文件';
+          continue;
+        }
       }
 
       writeFileSync(filePath, fileBuffer);
@@ -398,7 +445,9 @@ export function registerMediaRoutes(app: FastifyInstance, config: BackendConfig)
 
     return {
       results,
-      status: apiError ? 'partial' : 'success',
+      // P0-3/Oracle 复审修复：全部失败且无任何成功结果 → status='failed'（非 partial），
+      // 前端据 status !== 'success' 显式报错，不会误显示"生成成功"。
+      status: apiError ? (results.length > 0 ? 'partial' : 'failed') : 'success',
       error: apiError,
     };
   });

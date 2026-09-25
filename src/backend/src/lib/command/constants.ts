@@ -1,11 +1,16 @@
-/** 允许执行的命令白名单（首词精确匹配） */
+/** 允许执行的命令白名单（首词精确匹配）。Level 3（超级）跳过此表；此处为 Level 2（受限）可用命令。 */
 export const ALLOWED_EXEC = new Set([
-  'node', 'npm', 'npx', 'python', 'python3', 'pip', 'tsx', 'curl',
+  'node', 'npm', 'npx', 'python', 'python3', 'pip', 'pip3', 'tsx', 'curl', 'wget',
   'echo', 'cat', 'ls', 'dir', 'pwd', 'cd', 'mkdir', 'cp', 'mv', 'rm',
   'grep', 'find', 'type', 'where', 'date', 'whoami', 'hostname',
   'netstat', 'ping', 'more', 'sort', 'uniq', 'wc', 'head', 'tail',
   'code', 'explorer', 'start',
   'powershell', 'pwsh', 'cmd',
+  // 常用开发/系统工具（审计 P0-1：此前缺失，Level 2 亦应可用）
+  'git', 'git-lfs', 'ffmpeg', 'ffprobe', 'java', 'javac', 'gradle', 'mvn', 'adb',
+  'go', 'gofmt', 'rustc', 'cargo', 'docker', 'kubectl', 'psql', 'sqlite3',
+  'tar', 'zip', 'unzip', '7z', 'xz', 'gzip', 'tree', 'stat', 'du', 'df',
+  'npm-run-all', 'npx', 'node',
 ]);
 
 /**

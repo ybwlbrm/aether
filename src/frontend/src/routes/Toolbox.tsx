@@ -8,6 +8,36 @@ import { ToolboxProcess } from './Toolbox/ToolboxProcess';
 import { convertOptions, categories, catOf } from './Toolbox/constants';
 import { authHeaders } from '../api/client';
 
+/**
+ * P1-6/P1-Oracle 修复（审计）：Base64 判定不再"只看格式+长度%4"，增加：
+ * 1. 严格格式 + 长度 %4==0（含 padding）
+ * 2. 可解码性：atob 必须成功
+ * 3. 可读性启发式：解码结果是可打印文本 → 判定为 Base64（decode）
+ * 4. 二进制兜底：解码结果不可打印但输入含 Base64 特有字符（+ / =）或较长（>=16）→
+ *    也是真 Base64（如图片/压缩包等二进制内容），判定 decode，避免误判为普通文本
+ * 这样"test"（短、无 +/=）→ encode；"iVBORw0KGgo..."（长、含+/）→ decode
+ */
+export function looksLikeBase64(input: string): boolean {
+  const s = (input || '').trim();
+  if (!s) return false;
+  if (!/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(s)) return false;
+  if (s.length % 4 !== 0) return false;
+  let decoded: string;
+  try {
+    decoded = decodeURIComponent(escape(atob(s)));
+  } catch {
+    // 无法解码 → 不是 Base64（是待编码文本）
+    return false;
+  }
+  if (!decoded) return true;
+  // 可打印字符占比 > 70% → 可解码的 Base64 文本
+  const printable = (decoded.match(/[\x20-\x7E\n\r\t]/g) || []).length;
+  if (printable / decoded.length > 0.7) return true;
+  // 解码为二进制（不可打印）但输入具有 Base64 特征 → 也是真 Base64（如图片/压缩）
+  if (s.includes('+') || s.includes('/') || s.endsWith('=') || s.length >= 16) return true;
+  return false;
+}
+
 export function Toolbox() {
   const [selected, setSelected] = useState<ConvertOption | null>(null);
   const [activeCategory, setActiveCategory] = useState('all');
@@ -172,7 +202,7 @@ export function Toolbox() {
             }
           }
         } else if (selected.op === 'base64') {
-          const isB64 = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(encodeInput.trim()) && encodeInput.length % 4 === 0;
+          const isB64 = looksLikeBase64(encodeInput);
           if (isB64) {
             setEncodeOutput(decodeURIComponent(escape(atob(encodeInput.trim()))));
           } else {
@@ -205,8 +235,9 @@ export function Toolbox() {
       // utility: 直接调小工具 API
       if (selected.kind === 'utility') {
         const opMap: Record<string, string> = {
-          base64: /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(utilityInput.trim()) ? 'base64-decode' : 'base64-encode',
-          timestamp: /^\d{10}$/.test(utilityInput.trim()) ? 'timestamp-to-date' : 'date-to-timestamp',
+          base64: looksLikeBase64(utilityInput) ? 'base64-decode' : 'base64-encode',
+          // P1-6 修复（审计）：同时识别 10 位秒级与 13 位毫秒级时间戳
+          timestamp: /^\d{10}$|^\d{13}$/.test(utilityInput.trim()) ? 'timestamp-to-date' : 'date-to-timestamp',
           color: utilityInput.trim().startsWith('#') ? 'hex-rgb' : 'rgb-hex',
         };
         const r = await fetch('/api/toolbox/utility', {
@@ -220,12 +251,26 @@ export function Toolbox() {
         setConverting(false);
         return;
       }
-      const fileData = await Promise.all(files.map(f => new Promise<{ name: string; data: string }>((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onload = () => resolve({ name: f.name, data: reader.result as string });
-        reader.onerror = () => reject(new Error('文件读取失败'));
-        reader.readAsDataURL(f);
-      })));
+      // P1-10 修复（审计 #23）：大文件全部 readAsDataURL + Promise.all 并行读入内存会造成
+      // 内存峰值（Base64 膨胀 +33%）。改为**串行逐个读取**，避免多文件同时驻留内存；
+      // 并对超大文件（>50MB）拒绝，提示改用更小文件。
+      const fileData: Array<{ name: string; data: string }> = [];
+      for (const f of files) {
+        if (f.size > 50 * 1024 * 1024) {
+          clearInterval(intervalRef.current!);
+          setProgress(0);
+          setConverting(false);
+          setError(`文件过大（${(f.size / 1024 / 1024).toFixed(1)}MB）：为避免内存溢出，请使用 50MB 以内的文件`);
+          return;
+        }
+        const item = await new Promise<{ name: string; data: string }>((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () => resolve({ name: f.name, data: reader.result as string });
+          reader.onerror = () => reject(new Error('文件读取失败'));
+          reader.readAsDataURL(f);
+        });
+        fileData.push(item);
+      }
 
       let res: any;
       if (selected.kind === 'convert') {

@@ -1,7 +1,8 @@
 import { useState, useRef, useCallback, useEffect } from 'react';
 import { api } from '../../api/client';
 import { useAutosaveDraft } from '../../hooks/useAutosaveDraft';
-import { requestNotificationPermission, sendNotification } from '../../lib/notifications';
+// P0 通知幂等化：媒体生成终态通知统一经 NotificationCenter（generationId dedupeKey 幂等）
+import { notificationCenter, buildTerminalDedupeKey } from '../../lib/notification-center';
 
 export interface GenFormState {
   type: 'image' | 'video';
@@ -165,6 +166,9 @@ export function useGeneration({
       if (form.model) genParams.model = form.model;
       if (form.type === 'image') genParams.num = form.num;
       if (form.imageData) genParams.image = form.imageData;
+      // P1-1 修复（审计）：图生视频粘贴的图片 URL 必须真正传给后端
+      // （此前只发 imageData 不发 imageUrl，导致 URL 参考图功能"UI 有，实际没接上"）
+      if (form.imageUrl) genParams.image = form.imageUrl;
 
       if (form.type === 'video') {
         try {
@@ -180,16 +184,30 @@ export function useGeneration({
       clearInterval(progressIntervalRef.current!);
       setGenProgressLabel('完成！');
 
-      if (result?.results) {
+      if (result?.results && result.results.length > 0) {
         setGenResults(result.results);
         addToast(`生成成功：${result.results.length} 个文件`, 'SUCCESS');
-        sendNotification(form.type === 'image' ? '图片生成完成' : '视频生成完成', {
+        // P0 通知幂等化：媒体生成终态 → NotificationCenter（generationId dedupeKey 幂等，
+        // 双击/重试/组件重挂载不会重复通知）
+        const generationId = `${genStartTimeRef.current}`;
+        notificationCenter.notifyOnce({
+          id: `media-${generationId}`,
+          type: 'completed',
+          title: form.type === 'image' ? '图片生成完成' : '视频生成完成',
           body: form.prompt.slice(0, 100),
+          createdAt: new Date().toISOString(),
+          dedupeKey: buildTerminalDedupeKey('media', generationId, 'completed'),
         });
         onSuccess?.(result.results);
+      } else if (result?.error || (result?.status && result.status !== 'success')) {
+        // P0-3/Oracle 复审修复：生成失败（无有效结果）时显式报错 ——
+        // 前端不再在"results 为空"时静默视为成功（后端视频失败已不生成伪 MP4）。
+        const errMsg = result?.error || '生成失败（未返回有效结果）';
+        addToast(`生成失败：${errMsg}`, 'ERROR');
+        onError?.(errMsg);
       }
 
-      if (result?.error) {
+      if (result?.error && result?.results && result.results.length > 0) {
         addToast(`部分失败：${result.error}`, 'WARNING');
       }
 

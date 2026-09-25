@@ -106,8 +106,9 @@ export function FileTools({
       {files.length > 0 && (
         <div style={{ marginTop: 16 }}>
           <p style={{ fontSize: 'var(--font-sm)', color: 'var(--text-secondary)', marginBottom: 8 }}>已选择 {files.length} 个文件</p>
+          {/* P2-6 修复（审计）：列表项间距 4px → 8px（--space-2），消除"粘在一起"感 */}
           {files.map((f, i) => (
-            <div key={i} className="flex items-center justify-between py-2 px-3 rounded-lg" style={{ background: 'var(--bg-surface)', marginBottom: 4, borderRadius: 'var(--radius-sm)' }}>
+            <div key={i} className="flex items-center justify-between py-2 px-3 rounded-lg" style={{ background: 'var(--bg-surface)', marginBottom: 8, borderRadius: 'var(--radius-sm)' }}>
               <span style={{ fontSize: 'var(--font-sm)', color: 'var(--text-primary)', maxWidth: '70%', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{f.name}</span>
               <span style={{ fontSize: 'var(--font-xs)', color: 'var(--text-tertiary)' }}>{(f.size / 1024).toFixed(1)} KB</span>
             </div>
@@ -126,7 +127,8 @@ export function FileTools({
       {/* 目标格式（convert / video-extract / youtube-download） */}
       {((selected.kind === 'convert' && files.length > 0) || selected.kind === 'video-extract' || isYoutubeDownload) && (
         <div style={{ marginTop: 16 }}>
-          <label style={{ fontSize: 'var(--font-sm)', color: 'var(--text-secondary)', marginBottom: 8, display: 'block' }}>目标格式{isYoutubeDownload ? '（音频格式自动转 MP3）' : ''}</label>
+          {/* P2-2 修复（审计）：YouTube 实际支持 mp4/webm/mp3/m4a/wav/flac/aac/ogg/opus，文案不再误导为"仅 MP3" */}
+          <label style={{ fontSize: 'var(--font-sm)', color: 'var(--text-secondary)', marginBottom: 8, display: 'block' }}>目标格式{isYoutubeDownload ? '（支持视频 mp4/webm 与音频 mp3/m4a/wav/flac/aac/ogg/opus）' : ''}</label>
           <div className="flex gap-2 flex-wrap">
             {selected.to.map(f => (
               <button key={f} onClick={() => setTargetFormat(f)}

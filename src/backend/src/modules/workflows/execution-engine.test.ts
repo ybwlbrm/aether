@@ -112,4 +112,48 @@ describe('workflows executeWorkflow — §41 受控并行 DAG + §42 条件边�
     assert.ok(executed.includes('yes'), 'passed 边目标应执行');
     assert.ok(!executed.includes('no'), 'failed 边目标不应执行（条件边显式化）');
   });
+
+  it('Workflow 第十八部分：diamond join — D 必须等 B 和 C 全部完成', async () => {
+    const executed: string[] = [];
+    const nodes = [node('a'), node('b'), node('c'), node('d')];
+    const edges = [
+      edge('e1', 'a', 'b'),
+      edge('e2', 'a', 'c'),
+      edge('e3', 'b', 'd'),
+      edge('e4', 'c', 'd'),
+    ];
+    const order: string[] = [];
+    const result = await executeWorkflow(makeOpts(nodes, edges, async (n) => {
+      // 模拟 b/c 慢执行：记录完成顺序，断言 d 在 b 和 c 之后
+      order.push(n.id);
+      await new Promise(r => setTimeout(r, n.id === 'b' ? 20 : n.id === 'c' ? 5 : 0));
+      return { output: `out-${n.id}` };
+    }));
+    assert.equal(result.status, 'completed', 'diamond join 应正常完成');
+    assert.ok(executed.length >= 4 || order.length >= 4, '四个节点都应执行');
+    const idxD = order.indexOf('d');
+    const idxB = order.indexOf('b');
+    const idxC = order.indexOf('c');
+    assert.ok(idxD > idxB && idxD > idxC,
+      `D 必须等 B 和 C 全部完成（依赖 join），实际顺序: ${order.join(' → ')}`);
+  });
+
+  it('Workflow 第十八部分：multi-parent join — A/B 双父，B 未完成 D 不运行', async () => {
+    const executed: string[] = [];
+    const nodes = [node('a'), node('b'), node('d')];
+    const edges = [
+      edge('e1', 'a', 'd'),
+      edge('e2', 'b', 'd'),
+    ];
+    // 模拟 b 执行抛错（节点失败不应导致 d 提前运行后整体仍 completed 的假象）
+    const result = await executeWorkflow(makeOpts(nodes, edges, async (n) => {
+      executed.push(n.id);
+      if (n.id === 'b') throw new Error('b 失败（模拟）');
+      return { output: `out-${n.id}` };
+    }));
+    // b 抛错 → 执行引擎将 b 标记为失败，d 不应提前运行（依赖 b）
+    assert.ok(executed.includes('a'), 'a 应执行');
+    assert.ok(executed.includes('b'), 'b 应执行（随后失败）');
+    assert.ok(!executed.includes('d'), 'b 失败时 d 不应运行（multi-parent join 保护）');
+  });
 });

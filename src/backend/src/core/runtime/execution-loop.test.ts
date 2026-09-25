@@ -189,4 +189,144 @@ describe('core/runtime/execution-loop', () => {
     assert.equal(loop.maxTurns, loopExecutionBudget().maxTurns);
     assert.equal(loop.maxToolCalls, loopExecutionBudget().maxToolCalls);
   });
+
+  // ============ §3.2 Loop 真实语义：verifying/continuing/完成判定 ============
+
+  it('Loop verify: isTaskComplete=false → 继续下一轮（执行→验证→继续→完成）', async () => {
+    // 第一轮无工具但有文本但判定"未完成"；第二轮给工具；第三轮完成
+    const model = mockModel([
+      { content: '我还在分析...', finishReason: 'stop' },
+      { toolCalls: [toolCall('lookup')], finishReason: 'tool_calls' },
+      { content: '最终结论：X', finishReason: 'stop' },
+    ]);
+    const result = await runExecutionLoop(
+      {
+        ...depsFor(model),
+        isTaskComplete: (resp) => resp.content === '最终结论：X',
+      },
+      [],
+      { loop: true },
+    );
+    assert.equal(result.state, 'completed');
+    assert.equal(result.content, '最终结论：X');
+    assert.equal(result.turnsUsed, 3, '第一轮判定未完成 → 应继续到第三轮');
+  });
+
+  it('Loop continuation: isTaskComplete 始终 false → 预算耗尽不伪造成功', async () => {
+    const model = mockModel([{ content: '未完成', finishReason: 'stop' }]);
+    const budget = { ...loopExecutionBudget(), maxTurns: 3, maxToolCalls: 0, maxTimeMs: 0, maxTokens: 0, maxCostCny: 0 };
+    const result = await runExecutionLoop(
+      {
+        ...depsFor(model),
+        isTaskComplete: () => false,
+      },
+      [],
+      { loop: true, budget },
+    );
+    assert.equal(result.state, 'budget_exceeded');
+    assert.equal(result.budgetExceeded, 'turns');
+    assert.ok(result.content.includes('已达到最大轮数'), '未完成且预算耗尽 → finalization 说明停止原因');
+  });
+
+  it('Normal 不因 isTaskComplete 拖延：loop=false 时纯文本立即完成', async () => {
+    const model = mockModel([{ content: '直接答案', finishReason: 'stop' }]);
+    // 即使提供 isTaskComplete=false，Normal 模式也必须立即结束（不无意义继续）
+    const result = await runExecutionLoop(
+      {
+        ...depsFor(model),
+        isTaskComplete: () => false,
+      },
+      [],
+      { loop: false },
+    );
+    assert.equal(result.state, 'completed');
+    assert.equal(result.content, '直接答案');
+    assert.equal(result.turnsUsed, 1);
+  });
+
+  it('Loop timeout: maxTimeMs 预算 → budget_exceeded=duration', async () => {
+    // 让模型调用真实耗时超过 maxTimeMs（同毫秒 elapsedMs=0 无法触发 duration）
+    const slowModel: ModelRuntime = {
+      async complete(): Promise<ModelResponse> {
+        await new Promise(r => setTimeout(r, 15));
+        return { id: 'slow', provider: 'mock', model: 'm', content: '慢响应', finishReason: 'stop' };
+      },
+      async *stream(): AsyncIterable<never> { return; },
+    } as never;
+    const budget = { ...loopExecutionBudget(), maxTurns: 0, maxToolCalls: 0, maxTimeMs: 5, maxTokens: 0, maxCostCny: 0 };
+    const result = await runExecutionLoop(depsFor(slowModel), [], { loop: true, budget });
+    assert.equal(result.state, 'budget_exceeded');
+    assert.equal(result.budgetExceeded, 'duration');
+  });
+
+  // ============ §3.1 Streaming：onChunk 实时转发 + 统一聚合 ============
+
+  it('§3.1 流式路径: onChunk 转发 text-delta/reasoning/tool/usage/finish 且结果一致', async () => {
+    const chunks = [
+      { type: 'block-start' as const, index: 0, blockType: 'text' as const },
+      { type: 'text-delta' as const, index: 0, text: '天气' },
+      { type: 'text-delta' as const, index: 0, text: '晴' },
+      { type: 'usage' as const, usage: { inputTokens: 10, outputTokens: 5 } },
+      { type: 'finish' as const, reason: { kind: 'stop' as const } },
+    ];
+    const streamModel: ModelRuntime = {
+      async complete(): Promise<ModelResponse> { throw new Error('should use stream'); },
+      async *stream(): AsyncIterable<any> {
+        for (const c of chunks) yield c;
+      },
+    } as never;
+    const forwarded: string[] = [];
+    const result = await runExecutionLoop(
+      {
+        ...depsFor(streamModel),
+        onChunk: (c) => forwarded.push(c.type),
+      },
+      [],
+      { loop: false },
+    );
+    assert.equal(result.state, 'completed');
+    assert.equal(result.content, '天气晴');
+    assert.equal(result.usage.cumulativeOutputTokens, 5);
+    assert.deepEqual(forwarded, ['block-start', 'text-delta', 'text-delta', 'usage', 'finish'], 'onChunk 应按序收到全部 chunk');
+  });
+
+  it('§3.1 流式路径: tool-call chunk 聚合为 toolCalls 并继续工具链', async () => {
+    // 每轮调用 stream() 时返回对应轮次的 chunk（跨调用保持轮次状态）
+    const perTurnChunks = [
+      [
+        { type: 'block-start' as const, index: 0, blockType: 'tool-call' as const, id: 'c1', name: 'search' },
+        { type: 'tool-call-delta' as const, index: 0, argumentsDelta: '{"q":' },
+        { type: 'tool-call-delta' as const, index: 0, argumentsDelta: '"x"}' },
+        { type: 'block-end' as const, index: 0, block: { kind: 'tool-call' as const, id: 'c1', name: 'search', arguments: '{"q":"x"}' } },
+        { type: 'finish' as const, reason: { kind: 'tool_calls' as const } },
+      ],
+      [
+        { type: 'block-start' as const, index: 0, blockType: 'text' as const },
+        { type: 'text-delta' as const, index: 0, text: '结果：1 条' },
+        { type: 'finish' as const, reason: { kind: 'stop' as const } },
+      ],
+    ];
+    let callIndex = 0;
+    const streamModel: ModelRuntime = {
+      async complete(): Promise<ModelResponse> { throw new Error('should use stream'); },
+      async *stream(): AsyncIterable<any> {
+        const slice = perTurnChunks[Math.min(callIndex, perTurnChunks.length - 1)];
+        callIndex++;
+        for (const c of slice) yield c;
+      },
+    } as never;
+    const executed: string[] = [];
+    const result = await runExecutionLoop(
+      {
+        ...depsFor(streamModel, async (t) => { executed.push(t.name); return '1 条结果'; }),
+        onChunk: () => {},
+      },
+      [],
+      { loop: false },
+    );
+    assert.equal(result.state, 'completed');
+    assert.equal(result.content, '结果：1 条');
+    assert.deepEqual(executed, ['search'], '流式 tool-call 应聚合为工具调用并执行');
+    assert.equal(result.toolCallCount, 1);
+  });
 });

@@ -473,8 +473,12 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
       if (finished) return;
     }
 
-    // If stream ended without [DONE]/finish_reason, emit finish once
-    yield* finishOnce();
+    // §17 修复：EOF 未收到 [DONE] 且无 finish_reason → 流被截断（STREAM_CLOSED 语义）。
+    // 不得补发 stop（否则断流会被伪装成正常完成）；streamToComplete 据此判定
+    // finishReason='error' + interrupted=true，上层（execution-loop / orchestration）
+    // 将断流标记为 failed/interrupted 而非 completed。
+    // 正常流已在 handleData / mapWireChunk 中通过 [DONE] 或 finish_reason 触发 finishOnce。
+    return;
   }
 
   /**

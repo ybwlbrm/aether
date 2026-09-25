@@ -130,8 +130,14 @@ export function registerSettingsRoutes(app: FastifyInstance, config: BackendConf
       }
       settings.defaultDir = resolved;
     }
+    // P1-5 修复（审计）：permissionLevel 支持 1/2/3（此前把 3 压成 2，与 /api/permissions 双标准）。
+    // 校验合法范围 1-3，非法值拒绝（不静默改写用户意图）。
     if (body.permissionLevel !== undefined) {
-      settings.permissionLevel = body.permissionLevel === 1 ? 1 : 2;
+      const lvl = Number(body.permissionLevel);
+      if (![1, 2, 3].includes(lvl)) {
+        return reply.code(400).send({ error: 'permissionLevel 必须是 1、2 或 3' });
+      }
+      settings.permissionLevel = lvl;
     }
     await saveSettings(settings);
     return { success: true, allowedDirs: settings.allowedDirs, defaultDir: settings.defaultDir };

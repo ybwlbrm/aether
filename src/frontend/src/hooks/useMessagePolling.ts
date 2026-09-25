@@ -91,7 +91,6 @@ export function useMessagePolling(options: UseMessagePollingOptions): UseMessage
     onPollError,
   } = options;
 
-  const notifiedRef = useRef(false);
   // 整改计划第 3 章：显式状态机 + AbortController（组件卸载/会话切换/重试时取消旧请求）
   const [pollStatus, setPollStatus] = useState<PollStatus>('idle');
   const [pollErrorInfo, setPollErrorInfo] = useState<PollErrorInfo | null>(null);
@@ -102,6 +101,25 @@ export function useMessagePolling(options: UseMessagePollingOptions): UseMessage
   const pollErrorCountRef = useRef(0);
   // retry 触发主轮询 effect 重启（interval 重建）
   const [restartKey, setRestartKey] = useState(0);
+  // P0 通知幂等化：状态边沿检测 —— polling 只负责"状态同步"（generating 变化时回调 onSendingUpdate），
+  // 不承担"事件生成"（通知必须来自 Run terminal event → NotificationCenter）。
+  // 删除原 notifiedRef false→true→false→true 逻辑（持续状态 generating=false 不能推导"刚完成"）。
+  const previousGeneratingRef = useRef<boolean | null>(null);
+
+  /**
+   * 状态边沿检测：仅在 generating 值发生变化时回调 onSendingUpdate。
+   * 返回 [当前值, 是否发生 true→false 边沿]。通知由上层终态事件处理，
+   * 此处仅同步 sending 状态，绝不发通知。
+   */
+  const syncGeneratingStatus = useCallback((generating: boolean): { generating: boolean; edgeDown: boolean } => {
+    const previous = previousGeneratingRef.current;
+    previousGeneratingRef.current = generating;
+    const edgeDown = previous === true && generating === false;
+    if (previous !== generating) {
+      onSendingUpdate?.(generating);
+    }
+    return { generating, edgeDown };
+  }, [onSendingUpdate]);
 
   const poll = useCallback(async () => {
     const convId = conversationId;
@@ -179,7 +197,9 @@ export function useMessagePolling(options: UseMessagePollingOptions): UseMessage
         onTokenTotalUpdate?.(conv.tokenTotal);
       }
 
-      // Check generation status
+      // P0 通知幂等化：polling 仅同步 sending 状态（边沿检测），
+      // 绝不在此产生通知 —— 通知唯一来源是 Run terminal event → NotificationCenter。
+      // 持续状态 generating=false 只是"状态"，不是"事件"；轮询 100 次 completed 也不会重复通知。
       try {
         const statusRes = await fetch(`/api/conversations/${convId}/status`, {
           headers: { 'X-Requested-With': 'XMLHttpRequest' },
@@ -190,15 +210,8 @@ export function useMessagePolling(options: UseMessagePollingOptions): UseMessage
         if (reqId !== msgPollReqIdRef.current) return;
         if (currentConvRef.current !== convId) return;
 
-        if (!status.generating && !notifiedRef.current && document.hidden) {
-          notifiedRef.current = true;
-          onSendingUpdate?.(false);
-        } else if (!status.generating) {
-          onSendingUpdate?.(false);
-          notifiedRef.current = false; // 重置，下次生成完成时再通知
-        } else if (status.generating) {
-          onSendingUpdate?.(true);
-        }
+        const generating = Boolean(status.generating);
+        syncGeneratingStatus(generating);
       } catch { /* ignore */ }
 
       // Update live reasoning from latest message
@@ -308,7 +321,6 @@ export function useMessagePolling(options: UseMessagePollingOptions): UseMessage
     if (!conversationId || !enabled) return;
 
     let cancelled = false;
-    notifiedRef.current = false;
 
     const runPoll = async () => {
       if (cancelled) return;

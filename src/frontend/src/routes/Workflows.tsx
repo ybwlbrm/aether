@@ -1,10 +1,28 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { api } from '../api/client';
 import { confirm as confirmDialog } from '../components/ui/confirm-dialog';
-import type { Workflow, FlowNode, FlowEdge, RunRecord, NodeType } from './Workflows/types';
+import type { Workflow, FlowNode, FlowEdge, RunRecord, NodeType } from './Workflows/types'
 import { WorkflowList } from './Workflows/WorkflowList';
 import { WorkflowEditor } from './Workflows/WorkflowEditor';
 import { NODE_META, PALETTE, uid } from './Workflows/constants';
+// P0 通知幂等化：工作流终态通知统一经 NotificationCenter（dedupeKey 幂等）
+import { notificationCenter, buildTerminalDedupeKey } from '../lib/notification-center';
+
+/** P0 通知幂等化：工作流终态 → NotificationCenter（唯一入口，直接/编辑器/API 运行同一语义） */
+function notifyWorkflowTerminal(runId: string | undefined, wfName: string, status: string, error?: string): void {
+  const id = runId ?? `${wfName}:${Date.now()}`;
+  const terminalType = status === 'completed' ? 'completed' : 'failed';
+  notificationCenter.notifyOnce({
+    id: `wf-term-${id}`,
+    type: terminalType,
+    title: status === 'completed' ? '✅ 工作流运行完成' : '❌ 工作流运行失败',
+    body: status === 'completed' ? `${wfName} 执行成功` : (error || '未知错误'),
+    createdAt: new Date().toISOString(),
+    dedupeKey: buildTerminalDedupeKey('workflow', id, terminalType),
+    priority: terminalType === 'completed' ? 'low' : 'high',
+    always: terminalType === 'failed', // 失败即使页面聚焦也提示
+  });
+}
 
 export function Workflows() {
   const [workflows, setWorkflows] = useState<Workflow[]>([]);
@@ -222,12 +240,8 @@ export function Workflows() {
       const result = await api.runWorkflow(editing.id, {});
       setRunResult(result);
       loadRuns(editing.id);
-      // 运行完成通知
-      if (result.status === 'completed') {
-        try { const { sendNotification } = await import('../lib/notifications'); sendNotification('✅ 工作流运行完成', { body: `${editing.name} - ${Object.keys(result.results || {}).length} 个节点执行成功` }); } catch { /* ignore */ }
-      } else if (result.status === 'failed') {
-        try { const { sendNotification } = await import('../lib/notifications'); sendNotification('❌ 工作流运行失败', { body: result.error || '未知错误', always: true }); } catch { /* ignore */ }
-      }
+      // P0 通知幂等化：工作流终态 → NotificationCenter（唯一入口，dedupeKey 幂等）
+      notifyWorkflowTerminal(result.runId, editing.name, result.status, result.error);
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : '执行失败');
     } finally {
@@ -258,11 +272,8 @@ export function Workflows() {
         onRunDirect={async (wf) => {
           try {
             const result = await api.runWorkflow(wf.id, {});
-            if (result.status === 'completed') {
-              try { const { sendNotification } = await import('../lib/notifications'); sendNotification('✅ 工作流运行完成', { body: `${wf.name} 执行成功` }); } catch { /* ignore */ }
-            } else {
-              alert(`${wf.name} 运行${result.status === 'failed' ? '失败' : '完成'}: ${result.error || ''}`);
-            }
+            // P0 通知幂等化：工作流终态 → NotificationCenter（唯一入口，dedupeKey 幂等）
+            notifyWorkflowTerminal(result.runId, wf.name, result.status, result.error);
           } catch (err: unknown) {
             alert('运行失败: ' + (err instanceof Error ? err.message : String(err)));
           }

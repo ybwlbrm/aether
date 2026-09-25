@@ -5,7 +5,8 @@ import { PageHeader } from '../components/PageHeader';
 import { confirm as confirmDialog } from '../components/ui/confirm-dialog';
 import { PromptTemplateSelector } from '../components/PromptTemplateSelector';
 import { useActivityStore } from '../store/activityStore';
-import { requestNotificationPermission, sendNotification } from '../lib/notifications';
+// P0 通知幂等化：统一经 NotificationCenter（权限收敛到 App Shell/Layout，业务页不再散调）
+import { notificationCenter } from '../lib/notification-center';
 import { api } from '../api/client';
 import { fetchEvents } from '../api/streamClient';
 import { Streamdown } from 'streamdown';
@@ -272,7 +273,7 @@ export function Chat() {
     initDoneRef.current = true;
 
     loadConversations();
-    requestNotificationPermission();
+    // P0 通知幂等化：权限请求统一由 App Shell/Layout 发起（单一入口），业务页不再散调
 
     api.getProviders().then((data: any[]) => {
       const list = Array.isArray(data) ? data : [];
@@ -310,7 +311,16 @@ export function Chat() {
           const res = await api.sisyphusReply({ prompt: q, conversationId: conv.id, providerId: dp.id, model });
           if (res?.conversationId) {
             await loadMessages(res.conversationId);
-            sendNotification('AI 回复完成', { body: String(res.reply || res.content || q).slice(0, 100) });
+            // P0 通知幂等化：URL 直达 Sisyphus 回复 → 统一终态通知（dedupeKey 幂等）
+            notificationCenter.notifyOnce({
+              id: `sisyphus-url-${res.conversationId}`,
+              type: 'completed',
+              title: 'AI 回复完成',
+              body: String(res.reply || res.content || q).slice(0, 100),
+              conversationId: res.conversationId,
+              createdAt: new Date().toISOString(),
+              dedupeKey: `run:${res.conversationId}:completed`,
+            });
           }
         } catch (e: unknown) {
           setMessages(prev => [...prev, { id: `temp-ai-error-${Date.now()}`, role: 'assistant', content: '❌ AI 回复失败: ' + (e instanceof Error ? e.message : String(e)), createdAt: new Date().toISOString() }]);
@@ -658,17 +668,18 @@ export function Chat() {
                       </button>
                       <span className="mx-1" style={{ color: 'var(--border-primary)' }}>|</span>
                       <button onClick={() => {
-                        const newLevel = permissionLevel === 1 ? 2 : 1;
+                        // P1-4 修复（审计）：Chat 权限切换支持 Level 3（1→2→3→1），与 CodingHome 一致
+                        const newLevel = permissionLevel >= 3 ? 1 : permissionLevel + 1;
                         api.setPermissions(newLevel).then(() => setPermissionLevel(newLevel)).catch(() => {});
                       }}
                         className="flex items-center gap-1 px-3 py-1 rounded-full transition-all"
                         style={{
                           fontSize: '11px', fontWeight: 600,
-                          color: permissionLevel === 2 ? 'var(--color-success)' : '#f59e0b',
-                          background: permissionLevel === 2 ? 'rgba(52,211,153,0.12)' : 'rgba(245,158,11,0.12)',
-                          border: `1px solid ${permissionLevel === 2 ? 'rgba(52,211,153,0.3)' : 'rgba(245,158,11,0.3)'}`,
+                          color: permissionLevel === 3 ? 'var(--color-danger)' : permissionLevel === 2 ? 'var(--color-success)' : '#f59e0b',
+                          background: permissionLevel === 3 ? 'rgba(239,68,68,0.12)' : permissionLevel === 2 ? 'rgba(52,211,153,0.12)' : 'rgba(245,158,11,0.12)',
+                          border: `1px solid ${permissionLevel === 3 ? 'rgba(239,68,68,0.3)' : permissionLevel === 2 ? 'rgba(52,211,153,0.3)' : 'rgba(245,158,11,0.3)'}`,
                         }}>
-                        {permissionLevel === 2 ? '🔓 Level 2' : '🔒 Level 1'}
+                        {permissionLevel === 3 ? '🔴 Level 3' : permissionLevel === 2 ? '🔓 Level 2' : '🔒 Level 1'}
                       </button>
                       </div>
                    </div>

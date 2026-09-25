@@ -27,6 +27,13 @@ import { buildRuntimeForProvider } from '../../lib/model-runtime-bridge.js';
 import { RunLifecycleManager } from '../../core/runtime/index.js';
 // §30/§31 收口：预算统一来源 —— AgentDefinition limits → budgetFromAgentLimits（Remote 命令不再散落 30 硬编码）
 import { budgetFromAgentLimits } from '../../core/runtime/execution-loop.js';
+// 统一 ExecutionLoop：唯一生产循环控制器（Mobile Remote 命令不再自建 while 循环）
+import { runExecutionLoop, type ExecutionLoopDeps, type ExecutionBudget } from '../../core/runtime/execution-loop.js';
+// 15.1 收口：Mobile Stop 必须真正取消 Run —— Remote Run 注册到 RunCancellationRegistry，
+// /api/runs/:runId/cancel → abort AbortController → execution-loop 收到 cancelled
+import { runCancellationRegistry } from '../../lib/run-cancellation-registry.js';
+import type { ModelRequest } from '../../core/models/index.js';
+import type { StreamChunk } from '@pacc/shared';
 
 // ============================================================
 // 处理远程命令（手机端发来的指令）
@@ -450,6 +457,15 @@ export async function processRemoteCommand(
     // 创建 EventBus 用于发射活动事件（桌面端 ActivityStream 消费）
     const eventBus = createEventBus(getDb(), undefined, () => saveDb(backendConfig));
     runTaskId = randomUUID();
+    // 15.1 收口：Mobile Stop 必须真正取消 Run —— 注册 run-scoped AbortController，
+    // 使 /api/runs/:runId/cancel（runCancellationRegistry.cancel）能中止执行流。
+    const runAbortController = new AbortController();
+    try {
+      runCancellationRegistry.register(runTaskId, convId, runAbortController);
+    } catch (e: unknown) {
+      console.warn('[Sync] 取消注册失败（不影响执行）:',
+        e instanceof Error ? e.message : String(e));
+    }
     // P0-04 收口：Remote Command 进入统一 Run 架构 —— runs 行 + created→running 状态机
     try {
       runLifecycle = new RunLifecycleManager(db);
@@ -477,283 +493,216 @@ export async function processRemoteCommand(
       content: content.slice(0, 200),
     });
 
-    while (maxTurns-- > 0) {
-      // §18 修复：移除手写 for-attempt Model Retry —— ModelRuntime 内部
-      // (provider-adapter → RetryPolicy) 已统一处理 429/5xx/网络错误 + abortable sleep。
-      // Mobile 不再自己实现模型层重试；此处仅保留请求构造与流读取容错。
-      let stream: AsyncIterable<any> | null = null;
-      try {
-        // 纵深防御：显式校验 baseUrl（虽受控但防配置篡改/注入）
-        const request = {
-          provider: provider.type,
-          model,
-          messages: apiMessages,
-          tools: activeTools,
-          toolChoice: 'auto',
-          ...(remoteDeep ? { thinking: true } : {}),
-          signal: AbortSignal.timeout(300000), // 5分钟超时
-        };
-        stream = runtime.stream(request);
-      } catch (e: unknown) {
-        // stream() 同步抛出（配置错误等）→ 直接失败，不做静默重试
-        lastErr = e instanceof Error ? e.message : String(e);
-        console.error('[Sync] AI 流初始化失败:', lastErr);
-        await syncAssistantError(sb, cfg, convId, commandId, command.user_id, content, `❌ ${lastErr}`, now, backendConfig);
-        return;
-      }
+    // ========== 统一 ExecutionLoop 依赖注入（第十五部分：Mobile Remote 命令收口到同一执行链） ==========
+    // 流式 chunk 副作用：eventBus + Supabase 节流同步（保留 Mobile 双端同步语义）
+    // 节流 flush 队列（Q4 修复保留）：250ms 累积 + 串行 flush，防海外 Supabase 高 RTT 下请求堆积
+    let throttleTimer: ReturnType<typeof setTimeout> | null = null;
+    let pendingContent = '';
+    let pendingReasoning = '';
+    let flushChain: Promise<void> = Promise.resolve();
+    let streamUsage = { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 };
 
-      if (!stream) {
-        await syncAssistantError(sb, cfg, convId, commandId, command.user_id, content, `❌ AI 调用失败: ${lastErr || '未知错误'}`, now, backendConfig);
-        return;
-      }
-
-      // ========== 流式读取 ModelRuntime StreamChunk（零节流，每 chunk 立即同步双端） ==========
-      let accumulatedContent = '';
-      let reasoningContent = '';
-      let currentToolCalls: any[] = [];
-      let streamUsage = { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 };
-      // 流式消息用最终消息 ID —— 全程 upsert 同一条，不产生重复
-      streamMsgId = randomUUID();
-
-      // 立即在本地 DB 插入空消息占位（电脑端可实时看到内容增长）
-      try {
-        db.insert(messages).values({
-          id: streamMsgId,
-          conversationId: convId,
-          role: 'assistant',
-          content: '',
-          createdAt: new Date().toISOString(),
-        }).run();
-      } catch { /* 已存在则忽略 */ }
-
-      // Q4 修复：流式同步改为 250ms 累积节流 + 串行 flush 队列。
-      // 原 15ms 节流在海外 Supabase（RTT ~570ms）下每 chunk 都发起一次并发 upsert，
-      // 连接/请求排队导致手机端收到的字符更新严重滞后（"回复卡顿"的元凶）。
-      // 新实现：累积 250ms 内的增量一次性写入；flushSync 串行执行防堆积。
-      let throttleTimer: ReturnType<typeof setTimeout> | null = null;
-      let pendingContent = '';
-      let pendingReasoning = '';
-      let flushChain: Promise<void> = Promise.resolve();
-      const flushSync = () => {
-        throttleTimer = null;
-        const c = pendingContent;
-        const r = pendingReasoning;
-        pendingContent = '';
-        pendingReasoning = '';
-        // 串行入队：前一次网络往返完成后再写下一次，避免请求堆积
-        flushChain = flushChain.then(async () => {
-          try {
-            db.update(messages).set({ content: c, toolResults: r ? JSON.stringify({ reasoning: r }) : null }).where(eq(messages.id, streamMsgId)).run();
-          } catch (writeErr: unknown) {
-            console.warn('[Sync] 流式消息本地落库失败（不阻塞但需关注）:', writeErr instanceof Error ? writeErr.message : String(writeErr));
-          }
-          if (c !== '' || r !== '') {
-            try {
-              await sb.from('messages_sync').upsert({
-                id: streamMsgId,
-                conversation_id: convId,
-                device_id: cfg.deviceId,
-                user_id: command.user_id ?? null,
-                role: 'assistant',
-                content: c || '...',
-                tool_results: r ? JSON.stringify({ reasoning: r }) : null,
-                created_at: now,
-              }, { onConflict: 'id' });
-            } catch { /* Supabase 写失败不阻塞 */ }
-          }
-        }).catch(() => undefined);
-      };
-      const scheduleSync = (content: string, reasoning: string) => {
-        pendingContent = content;
-        if (reasoning) pendingReasoning = reasoning;
-        if (!throttleTimer) {
-          throttleTimer = setTimeout(flushSync, 250);
-        }
-      };
-
-      // 流式过程：每收到 StreamChunk 立即调度
-      // §16 修复：流中断（已产生部分输出）不得静默当作正常完成 ——
-      // 标记 streamInterrupted，收尾时体现 interrupted/failed 语义。
-      try {
-        for await (const chunk of stream) {
-          switch (chunk.type) {
-            case 'reasoning-delta': {
-              reasoningContent += chunk.text;
-              // 必须落库（persist 默认 true），桌面端 fetchEvents 才能读到 → ActivityStream 渲染 thinking
-              eventBus.emit(convId, 'agent.reasoning.delta', {
-                taskId: runTaskId, agentId: 'main', agentType: 'conversation', content: chunk.text,
-              });
-              // 思考之后还有正文，等待正文 chunk 一起同步（避免频繁写）
-              if (!accumulatedContent) {
-                scheduleSync(accumulatedContent, reasoningContent);
-              }
-              break;
-            }
-            case 'text-delta': {
-              accumulatedContent += chunk.text;
-              // 必须落库，桌面端 ActivityStream 才能渲染消息增量
-              eventBus.emit(convId, 'agent.message.delta', {
-                taskId: runTaskId, agentId: 'main', agentType: 'conversation', content: chunk.text,
-              });
-              scheduleSync(accumulatedContent, reasoningContent);
-              break;
-            }
-            case 'block-end': {
-              if (chunk.block?.kind === 'tool-call') {
-                currentToolCalls.push({ id: chunk.block.id, function: { name: chunk.block.name, arguments: chunk.block.arguments }, index: currentToolCalls.length });
-              }
-              break;
-            }
-            case 'usage': {
-              streamUsage.prompt_tokens += chunk.usage?.inputTokens ?? 0;
-              streamUsage.completion_tokens += chunk.usage?.outputTokens ?? 0;
-              streamUsage.total_tokens += chunk.usage?.totalTokens ?? ((chunk.usage?.inputTokens ?? 0) + (chunk.usage?.outputTokens ?? 0));
-              break;
-            }
-            default: break;
-          }
-        }
-      } catch (e: unknown) {
-        // StreamError / 流中断：sync 上下文不炸整体流程，但必须标记 interrupted
-        // §16 修复：已产生部分输出时不得伪装成正常完成（禁止静默重放整条请求）
-        streamInterrupted = true;
-        if (e instanceof Error) console.warn(`[Sync] AI 流式解析中断: ${e.message}`);
-      }
-
-      // 流结束，确保最后内容落盘（清除定时器，等待排队的 flush 完成）
-      if (throttleTimer) { clearTimeout(throttleTimer); throttleTimer = null; }
-      if (pendingContent || pendingReasoning) {
-        flushSync();
-      }
-      await flushChain.catch(() => undefined);
-
-      // 更新 token 用量
-      if (streamUsage.total_tokens > 0) {
-        usageTotal.prompt_tokens += streamUsage.prompt_tokens;
-        usageTotal.completion_tokens += streamUsage.completion_tokens;
-        usageTotal.total_tokens += streamUsage.total_tokens;
-      }
-
-      // 处理工具调用或最终回复
-      if (currentToolCalls.length > 0) {
-        // 有工具调用
-        const assistantMsg: any = {
-          role: 'assistant',
-          content: accumulatedContent || null,
-          tool_calls: currentToolCalls.map((tc: any) => ({
-            id: tc.id,
-            type: 'function',
-            function: { name: tc.function.name, arguments: tc.function.arguments },
-          })),
-        };
-        apiMessages.push(assistantMsg);
-
-        // 保存工具调用消息到本地 + Supabase — 复用 streamMsgId 避免与占位行重复
-        const toolCallMsgId = streamMsgId; // 复用占位 ID，不创建新行
-        db.update(messages).set({
-          content: accumulatedContent || JSON.stringify(currentToolCalls.map(tc => tc.function?.name)),
-          toolCalls: JSON.stringify(currentToolCalls.map(tc => ({
-            id: tc.id, type: 'function',
-            function: { name: tc.function?.name, arguments: tc.function?.arguments || '{}' },
-          }))),
-        }).where(eq(messages.id, toolCallMsgId)).run();
+    const flushSync = () => {
+      throttleTimer = null;
+      const c = pendingContent;
+      const r = pendingReasoning;
+      pendingContent = '';
+      pendingReasoning = '';
+      flushChain = flushChain.then(async () => {
         try {
-          await sb.from('messages_sync').upsert({
-            id: toolCallMsgId,
-            conversation_id: convId,
-            device_id: cfg.deviceId,
-            user_id: command.user_id ?? null,
-            role: 'assistant',
-            content: accumulatedContent || JSON.stringify(currentToolCalls.map(tc => tc.function?.name)),
-            tool_calls: JSON.stringify(currentToolCalls.map(tc => ({
-              id: tc.id, type: 'function',
-              function: { name: tc.function?.name, arguments: tc.function?.arguments || '{}' },
-            }))),
-            tool_results: reasoningContent ? JSON.stringify({ reasoning: reasoningContent }) : null,
-            created_at: new Date().toISOString(),
-          }, { onConflict: 'id' });
-        } catch { /* 单条失败不阻塞 */ }
-
-        // 执行每个工具
-        for (const tc of currentToolCalls) {
-          const funcName = tc.function?.name || '';
-          let args: any = {};
-          try { args = JSON.parse(tc.function?.arguments || '{}'); } catch { /* ignore */ }
-          // 发射 tool.started 事件（必须落库，桌面端 ActivityStream 显示工具调用）
-          eventBus.emit(convId, 'tool.started', {
-            taskId: runTaskId, agentId: 'main', agentType: 'conversation',
-            status: 'started', tool: buildToolPayload(funcName, args),
-          });
-          const mcpTool = mcpTools.find(t => t.name === funcName);
-          let result: string;
-          if (mcpTool) {
-            try {
-              result = await callMcpTool(mcpTool.serverName, funcName.slice(mcpTool.serverName.length + 1), args, getMcpServers, permissionLevel);
-            } catch (e: unknown) {
-              result = `MCP 工具调用失败: ${e instanceof Error ? e.message : String(e)}`;
-            }
-          } else {
-            try {
-              if (funcName === 'execute_command') {
-                result = await executeCommand(args.command, args.workdir, args.timeout, allowedDirs, permissionLevel, defaultDir);
-                addCommandHistory({ command: args.command || '', output: result, duration: 0, success: !result.startsWith('错误:'), source: 'agent' });
-              } else if (funcName === 'grep') {
-                result = executeGrep(args.pattern, args.path, args.include, args.maxResults, allowedDirs, permissionLevel, defaultDir);
-              } else if (funcName === 'glob') {
-                result = executeGlob(args.pattern, args.path, allowedDirs, permissionLevel, defaultDir);
-              } else if (funcName === 'web_search') {
-                result = await executeWebSearch(args.query, args.maxResults);
-              } else if (funcName === 'web_fetch') {
-                result = await executeWebFetch(args.url, args.format, allowedDirs, permissionLevel, defaultDir);
-              } else if (funcName === 'lsp_diagnostics') {
-                result = await executeLspDiagnostics(args.filePath, allowedDirs, permissionLevel, defaultDir);
-              } else if (funcName === 'run_tests') {
-                result = await executeRunTests(args.command, args.path, args.timeout, allowedDirs, permissionLevel, defaultDir);
-              } else if (funcName === 'code_review') {
-                result = executeCodeReview(args.filePath, args.code, args.language, allowedDirs, permissionLevel, defaultDir);
-              } else {
-                result = await executeFileTool(funcName, args, allowedDirs, defaultDir, permissionLevel);
-              }
-            } catch (e: unknown) {
-              result = `工具执行失败: ${e instanceof Error ? e.message : String(e)}`;
-            }
-          }
-          // 记录最近一次工具结果，用于去重（覆盖 MCP 和文件工具）
-          lastToolResult = result;
-          const toolMsgId = randomUUID();
-          db.insert(messages).values({
-            id: toolMsgId,
-            conversationId: convId,
-            role: 'tool',
-            content: result,
-            toolCalls: JSON.stringify({ id: tc.id, type: 'function', function: { name: funcName, arguments: args } }),
-            createdAt: new Date().toISOString(),
-          }).run();
+          db.update(messages).set({ content: c, toolResults: r ? JSON.stringify({ reasoning: r }) : null }).where(eq(messages.id, streamMsgId)).run();
+        } catch (writeErr: unknown) {
+          console.warn('[Sync] 流式消息本地落库失败（不阻塞但需关注）:', writeErr instanceof Error ? writeErr.message : String(writeErr));
+        }
+        if (c !== '' || r !== '') {
           try {
             await sb.from('messages_sync').upsert({
-              id: toolMsgId,
+              id: streamMsgId,
               conversation_id: convId,
               device_id: cfg.deviceId,
               user_id: command.user_id ?? null,
-              role: 'tool',
-              content: result.slice(0, 3000), // 完整同步到手机端，可展开查看
-              tool_calls: JSON.stringify({ id: tc.id, type: 'function', function: { name: funcName, arguments: args } }),
-              created_at: new Date().toISOString(),
+              role: 'assistant',
+              content: c || '...',
+              tool_results: r ? JSON.stringify({ reasoning: r }) : null,
+              created_at: now,
             }, { onConflict: 'id' });
-          } catch { /* 单条失败不阻塞 */ }
-          apiMessages.push({ role: 'tool', tool_call_id: tc.id, content: result.slice(0, 2000) });
-          // 发射 tool.completed 事件（必须落库，桌面端 ActivityStream 显示工具完成）
-          eventBus.emit(convId, 'tool.completed', {
-            taskId: runTaskId, agentId: 'main', agentType: 'conversation',
-            status: 'completed', tool: buildToolPayload(funcName, args, result),
-          });
+          } catch { /* Supabase 写失败不阻塞 */ }
         }
-      } else {
-        // 无工具调用，最终文本回复
-        aiContentFinal = accumulatedContent || '';
-        break;
+      }).catch(() => undefined);
+    };
+    const scheduleSync = (content: string, reasoning: string) => {
+      pendingContent = content;
+      if (reasoning) pendingReasoning = reasoning;
+      if (!throttleTimer) {
+        throttleTimer = setTimeout(flushSync, 250);
       }
+    };
+
+    // 流式消息用最终消息 ID —— 全程 upsert 同一条，不产生重复
+    streamMsgId = randomUUID();
+    // 立即在本地 DB 插入空消息占位（电脑端可实时看到内容增长）
+    try {
+      db.insert(messages).values({
+        id: streamMsgId,
+        conversationId: convId,
+        role: 'assistant',
+        content: '',
+        createdAt: new Date().toISOString(),
+      }).run();
+    } catch { /* 已存在则忽略 */ }
+
+    // 流式累积（供 onChunk 副作用转发 + 节流同步）
+    let accumulatedContentForStream = '';
+    let reasoningContentForStream = '';
+
+    // 统一 ExecutionLoop（唯一生产循环控制器；Mobile 不再自建 while 循环）
+    const deps: ExecutionLoopDeps = {
+      model: runtime,
+      hasTools: activeTools.length > 0,
+      buildRequest: (msgs, _turn) => ({
+        provider: provider.type,
+        model,
+        messages: msgs,
+        tools: activeTools,
+        ...(remoteDeep ? { thinking: true } : {}),
+        signal: AbortSignal.timeout(300000), // 5分钟超时
+      } as ModelRequest),
+      executeTool: async (tool) => {
+        // 工具执行副作用（MCP/文件/命令等 + Supabase 同步 + eventBus）
+        const funcName = tool.name;
+        let args: any = {};
+        try { args = JSON.parse(tool.arguments || '{}'); } catch { /* ignore */ }
+        eventBus.emit(convId, 'tool.started', {
+          taskId: runTaskId, agentId: 'main', agentType: 'conversation',
+          status: 'started', tool: buildToolPayload(funcName, args),
+        });
+        const mcpTool = mcpTools.find(t => t.name === funcName);
+        let result: string;
+        if (mcpTool) {
+          try {
+            result = await callMcpTool(mcpTool.serverName, funcName.slice(mcpTool.serverName.length + 1), args, getMcpServers, permissionLevel);
+          } catch (e: unknown) {
+            result = `MCP 工具调用失败: ${e instanceof Error ? e.message : String(e)}`;
+          }
+        } else {
+          try {
+            if (funcName === 'execute_command') {
+              result = await executeCommand(args.command, args.workdir, args.timeout, allowedDirs, permissionLevel, defaultDir);
+              addCommandHistory({ command: args.command || '', output: result, duration: 0, success: !result.startsWith('错误:'), source: 'agent' });
+            } else if (funcName === 'grep') {
+              result = executeGrep(args.pattern, args.path, args.include, args.maxResults, allowedDirs, permissionLevel, defaultDir);
+            } else if (funcName === 'glob') {
+              result = executeGlob(args.pattern, args.path, allowedDirs, permissionLevel, defaultDir);
+            } else if (funcName === 'web_search') {
+              result = await executeWebSearch(args.query, args.maxResults);
+            } else if (funcName === 'web_fetch') {
+              result = await executeWebFetch(args.url, args.format, allowedDirs, permissionLevel, defaultDir);
+            } else if (funcName === 'lsp_diagnostics') {
+              result = await executeLspDiagnostics(args.filePath, allowedDirs, permissionLevel, defaultDir);
+            } else if (funcName === 'run_tests') {
+              result = await executeRunTests(args.command, args.path, args.timeout, allowedDirs, permissionLevel, defaultDir);
+            } else if (funcName === 'code_review') {
+              result = executeCodeReview(args.filePath, args.code, args.language, allowedDirs, permissionLevel, defaultDir);
+            } else {
+              result = await executeFileTool(funcName, args, allowedDirs, defaultDir, permissionLevel);
+            }
+          } catch (e: unknown) {
+            result = `工具执行失败: ${e instanceof Error ? e.message : String(e)}`;
+          }
+        }
+        // 记录最近一次工具结果，用于去重（覆盖 MCP 和文件工具）
+        lastToolResult = result;
+        const toolMsgId = randomUUID();
+        db.insert(messages).values({
+          id: toolMsgId,
+          conversationId: convId,
+          role: 'tool',
+          content: result,
+          toolCalls: JSON.stringify({ id: tool.id, type: 'function', function: { name: funcName, arguments: args } }),
+          createdAt: new Date().toISOString(),
+        }).run();
+        try {
+          await sb.from('messages_sync').upsert({
+            id: toolMsgId,
+            conversation_id: convId,
+            device_id: cfg.deviceId,
+            user_id: command.user_id ?? null,
+            role: 'tool',
+            content: result.slice(0, 3000),
+            tool_calls: JSON.stringify({ id: tool.id, type: 'function', function: { name: funcName, arguments: args } }),
+            created_at: new Date().toISOString(),
+          }, { onConflict: 'id' });
+        } catch { /* 单条失败不阻塞 */ }
+        eventBus.emit(convId, 'tool.completed', {
+          taskId: runTaskId, agentId: 'main', agentType: 'conversation',
+          status: 'completed', tool: buildToolPayload(funcName, args, result),
+        });
+        return result.slice(0, 2000);
+      },
+      // 流式 chunk 副作用：eventBus + Supabase 节流同步（§16 流中断由 execution-loop interrupted 标记承载）
+      onChunk: (chunk: StreamChunk) => {
+        switch (chunk.type) {
+          case 'reasoning-delta': {
+            if (!accumulatedContentForStream) {
+              scheduleSync(accumulatedContentForStream, chunk.text);
+            }
+            break;
+          }
+          case 'text-delta': {
+            accumulatedContentForStream += chunk.text;
+            eventBus.emit(convId, 'agent.message.delta', {
+              taskId: runTaskId, agentId: 'main', agentType: 'conversation', content: chunk.text,
+            });
+            scheduleSync(accumulatedContentForStream, reasoningContentForStream);
+            break;
+          }
+          case 'usage': {
+            streamUsage.prompt_tokens += chunk.usage?.inputTokens ?? 0;
+            streamUsage.completion_tokens += chunk.usage?.outputTokens ?? 0;
+            streamUsage.total_tokens += chunk.usage?.totalTokens ?? ((chunk.usage?.inputTokens ?? 0) + (chunk.usage?.outputTokens ?? 0));
+            break;
+          }
+          default: break;
+        }
+      },
+      // 完成判定：缺省有文本即完成（与 Normal 一致）
+      isTaskComplete: (resp) => resp.content.trim() !== '',
+    };
+
+    // 统一 ExecutionLoop 执行（第十五部分：Mobile 与 Desktop 共用同一执行链）
+    const executionBudget: ExecutionBudget = {
+      maxTurns: unifiedBudget.maxTurns,
+      maxToolCalls: unifiedBudget.maxToolCalls,
+      maxTimeMs: unifiedBudget.maxTimeMs,
+      maxTokens: unifiedBudget.maxTokens,
+      maxCostCny: unifiedBudget.maxCostCny,
+    };
+    const loopResult = await runExecutionLoop(deps, apiMessages, {
+      loop: !!remoteLoop,
+      budget: executionBudget,
+      // 15.1 收口：run-scoped AbortController（Mobile Stop 真取消）+ 5min 超时兜底
+      signal: AbortSignal.any([runAbortController.signal, AbortSignal.timeout(300000)]),
+    });
+
+    // 流结束，确保最后内容落盘（清除定时器，等待排队的 flush 完成）
+    if (throttleTimer) { clearTimeout(throttleTimer); throttleTimer = null; }
+    if (pendingContent || pendingReasoning) {
+      flushSync();
     }
+    await flushChain.catch(() => undefined);
+
+    // 统一结果映射：内容 / 用量 / 中断标记
+    aiContentFinal = loopResult.content;
+    usageTotal = {
+      prompt_tokens: loopResult.usage.cumulativeInputTokens,
+      completion_tokens: loopResult.usage.cumulativeOutputTokens,
+      total_tokens: loopResult.usage.cumulativeTotalTokens,
+    };
+    if (loopResult.interrupted) {
+      streamInterrupted = true;
+    }
+    // 工具调用数（供收尾/去重使用）
+    const remoteToolCallCount = loopResult.toolCallCount;
 
     // maxTurns 耗尽兜底
     if (!aiContentFinal) {
@@ -843,8 +792,28 @@ export async function processRemoteCommand(
     // 持久化本地数据库
     saveDb(backendConfig);
 
-    // 发射 task.completed / task.failed 事件（桌面端 ActivityStream 显示任务终态）
-    if (streamInterrupted) {
+    // 15.1 收口：run 终态后从取消注册表释放（不泄漏 AbortController）
+    try { runCancellationRegistry.unregister(runTaskId); } catch { /* ignore */ }
+
+    // 发射 task.completed / task.failed / task.cancelled 事件（桌面端 ActivityStream 显示任务终态）
+    // 15.1 收口：Mobile Stop 真取消 → runExecutionLoop state='cancelled' → 终态 cancelled（非伪造完成）
+    const loopCancelled = loopResult.state === 'cancelled' || runAbortController.signal.aborted;
+    if (loopCancelled) {
+      // 命令标记 cancelled（15.1：UI 不再是"本地改 cancelled"，而是后端真实终止后的终态）
+      try {
+        await sb.from('remote_commands').update({
+          status: 'cancelled',
+          conversation_id: convId,
+          result_summary: (aiContentFinal || '用户已停止任务').slice(0, 200),
+          error: 'cancelled by user (remote stop)',
+          processed_at: new Date().toISOString(),
+        }).eq('id', commandId);
+      } catch { /* 标记失败不阻塞 */ }
+      eventBus.emit(convId, 'task.failed', {
+        taskId: runTaskId, agentId: 'main', agentType: 'conversation',
+        status: 'cancelled', content: '已停止', endReason: 'aborted',
+      });
+    } else if (streamInterrupted) {
       eventBus.emit(convId, 'task.failed', {
         taskId: runTaskId, agentId: 'main', agentType: 'conversation',
         status: 'interrupted', content: '流式输出中断', endReason: 'interrupted',
@@ -856,11 +825,19 @@ export async function processRemoteCommand(
       });
     }
     // P0-05 收口：Remote Command Run 终态统一经 RunLifecycleManager
+    // 15.1 收口：真取消（loopCancelled）→ cancel 终态；流中断 → fail；否则 complete
     try {
-      runLifecycle?.transition(runTaskId, streamInterrupted ? 'fail' : 'complete', {
-        endReason: streamInterrupted ? 'interrupted' : 'completed',
-        totalTokens: usageTotal.total_tokens || 0,
-      });
+      if (loopCancelled) {
+        runLifecycle?.transition(runTaskId, 'cancel', {
+          endReason: 'aborted',
+          totalTokens: usageTotal.total_tokens || 0,
+        });
+      } else {
+        runLifecycle?.transition(runTaskId, streamInterrupted ? 'fail' : 'complete', {
+          endReason: streamInterrupted ? 'interrupted' : 'completed',
+          totalTokens: usageTotal.total_tokens || 0,
+        });
+      }
     } catch (err) {
       console.warn('[Sync] run 终态写入失败（不阻塞）:',
         err instanceof Error ? err.message : String(err));

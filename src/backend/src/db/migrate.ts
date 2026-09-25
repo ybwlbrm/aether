@@ -520,6 +520,18 @@ export async function runMigrations(config: BackendConfig): Promise<void> {
     db.run(`INSERT INTO schema_version (version, applied_at) VALUES (15, ?)`, [new Date().toISOString()]);
   }
 
+  // 版本 16 (§27/P0-10 持久化): agent_configs 表新增 system_prompt 列 —
+  // Prompt Registry 持久层（Backend restart 后自定义 Prompt 不丢失）
+  if (currentVersion < 16) {
+    const cfgCols = db.exec('PRAGMA table_info(agent_configs)');
+    const hasSp = cfgCols.length > 0
+      && cfgCols[0].values.some((row: unknown[]) => row[1] === 'system_prompt');
+    if (!hasSp) {
+      db.run("ALTER TABLE agent_configs ADD COLUMN system_prompt TEXT");
+    }
+    db.run(`INSERT INTO schema_version (version, applied_at) VALUES (16, ?)`, [new Date().toISOString()]);
+  }
+
   // 整改计划第 7 章（P1）：所有迁移成功 → 提交单事务
   db.run('COMMIT');
   // 恢复迁移前的 FK 开关（SQLite 事务内不可修改，故在此恢复）

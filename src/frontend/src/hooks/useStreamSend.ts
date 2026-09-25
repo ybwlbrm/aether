@@ -2,8 +2,49 @@ import { useState, useRef, useCallback, useEffect } from 'react';
 import { api } from '../api/client';
 import { streamConversation, streamOrchestrate, type StreamEvent } from '../api/streamClient';
 import { confirm as confirmDialog } from '../components/ui/confirm-dialog';
-import { sendNotification } from '../lib/notifications';
+// P0 通知幂等化：统一经 NotificationCenter（终态事件驱动 + dedupeKey），禁止旁路无条件通知
+import { notificationCenter, buildTerminalDedupeKey, type NotificationTerminalType } from '../lib/notification-center';
 import { useActivityStore } from '../store/activityStore';
+
+/**
+ * P0 通知幂等化：Run 终态事件 → NotificationCenter。
+ * 仅接受 run.completed/failed/cancelled/interrupted 等真实终态事件，
+ * 用 taskId(=runId) + 终态构建唯一 dedupeKey，SSE/Polling/Replay 重复到达只通知一次。
+ * 禁止用"流结束/EOF/generating=false"推导完成。
+ */
+export const TERMINAL_EVENT_MAP: Record<string, NotificationTerminalType> = {
+  'run.completed': 'completed',
+  'run.failed': 'failed',
+  'run.cancelled': 'cancelled',
+  'run.interrupted': 'interrupted',
+  'task.failed': 'failed',
+};
+
+export function notifyFromTerminalEvent(ev: { eventType: string; taskId: string; content?: string; endReason?: string }): void {
+  const terminalType = TERMINAL_EVENT_MAP[ev.eventType];
+  if (!terminalType) return;
+  const runId = ev.taskId;
+  if (!runId) return;
+  const title = terminalType === 'completed' ? 'AI 回复完成'
+    : terminalType === 'failed' ? 'AI 回复失败'
+    : terminalType === 'cancelled' ? 'AI 回复已取消'
+    : 'AI 回复已中断';
+  // 流中断/预算耗尽/超时等异常终态 → 不得当"完成"通知
+  const body = ev.content ? ev.content.slice(0, 100) : undefined;
+  notificationCenter.notifyOnce({
+    id: `term-${runId}-${terminalType}`,
+    type: terminalType,
+    title,
+    body,
+    runId,
+    taskId: runId,
+    sourceEventId: undefined,
+    createdAt: new Date().toISOString(),
+    dedupeKey: buildTerminalDedupeKey('run', runId, terminalType),
+    priority: terminalType === 'completed' ? 'low' : 'high',
+    always: terminalType !== 'completed', // 失败/取消/中断即使页面聚焦也提示
+  });
+}
 
 export interface Attachment {
   name: string;
@@ -204,6 +245,9 @@ export function useStreamSend(options: StreamSendOptions): UseStreamSendReturn {
                   const ev = event.ev;
                   useActivityStore.getState().appendEvent(sendConvId, ev);
 
+                  // P0 通知幂等化：Run 终态事件 → NotificationCenter（唯一通知入口）
+                  notifyFromTerminalEvent(ev);
+
                   // ask-user approval
                   if (ev.eventType === 'task.ask-confirm' && ev.metadata?.approvalId) {
                     const apId = String(ev.metadata.approvalId);
@@ -274,7 +318,8 @@ export function useStreamSend(options: StreamSendOptions): UseStreamSendReturn {
         if (rafPendingRef.current) flushUI();
         if (currentConvRef.current !== sendConvId) return;
 
-        sendNotification('AI 回复完成', { body: accumulatedContentRef.current.slice(0, 100) });
+        // P0 通知幂等化：完成通知不再由"流结束"触发（stream EOF 不是终态事件），
+        // 统一由 envelope 分支的 notifyFromTerminalEvent(run.* 终态事件) 驱动。
         onMessagesUpdate(prev => [
           ...prev.filter(m => m.id !== 'temp-ai-streaming' && !m.id.startsWith('temp-user-')),
           tempUserMsg,
@@ -298,6 +343,9 @@ export function useStreamSend(options: StreamSendOptions): UseStreamSendReturn {
                 case 'envelope': {
                   const ev = event.ev;
                   useActivityStore.getState().appendEvent(sendConvId, ev);
+
+                  // P0 通知幂等化：Run 终态事件 → NotificationCenter（唯一通知入口）
+                  notifyFromTerminalEvent(ev);
 
                   if (ev.eventType === 'task.ask-confirm' && ev.metadata?.approvalId) {
                     const apId = String(ev.metadata.approvalId);
@@ -384,7 +432,8 @@ export function useStreamSend(options: StreamSendOptions): UseStreamSendReturn {
         if (rafPendingRef.current) flushUI();
         if (currentConvRef.current !== sendConvId) return;
 
-        sendNotification('AI 回复完成', { body: accumulatedContentRef.current.slice(0, 100) });
+        // P0 通知幂等化：完成通知不再由"流结束"触发（stream EOF 不是终态事件），
+        // 统一由 envelope 分支的 notifyFromTerminalEvent(run.* 终态事件) 驱动。
         onMessagesUpdate(prev => [
           ...prev.filter(m => m.id !== 'temp-ai-streaming' && !m.id.startsWith('temp-user-')),
           tempUserMsg,

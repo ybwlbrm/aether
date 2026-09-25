@@ -338,4 +338,63 @@ describe('EventStore - SqliteEventStore', () => {
     await spyStore.append(makeRunCreatedEvent('r1', 1));
     assert.equal(calls, 3);
   });
+
+  // ============ 第十部分：packed 行 → 逻辑事件语义（count/get/latest 统一） ============
+
+  it('packed row: count 以逻辑事件计数（物理 1 行 = N 个逻辑事件）', async () => {
+    // 5 个 packable 子事件打包进 1 个物理行
+    const chunks = Array.from({ length: 5 }, (_, i) => ({
+      eventId: `packed-evt-${i + 1}`,
+      seq: i + 1,
+      type: 'agent.message.delta' as const,
+      content: `chunk-${i + 1}`,
+      timestamp: TS,
+    }));
+    await store.appendPacked('r1', chunks, 'agent.message.delta');
+    // 物理行 1 行，但逻辑事件 5 个
+    assert.equal(await store.count('r1'), 5, 'count 必须按逻辑事件（展开 packed 后）计数');
+  });
+
+  it('packed row: get(eventId) 可命中 packed 行内的子事件', async () => {
+    const chunks = [
+      { eventId: 'packed-inner-1', seq: 1, type: 'agent.message.delta' as const, content: 'a', timestamp: TS },
+      { eventId: 'packed-inner-2', seq: 2, type: 'agent.message.delta' as const, content: 'b', timestamp: TS },
+    ];
+    await store.appendPacked('r1', chunks, 'agent.message.delta');
+    const got = await store.get('r1', 'packed-inner-2');
+    assert.ok(got, 'get 应命中 packed 行内的逻辑子事件');
+    assert.equal(got!.eventId, 'packed-inner-2');
+    assert.equal(got!.seq, 2);
+  });
+
+  it('packed row: latest 返回逻辑 seq 最大的子事件（而非物理行最后 payload）', async () => {
+    // 先 append 一个独立事件 seq=10，再 appendPacked（物理 seq 覆盖到 8）
+    await store.append(makeRunCreatedEvent('r1', 10));
+    const chunks = [
+      { eventId: 'packed-l-1', seq: 11, type: 'agent.message.delta' as const, content: 'x', timestamp: TS },
+      { eventId: 'packed-l-2', seq: 12, type: 'agent.message.delta' as const, content: 'y', timestamp: TS },
+    ];
+    await store.appendPacked('r1', chunks, 'agent.message.delta');
+    const latest = await store.latest('r1');
+    assert.ok(latest, 'latest 应返回逻辑最大 seq 事件');
+    assert.equal(latest!.seq, 12);
+    assert.equal(latest!.eventId, 'packed-l-2');
+  });
+
+  it('packed row + 普通行混合：list/listAfter 均按逻辑事件展开', async () => {
+    await store.append(makeRunCreatedEvent('r1', 1));
+    const chunks = [
+      { eventId: 'mixed-2', seq: 2, type: 'agent.message.delta' as const, content: 'a', timestamp: TS },
+      { eventId: 'mixed-3', seq: 3, type: 'agent.message.delta' as const, content: 'b', timestamp: TS },
+    ];
+    await store.appendPacked('r1', chunks, 'agent.message.delta');
+    await store.append(makeRunStartedEvent('r1', 4));
+
+    const all = await store.list('r1');
+    assert.equal(all.length, 4, 'list 应展开 packed 返回全部 4 个逻辑事件');
+    assert.deepEqual(all.map((e) => e.seq), [1, 2, 3, 4]);
+
+    const after2 = await store.listAfter('r1', 2);
+    assert.deepEqual(after2.map((e) => e.seq), [3, 4], 'listAfter 按逻辑 seq 过滤');
+  });
 });

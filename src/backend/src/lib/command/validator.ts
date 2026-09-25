@@ -12,7 +12,12 @@ export function truncateOutput(text: string, maxChars: number = 50000): string {
 /**
  * 工作目录解析：
  *  - 显式指定时，绝对路径直接用；相对路径基于 defaultDir（或进程 cwd）解析
- *  - 未指定时依次回退：allowedDirs[0] → defaultDir → 进程 cwd
+ *  - 未指定时依次回退：defaultDir → allowedDirs[0] → 进程 cwd
+ *
+ * P0-2 修复（审计）：defaultDir 是用户在 UI 中显式设置的"默认工作目录"，
+ * 应优先于 allowedDirs[0]（仅是"允许访问的目录列表"的首项，不一定是用户想要的
+ * 默认工作目录）。defaultDir 保存时已被 settings.ts 校验必须存在于 allowedDirs，
+ * 因此 defaultDir 优先不会破坏路径安全。
  */
 export function resolveWorkdir(workdir: string | undefined, allowedDirs: string[] | undefined, defaultDir: string | undefined): string {
   const raw = (workdir || '').trim();
@@ -20,8 +25,8 @@ export function resolveWorkdir(workdir: string | undefined, allowedDirs: string[
     if (isAbsolute(raw)) return resolve(raw);
     return resolve(defaultDir || process.cwd(), raw);
   }
-  if (allowedDirs && allowedDirs.length > 0) return resolve(allowedDirs[0]);
   if (defaultDir) return resolve(defaultDir);
+  if (allowedDirs && allowedDirs.length > 0) return resolve(allowedDirs[0]);
   return process.cwd();
 }
 

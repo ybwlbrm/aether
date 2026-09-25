@@ -20,6 +20,7 @@
  */
 
 import type { ModelRequest, ModelResponse, ModelRuntime } from '../models/model-runtime.js';
+import { streamToComplete } from '../models/model-runtime.js';
 import type { StreamChunk } from '@pacc/shared';
 
 // ============================================================
@@ -36,6 +37,32 @@ export type CompletionState =
   | 'failed'
   | 'cancelled'
   | 'budget_exceeded';
+
+/**
+ * §3.1 流式路径辅助：遍历 model.stream()，逐 chunk 实时转发给调用方（SSE 输出），
+ * 同时用 streamToComplete 聚合出完整 ModelResponse —— 进入统一 Loop 不丢失实时输出。
+ */
+export async function completeFromStream(
+  model: ModelRuntime,
+  request: ModelRequest,
+  onChunk: (chunk: StreamChunk) => void,
+): Promise<ModelResponse> {
+  const chunks: StreamChunk[] = [];
+  for await (const chunk of model.stream(request)) {
+    chunks.push(chunk);
+    try { onChunk(chunk); } catch { /* 转发失败不阻塞聚合 */ }
+  }
+  // 将收集到的 chunk 数组转为 AsyncIterable（streamToComplete 需要异步迭代）
+  const asyncIterable: AsyncIterable<StreamChunk> = {
+    [Symbol.asyncIterator]: async function* () {
+      for (const c of chunks) yield c;
+    },
+  };
+  return streamToComplete(asyncIterable, {
+    provider: request.provider,
+    model: request.model,
+  });
+}
 
 // ============================================================
 // Execution Budget（P0-04：统一预算来源，由 AgentDefinition/RunPolicy 提供）
@@ -163,6 +190,8 @@ export interface ExecutionLoopResult {
 export interface ExecutionTool {
   name: string;
   arguments: string;
+  /** 工具调用 ID（tool_call_id，用于将 tool result 关联回模型请求） */
+  id?: string;
 }
 
 export interface ExecutionLoopDeps {
@@ -176,6 +205,20 @@ export interface ExecutionLoopDeps {
   hasTools: boolean;
   /** 事件回调（可选，供 Activity/SSE） */
   onEvent?: (type: string, payload: Record<string, unknown>) => void;
+  /**
+   * §3.1 流式 chunk 转发（可选）：提供后，Loop 内部优先使用 model.stream() 而非 complete()，
+   * 把 text-delta/reasoning-delta/tool-call/usage 等实时 chunk 转发给调用方（SSE 实时输出），
+   * 同时内部仍按统一语义聚合出 ModelResponse 驱动完成判断 —— 进入统一 Loop 不丢失实时输出。
+   */
+  onChunk?: (chunk: StreamChunk) => void;
+  /**
+   * §3.2 Loop 完成判定钩子（可选）：仅 Loop 模式生效。模型返回"无工具调用"的纯文本后，
+   * 调用方用此钩子判断"任务是否真的完成"（而非"有文本就算完成"）。
+   * - 返回 true → completed
+   * - 返回 false → verifying/continuing，继续下一轮（预算内），实现"执行→验证→继续→完成"
+   * 缺省：content 非空即视为完成（与 Normal 一致，保持兼容）。
+   */
+  isTaskComplete?: (response: ModelResponse, messages: Array<Record<string, unknown>>) => boolean;
 }
 
 // ============================================================
@@ -259,7 +302,11 @@ export async function runExecutionLoop(
       const request = deps.buildRequest(messages, turnsUsed);
       let response: ModelResponse;
       try {
-        response = await deps.model.complete(request);
+        // §3.1 流式路径：deps.onChunk 提供时优先 stream()，实时转发 chunk 且内部聚合出
+        // 完整 ModelResponse（统一完成判断）。未提供 onChunk 时回退 complete()（保持兼容）。
+        response = deps.onChunk
+          ? await completeFromStream(deps.model, request, deps.onChunk)
+          : await deps.model.complete(request);
       } catch (e: unknown) {
         // AbortError → cancelled；其余 → failed
         if (opts.signal?.aborted) {
@@ -282,6 +329,16 @@ export async function runExecutionLoop(
         content = response.content;
         reasoningContent = response.reasoningContent ?? '';
         emit('execution.interrupted', { turn: turnsUsed, partialContent: content });
+        break;
+      }
+
+      // §3.2 时长预算复核：模型调用可能跨越长时间，完成后复核执行时长
+      // （P0-05：每次 Model 调用前/后都检查预算；超时必须在任何完成判定之前拦截）
+      const postModelExceeded = checkBudget();
+      if (postModelExceeded !== 'none') {
+        budgetExceeded = postModelExceeded;
+        state = 'budget_exceeded';
+        emit('execution.budget_exceeded', { reason: postModelExceeded, turnsUsed, toolCallCount, elapsedMs: Date.now() - startedAt });
         break;
       }
 
@@ -329,7 +386,28 @@ export async function runExecutionLoop(
         continue;
       }
 
-      // 无工具调用 → 最终文本回答
+      // 无工具调用 → 最终文本回答。
+      // §3.2 Loop 真实语义：Loop 模式进入 verifying —— 用 isTaskComplete 判断"任务是否真的完成"，
+      // 而非"有文本就算完成"；未完成 → continuing 继续下一轮（预算内），直到完成/停止/预算耗尽。
+      if (opts.loop) {
+        state = 'verifying';
+        emit('execution.verifying', { turn: turnsUsed, contentLength: response.content.length });
+        const taskComplete = deps.isTaskComplete
+          ? deps.isTaskComplete(response, messages)
+          : response.content.trim() !== ''; // 缺省：有文本即完成（兼容 Normal 语义）
+        if (taskComplete) {
+          content = response.content;
+          state = 'completed';
+          emit('execution.completed', { turn: turnsUsed, contentLength: content.length });
+          break;
+        }
+        // 任务未完成 → 继续（模型/上层可注入更多指令或工具结果到 messages）
+        state = 'continuing';
+        emit('execution.continuing', { turn: turnsUsed, reason: 'task_incomplete' });
+        continue;
+      }
+
+      // Normal（loop=false）：完成必要工具链后得到最终答案 → 立即结束（不无意义继续）
       content = response.content;
       state = 'completed';
       emit('execution.completed', { turn: turnsUsed, contentLength: content.length });

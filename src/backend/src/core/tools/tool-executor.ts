@@ -140,47 +140,21 @@ export class ToolExecutor {
       }, durationMs);
     }
 
-    // P0-06 收口：PolicyEngine 唯一裁决（deny → 拒绝；approval → 审批；allow → 执行）
-    const policyDecision = this.#evaluatePolicyEngine(toolName, context);
-    if (policyDecision === 'deny') {
-      const durationMs = Date.now() - startTime;
-      return errorResult(toolName, {
-        message: `Tool '${toolName}' is denied by policy`,
-        code: 'TOOL_DENIED',
-      }, durationMs);
-    }
-    if (policyDecision === 'approval') {
-      const durationMs = Date.now() - startTime;
-      // P0-11: 优先使用注入的 requestApproval 回调（返回真实 apr-xxxx ID）
-      if (this.#requestApproval) {
-        const argsSummary = JSON.stringify(input).slice(0, 120);
-        const { id, promise } = this.#requestApproval({
-          toolName,
-          argsSummary,
-          context,
-        });
-        void promise;
-        return pendingApprovalResult(toolName, id, durationMs);
-      }
-      // 兼容模式：未注入回调时使用旧行为
-      const approvalId = `${toolName}:${Date.now()}`;
-      return pendingApprovalResult(toolName, approvalId, durationMs);
-    }
-
-    // 已批准标记（P0-08：审批通过后的二次执行直接放行，不再走 legacy ToolPolicy）
-    // 整改计划第 5 章：只信任受控字段 internalApproved —— 外部通过 metadata 注入
-    // approvedByUser 一律忽略（禁止 metadata 任意赋权；多 Agent handoff 共享同一审批链）。
+    // P1-8 修复（审计）：审批通过后的二次执行（internalApproved=true）不再重复走
+    // PolicyEngine / legacy ToolPolicy 审批 —— 否则"批准 → 二次执行 → 再次要求审批"死循环。
+    // 只信任受控字段 internalApproved；metadata 注入 approvedByUser 一律忽略（防任意赋权）。
     const approvedByUser = context.internalApproved === true;
-    if (!approvedByUser && this.#policy) {
-      const legacyPolicyResult = this.#policy.evaluate(toolName);
-      if (legacyPolicyResult.action === 'deny') {
+    if (!approvedByUser) {
+      // P0-06 收口：PolicyEngine 唯一裁决（deny → 拒绝；approval → 审批；allow → 执行）
+      const policyDecision = this.#evaluatePolicyEngine(toolName, context);
+      if (policyDecision === 'deny') {
         const durationMs = Date.now() - startTime;
         return errorResult(toolName, {
           message: `Tool '${toolName}' is denied by policy`,
           code: 'TOOL_DENIED',
         }, durationMs);
       }
-      if (legacyPolicyResult.action === 'require-approval') {
+      if (policyDecision === 'approval') {
         const durationMs = Date.now() - startTime;
         // P0-11: 优先使用注入的 requestApproval 回调（返回真实 apr-xxxx ID）
         if (this.#requestApproval) {
@@ -193,8 +167,37 @@ export class ToolExecutor {
           void promise;
           return pendingApprovalResult(toolName, id, durationMs);
         }
+        // 兼容模式：未注入回调时使用旧行为
         const approvalId = `${toolName}:${Date.now()}`;
         return pendingApprovalResult(toolName, approvalId, durationMs);
+      }
+
+      // legacy ToolPolicy（仅未批准时评估；已批准直接放行）
+      if (this.#policy) {
+        const legacyPolicyResult = this.#policy.evaluate(toolName);
+        if (legacyPolicyResult.action === 'deny') {
+          const durationMs = Date.now() - startTime;
+          return errorResult(toolName, {
+            message: `Tool '${toolName}' is denied by policy`,
+            code: 'TOOL_DENIED',
+          }, durationMs);
+        }
+        if (legacyPolicyResult.action === 'require-approval') {
+          const durationMs = Date.now() - startTime;
+          // P0-11: 优先使用注入的 requestApproval 回调（返回真实 apr-xxxx ID）
+          if (this.#requestApproval) {
+            const argsSummary = JSON.stringify(input).slice(0, 120);
+            const { id, promise } = this.#requestApproval({
+              toolName,
+              argsSummary,
+              context,
+            });
+            void promise;
+            return pendingApprovalResult(toolName, id, durationMs);
+          }
+          const approvalId = `${toolName}:${Date.now()}`;
+          return pendingApprovalResult(toolName, approvalId, durationMs);
+        }
       }
     }
 

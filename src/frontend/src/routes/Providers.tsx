@@ -427,7 +427,7 @@ const [testingId, setTestingId] = useState<string | null>(null);
                   )}
                   {testResult.bodyDetail && (
                     <div className="p-3 rounded-lg" style={{ background: 'var(--bg-surface)' }}>
-                      <div style={{ fontSize: '11px', color: 'var(--text-tertiary)', marginBottom: 4 }}>详细信息:</div>
+                      <div style={{ fontSize: '11px', color: 'var(--text-tertiary)', marginBottom: 8 }}>详细信息:</div>
                       <div style={{ fontSize: '12px', color: 'var(--text-secondary)', fontFamily: 'var(--font-mono)', wordBreak: 'break-all' }}>{testResult.bodyDetail}</div>
                     </div>
                   )}

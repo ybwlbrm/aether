@@ -2,6 +2,8 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 import type { BackendConfig } from '../../config/index.js';
 import type { SyncConfig } from './sync-config.js';
 import { processRemoteCommand } from './command-processor.js';
+// §15.1 收口：Mobile Stop 真取消 —— 检测 /cancel 命令后触发 RunCancellationRegistry 取消
+import { runCancellationRegistry } from '../../lib/run-cancellation-registry.js';
 
 // ============================================================
 // 轮询兜底：Realtime 断开/丢失事件时，仍能处理手机端命令
@@ -60,6 +62,19 @@ export function startPollingFallback(options: PollingFallbackOptions): PollingFa
             if (processingCommandIds.has(cmd.id)) continue;
             processingCommandIds.add(cmd.id);
             try {
+              // §15.1 收口：Mobile Stop 真取消 —— 检测 /cancel 命令（status=cancelled + content=/cancel），
+              // 触发 runCancellationRegistry.cancel(runTaskId) → AbortSignal → run.cancelled 终态。
+              // 不进入 processRemoteCommand（cancel 不是可执行指令，而是取消信号）。
+              if (String(cmd.content || '').trim() === '/cancel' || (cmd as any).metadata?.cancel_requested) {
+                const runId = String((cmd as any).run_id || (cmd as any).task_id || '');
+                if (runId && runCancellationRegistry.has(runId)) {
+                  const aborted = runCancellationRegistry.cancel(runId);
+                  console.log(`[Sync] 收到 Mobile 取消命令 → 取消 Run ${runId} (aborted=${aborted})`);
+                } else if (runId) {
+                  console.warn(`[Sync] 收到取消命令但 Run ${runId} 未注册（可能已结束），跳过`);
+                }
+                continue;
+              }
               console.log('[Sync] 轮询兜底处理命令:', cmd.content?.slice(0, 80));
               await processRemoteCommand(sb, cfg, cmd, backendConfig);
             } catch (cmdErr) {

@@ -403,7 +403,7 @@ export function Knowledge() {
                   <motion.div key={n.id} className="rounded-[14px] p-4" style={{ background: 'var(--glass-fill)', border: '1px solid var(--border-primary)' }}>
                     <div className="flex items-start justify-between">
                       <div className="flex-1 min-w-0">
-                        <p style={{ fontSize: '14px', fontWeight: 600, color: 'var(--text-primary)', marginBottom: 4 }}>{n.title}</p>
+                        <p style={{ fontSize: '14px', fontWeight: 600, color: 'var(--text-primary)', marginBottom: 8 }}>{n.title}</p>
                         <p style={{ fontSize: '13px', color: 'var(--text-secondary)', whiteSpace: 'pre-wrap', lineHeight: 1.5 }}>{n.content}</p>
                         <p style={{ fontSize: '11px', color: 'var(--text-tertiary)', marginTop: 8 }}><Clock size={12} style={{ display: 'inline', marginRight: 4 }} />{new Date(n.createdAt).toLocaleString()}</p>
                       </div>
@@ -505,7 +505,7 @@ export function Knowledge() {
                       {wikiPage.content.split('\n').map((line, i) => {
                         if (line.startsWith('# ')) return <h5 key={i} style={{ fontSize: 18, fontWeight: 700, margin: '12px 0 8px' }}>{line.slice(2)}</h5>;
                         if (line.startsWith('## ')) return <h6 key={i} style={{ fontSize: 15, fontWeight: 600, margin: '10px 0 6px' }}>{line.slice(3)}</h6>;
-                        if (line.startsWith('- ')) return <p key={i} style={{ paddingLeft: 16, marginBottom: 4 }}>• {line.slice(2)}</p>;
+                        if (line.startsWith('- ')) return <p key={i} style={{ paddingLeft: 16, marginBottom: 8 }}>• {line.slice(2)}</p>;
                         if (line.trim() === '') return <div key={i} style={{ height: 6 }} />;
                         return <p key={i} style={{ marginBottom: 6 }}>{line}</p>;
                       })}

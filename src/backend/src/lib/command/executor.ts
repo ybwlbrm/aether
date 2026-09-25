@@ -58,6 +58,9 @@ export async function executeCommand(
       return '权限不足：当前为 Level 1（只读）模式，不允许执行命令。请切换到 Level 2 以允许执行操作。';
     }
 
+    // Level 3（超级）放行：跳过白名单/黑名单/basename 校验，仅保留极危险拦截
+    const isLevel3 = (permissionLevel ?? 2) >= 3;
+
     // 工作目录解析与校验
     const resolvedWorkdir = resolveWorkdir(workdir, allowedDirs, defaultDir);
     if (!existsSync(resolvedWorkdir)) {
@@ -88,36 +91,46 @@ export async function executeCommand(
 
     // PowerShell/cmd 仅在 Level 3（超级）下允许
     const cmdNameLower = cmdName.toLowerCase();
-    if ((cmdNameLower === 'powershell' || cmdNameLower === 'pwsh' || cmdNameLower === 'cmd') && (permissionLevel ?? 2) < 3) {
+    if ((cmdNameLower === 'powershell' || cmdNameLower === 'pwsh' || cmdNameLower === 'cmd') && !isLevel3) {
       return `安全限制：${cmdName} 需要 Level 3（超级）权限才能执行。当前为 Level ${permissionLevel ?? 2}。`;
     }
 
-    // 白名单检查（硬边界）：spawn 无 shell 时只能定位真实可执行文件
-    if (!ALLOWED_EXEC.has(cmdName.toLowerCase())) {
-      return `安全限制：命令 "${cmdName}" 不在允许列表内`;
-    }
+    // 极危险拦截（Level 3 也保留）：UNC 路径可远程加载执行任意程序 —— 真正的安全红线
+    const dangerousUncInArgs = (argList: string[]): boolean => argList.some(p => p.startsWith('\\\\'));
 
-    // 黑名单检查：token 级 + 拼接注入防护
-    const lowerCmd = cmd.toLowerCase();
-    if (tokens.some(p => FORBIDDEN_TOKENS.has(p.toLowerCase()))) {
-      return `安全限制：禁止执行危险命令 "${cmd}"`;
-    }
-    if (FORBIDDEN_COMBINATIONS.some(f => lowerCmd.includes(f))) {
-      return `安全限制：禁止执行危险操作 "${cmd}"`;
-    }
-    // 危险解释器 basename 列表（start/explorer 可启动任意程序，需拦截）
-    // 归一化 basename：去掉尾随点/空格（Windows 加载器会忽略）+ 短路 UNC 路径
-    const dangerousInArgs = (argList: string[]): boolean => argList.some(p => {
-      // 拒绝 UNC 路径（\\server\share\evil.exe 可远程加载执行）
-      if (p.startsWith('\\\\')) return true;
-      const base = p.split(/[\\/]/).pop()?.toLowerCase().replace(/[.\s]+$/, '') || '';
-      return DANGEROUS_BASENAMES.includes(base);
-    });
+    if (!isLevel3) {
+      // 白名单检查（硬边界）：spawn 无 shell 时只能定位真实可执行文件
+      if (!ALLOWED_EXEC.has(cmdNameLower)) {
+        return `安全限制：命令 "${cmdName}" 不在允许列表内`;
+      }
 
-    // explorer 通过 ShellExecute 可启动任意程序，同样检查
-    if (cmdName.toLowerCase() === 'explorer') {
-      if (dangerousInArgs(args)) {
-        return `安全限制：禁止通过 explorer 启动危险程序或 UNC 路径`;
+      // 黑名单检查：token 级 + 拼接注入防护
+      const lowerCmd = cmd.toLowerCase();
+      if (tokens.some(p => FORBIDDEN_TOKENS.has(p.toLowerCase()))) {
+        return `安全限制：禁止执行危险命令 "${cmd}"`;
+      }
+      if (FORBIDDEN_COMBINATIONS.some(f => lowerCmd.includes(f))) {
+        return `安全限制：禁止执行危险操作 "${cmd}"`;
+      }
+      // 危险解释器 basename 列表（start/explorer 可启动任意程序，需拦截）
+      // 归一化 basename：去掉尾随点/空格（Windows 加载器会忽略）+ 短路 UNC 路径
+      const dangerousInArgs = (argList: string[]): boolean => argList.some(p => {
+        // 拒绝 UNC 路径（\\server\share\evil.exe 可远程加载执行）
+        if (p.startsWith('\\\\')) return true;
+        const base = p.split(/[\\/]/).pop()?.toLowerCase().replace(/[.\s]+$/, '') || '';
+        return DANGEROUS_BASENAMES.includes(base);
+      });
+
+      // explorer 通过 ShellExecute 可启动任意程序，同样检查
+      if (cmdName.toLowerCase() === 'explorer') {
+        if (dangerousInArgs(args)) {
+          return `安全限制：禁止通过 explorer 启动危险程序或 UNC 路径`;
+        }
+      }
+    } else {
+      // Level 3（超级）：放行任意命令，但保留 UNC 路径远程加载拦截（防 \\server\share\evil.exe）
+      if (cmdName.toLowerCase() === 'explorer' && dangerousUncInArgs(args)) {
+        return `安全限制：禁止通过 explorer 启动 UNC 路径（远程可执行文件）`;
       }
     }
 

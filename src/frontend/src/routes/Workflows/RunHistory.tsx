@@ -81,7 +81,7 @@ export function RunResultPanel({ runResult, editing, onClose }: RunResultPanelPr
           const color = node ? NODE_META[node.type].color : 'var(--text-tertiary)';
           return (
             <div key={nodeId} style={{ padding: 10, borderRadius: 10, border: `1px solid ${color}33`, background: `${color}0d` }}>
-              <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 4, color }}>
+              <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 8, color }}>
                 {res.label || nodeId}
               </div>
               <div style={{ fontSize: 12, color: 'var(--text-secondary)', whiteSpace: 'pre-wrap', wordBreak: 'break-all', maxHeight: 120, overflowY: 'auto' }}>

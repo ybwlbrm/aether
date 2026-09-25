@@ -346,6 +346,47 @@ export async function deleteConversation(convId: string): Promise<boolean> {
   }
 }
 
+/**
+ * §15.1 收口：Mobile Stop 必须真正取消 Run（不能只是 UI 改成 cancelled）。
+ * 向 remote_commands 写入一条 cancel 命令（status=cancelled + cancel_requested 标记），
+ * 桌面端 Realtime/Polling 检测后触发 runCancellationRegistry.cancel(runTaskId)
+ * → AbortSignal → execution-loop state='cancelled' → run.cancelled 终态事件 → Mobile 显示 cancelled。
+ * 幂等：同 client_command_id 已存在时不再重复插入。
+ */
+export async function cancelCommand(
+  conversationId: string,
+  clientCommandId?: string,
+): Promise<{ status: 'sent' } | { status: 'failed'; message?: string }> {
+  const sb = getClient();
+  const cfg = loadConfig();
+  const user = getCurrentUser();
+  if (!sb || !cfg) return { status: 'failed', message: 'Supabase 未配置' };
+  if (!user) return { status: 'failed', message: '未登录' };
+
+  const cancelKey = clientCommandId ?? generateUuid();
+  try {
+    const { data: inserted, error } = await sb
+      .from('remote_commands')
+      .insert({
+        device_id: cfg.deviceId,
+        user_id: user.id,
+        conversation_id: conversationId || null,
+        content: '/cancel',
+        status: 'cancelled', // 桌面端轮询见 status=cancelled + content=/cancel → 触发 Run 取消
+        client_command_id: cancelKey,
+        metadata: { cancel_requested: true },
+      })
+      .select('id')
+      .single();
+    if (error) throw error;
+    return { status: 'sent' };
+  } catch (e) {
+    const err = classifyError(e);
+    console.error(`[supabase] 发送取消命令失败 (${err.kind}):`, err.message);
+    return { status: 'failed', message: err.message };
+  }
+}
+
 // ============================================================
 // Realtime 订阅（A06 / A07 / §21 Channel 状态）
 // ============================================================

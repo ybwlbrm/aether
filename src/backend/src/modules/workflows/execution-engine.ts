@@ -147,31 +147,27 @@ export async function executeWorkflow(opts: ExecuteWorkflowOptions): Promise<Exe
         break;
       }
 
-      // Dependency Join：本波全部完成后，推进满足依赖的下一波
+      // Dependency Join：本波全部完成后，推进满足依赖的下一波。
+      // 每条实际依赖边只 decrement 一次（修复双重 decrement：普通节点的
+      // 无条件边不再被"条件循环 + 普通循环"各减一次 → A→C/B→C 时 C 不再提前执行）。
       for (const waveResult of waveResults) {
         if (!waveResult) continue;
         const { node, data } = waveResult;
         const passed = node.type === 'condition' ? !!(data as { passed?: boolean } | null | undefined)?.passed : null;
         const outEdges = edgeMap.get(node.id) || [];
         for (const e of outEdges) {
-          // §42 修复：条件边显式化 —— 用 edge.condition 而非"第一条=true/第二条=false"
-          if (e.condition === 'passed' && passed !== true) continue;
-          if (e.condition === 'failed' && passed !== false) continue;
-          if (node.type === 'condition' && !e.condition) continue; // 条件节点只走显式条件边
+          // 条件节点：只走显式 condition 边（§42），无 condition 的出边跳过
+          if (node.type === 'condition') {
+            if (!e.condition) continue;
+            if (e.condition === 'passed' && passed !== true) continue;
+            if (e.condition === 'failed' && passed !== false) continue;
+          }
+          // 普通节点：走所有出边（无条件边）
+          // 统一 decrement：每条边只执行一次，依赖全部满足后才入队
           if (!visited.has(e.target)) {
             const d = (indegree.get(e.target) || 1) - 1;
             indegree.set(e.target, d);
             if (d === 0) ready.push(e.target);
-          }
-        }
-        // 无条件边（普通节点）直接推进下游
-        if (node.type !== 'condition') {
-          for (const e of outEdges) {
-            if (!visited.has(e.target)) {
-              const d = (indegree.get(e.target) || 1) - 1;
-              indegree.set(e.target, d);
-              if (d === 0) ready.push(e.target);
-            }
           }
         }
       }

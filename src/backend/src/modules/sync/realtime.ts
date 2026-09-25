@@ -6,6 +6,8 @@ import { eq } from 'drizzle-orm';
 import { getSyncConfig, getSupabaseClient, getRealtimeChannel, setRealtimeChannel, getDeviceRegistered, setDeviceRegistered } from './sync-config.js';
 import { processRemoteCommand } from './command-processor.js';
 import { startPollingFallback, type PollingFallbackHandle } from './polling-fallback.js';
+// §15.1 收口：Mobile Stop 真取消 —— Realtime 收到 /cancel 命令 → runCancellationRegistry 取消
+import { runCancellationRegistry } from '../../lib/run-cancellation-registry.js';
 import { deleteConversationCascade } from '../conversations/delete-conversation.js';
 import type { SyncConfig } from './sync-config.js';
 import { shouldScheduleReconnect } from './realtime-logic.js';
@@ -51,6 +53,16 @@ export async function setupRealtimeListener(
       },
       async (payload: any) => {
         const cmd = payload.new;
+        // §15.1 收口：Mobile Stop 真取消 —— Realtime 收到的 /cancel 命令直接触发
+        // runCancellationRegistry.cancel（不进入 processRemoteCommand）。
+        if (cmd && (String(cmd.content || '').trim() === '/cancel' || cmd.metadata?.cancel_requested)) {
+          const runId = String(cmd.run_id || cmd.task_id || '');
+          if (runId && runCancellationRegistry.has(runId)) {
+            const aborted = runCancellationRegistry.cancel(runId);
+            console.log(`[Sync] Realtime 收到取消命令 → 取消 Run ${runId} (aborted=${aborted})`);
+          }
+          return;
+        }
         // 去重检查：防止 Supabase Realtime 重复推送同一 INSERT 事件
         if (cmd && cmd.status === 'pending' && !processingCommandIds.has(cmd.id)) {
           processingCommandIds.add(cmd.id);

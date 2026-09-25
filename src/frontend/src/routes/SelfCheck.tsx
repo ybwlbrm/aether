@@ -51,7 +51,7 @@ export function SelfCheck() {
                   result.summary?.error > 0 ? <XCircle size={48} style={{ color: '#ef4444', margin: '0 auto' }} /> :
                   <AlertTriangle size={48} style={{ color: '#f59e0b', margin: '0 auto' }} />}
               </div>
-              <div style={{ fontSize: 20, fontWeight: 700, marginBottom: 4 }}>
+              <div style={{ fontSize: 20, fontWeight: 700, marginBottom: 8 }}>
                 {result.summary?.passed ? '✅ 一切正常' : result.summary?.error > 0 ? '❌ 发现错误' : '⚠️ 存在警告'}
               </div>
               <div style={{ fontSize: 13, color: 'var(--text-tertiary)' }}>

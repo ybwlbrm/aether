@@ -6,7 +6,9 @@ import { authHeaders } from '../api/client';
 import { Send, Plus, Trash2, Mic, X, MessageSquare, XCircle } from 'lucide-react';
 import { useAppStore } from '../store/app';
 import { confirm as confirmDialog } from '../components/ui/confirm-dialog';
-import { requestNotificationPermission, sendNotification } from '../lib/notifications';
+// P0 通知幂等化：统一经 NotificationCenter（终态事件驱动 + dedupeKey，禁止旁路无条件通知）
+import { notificationCenter, buildTerminalDedupeKey, type NotificationTerminalType } from '../lib/notification-center';
+import { TERMINAL_EVENT_MAP, notifyFromTerminalEvent } from '../hooks/useStreamSend';
 import { Streamdown } from 'streamdown';
 import { cjk } from '@streamdown/cjk';
 import { OpenCodeStyleCodeBlock } from '../components/OpenCodeBlock';
@@ -185,7 +187,8 @@ const plusRef = useRef<HTMLDivElement>(null);
   // FE-DUP-01: 使用共享 useMessagePolling hook 替代内联轮询
   // 统一消息轮询逻辑：合并消息、token 统计、生成状态、reasoning 提取
   // 整改计划第 3 章（P0）：显式状态机 {idle,polling,error,retrying} + AbortController + retry
-  const notifiedRef = useRef(false);
+  // P0 通知幂等化：CodingHome 不再持有自己的 notifiedRef / 不再由 polling 发通知 ——
+  // 通知唯一来源是 Run terminal event → NotificationCenter（见 doSend 中 envelope 分支）
   const { pollStatus: msgPollStatus, pollErrorInfo: msgPollErrorInfo, retry: retryPolling } = useMessagePolling({
     conversationId: currentConvId,
     enabled: !!currentConvId,
@@ -193,16 +196,8 @@ const plusRef = useRef<HTMLDivElement>(null);
     onMessagesUpdate: (updater) => setMessages(updater),
     onTokenTotalUpdate: (total) => setCurrentConvTokenTotal((prev) => Math.max(prev, total)),
     onSendingUpdate: (generating) => {
-      if (!generating && !notifiedRef.current && document.hidden) {
-        notifiedRef.current = true;
-        setSending(false);
-        sendNotification('AI 回复完成', { body: '对话已生成完成，点击查看' });
-      } else if (!generating) {
-        setSending(false);
-        notifiedRef.current = false; // 重置，下次生成完成时再通知
-      } else if (generating) {
-        setSending(true);
-      }
+      // 仅同步 sending 状态（polling 只负责状态同步，不承担事件生成/通知）
+      setSending(generating);
     },
     onLiveReasoningUpdate: (reasoning) => setLiveReasoning(reasoning),
     currentConvRef,
@@ -255,7 +250,7 @@ useEffect(() => {
       load();
     }
   }, [load]);
-  useEffect(() => { requestNotificationPermission(); }, []);
+  // P0 通知幂等化：权限请求统一由 App Shell/Layout 发起（单一入口），业务页不再散调
   useEffect(() => { currentConvRef.current = currentConvId; }, [currentConvId]);
 
   // Q1 彻底修复：检测 URL ?new=true 参数，强制进入新对话空白页。
@@ -672,6 +667,8 @@ await streamOrchestrate(
                   const ev = event.ev;
                   // 统一协议事件 → Activity Store（过程区：任务卡/工具/Agent 状态）
                   useActivityStore.getState().appendEvent(convId, ev);
+                  // P0 通知幂等化：Run 终态事件 → NotificationCenter（唯一通知入口，dedupeKey 幂等）
+                  notifyFromTerminalEvent(ev);
                   // 整改计划第 5 章（P1）：循环模式指标 —— 终态事件携带 turnsUsed/elapsedMs/toolCalls
                   if ((ev.eventType === 'task.completed' || ev.eventType === 'task.failed') && ev.metadata && typeof ev.metadata.turnsUsed === 'number') {
                     setLoopMetrics({
@@ -750,7 +747,8 @@ await streamOrchestrate(
         if (currentConvRef.current !== convId) return;
         // 移除本地乐观 aiMsg，让轮询从服务端加载真实消息
         setMessages(prev => prev.filter(m => m.id !== aiMsg.id));
-        sendNotification('AI 回复完成', { body: accumulatedContent.slice(0, 100) });
+        // P0 通知幂等化：完成通知不再由"流结束"触发（stream EOF 不是终态事件），
+        // 统一由 envelope 分支的 notifyFromTerminalEvent(run.* 终态事件) 驱动。
       } else {
 // 普通模式：流式 + reasoning；统一协议事件写入 Activity Store，兼容回调保持旧渲染
         // 清空本会话旧事件（新一轮任务开始）——仅清空本 turn 的事件
@@ -766,6 +764,8 @@ await streamConversation(
                 case 'envelope': {
                   // 统一协议事件 → Activity Store（过程区）
                   useActivityStore.getState().appendEvent(convId, event.ev);
+                  // P0 通知幂等化：Run 终态事件 → NotificationCenter（唯一通知入口，dedupeKey 幂等）
+                  notifyFromTerminalEvent(event.ev);
                   // ask-user 审批：Level 1 敏感工具需用户确认 → 弹确认框并把决定回传
                   if (event.ev.eventType === 'task.ask-confirm' && event.ev.metadata?.approvalId) {
                     const apId = String(event.ev.metadata.approvalId);
@@ -842,7 +842,8 @@ await streamConversation(
         if (currentConvRef.current !== convId) return;
         // 移除本地乐观 aiMsg，让轮询从服务端加载真实消息
         setMessages(prev => prev.filter(m => m.id !== aiMsg.id));
-        sendNotification('AI 回复完成', { body: (accumulatedContent || '').slice(0, 100) });
+        // P0 通知幂等化：完成通知不再由"流结束"触发（stream EOF 不是终态事件），
+        // 统一由 envelope 分支的 notifyFromTerminalEvent(run.* 终态事件) 驱动。
       }
       load();
       window.dispatchEvent(new CustomEvent('conversations-changed'));

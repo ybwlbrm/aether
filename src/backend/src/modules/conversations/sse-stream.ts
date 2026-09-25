@@ -1,6 +1,6 @@
 import type { FastifyReply } from 'fastify';
 import { startHeartbeat, SSE_CHUNK_TIMEOUT_MS } from '../../lib/sse-utils.js';
-import { parseSse, withChunkTimeout, SseStreamError } from '../../lib/sse-parser.js';
+import { parseSse, withChunkTimeout } from '../../lib/sse-parser.js';
 import { translate } from '../../lib/stream-translate.js';
 import type { StreamChunk } from '@pacc/shared';
 

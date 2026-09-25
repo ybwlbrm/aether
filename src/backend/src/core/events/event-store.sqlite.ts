@@ -196,38 +196,35 @@ export class SqliteEventStore implements EventStore {
     return expanded;
   }
 
-  /** Get a single event by runId + eventId. */
+  /** Get a single event by runId + eventId（逻辑事件语义：packed 行内的子事件也可命中） */
   async get(runId: string, eventId: string): Promise<AgentEvent | undefined> {
     const row = this.db
       .select()
       .from(events)
       .where(and(eq(events.runId, runId), eq(events.id, eventId)))
       .get();
-    if (!row) return undefined;
-    return this.#rowToEvent(row);
+    if (row) return this.#rowToEvent(row);
+    // 逻辑事件语义：eventId 可能属于 packed 行内的子事件（行 id 是 pack-{runId}-{last}），
+    // 展开全部行后按逻辑 eventId 精确匹配。
+    const all = this.db.select().from(events).where(eq(events.runId, runId)).all();
+    for (const ev of this.#rowsToEvents(all)) {
+      if (ev.eventId === eventId) return ev;
+    }
+    return undefined;
   }
 
-  /** Count events for a runId. */
+  /** Count logical events（逻辑事件语义：packed 行展开后计数，而非物理行 count(*)） */
   async count(runId: string): Promise<number> {
-    const row = this.db
-      .select({ count: sql<number>`count(*)` })
-      .from(events)
-      .where(eq(events.runId, runId))
-      .get();
-    return Number(row?.count ?? 0);
+    const rows = this.db.select().from(events).where(eq(events.runId, runId)).all();
+    return this.#rowsToEvents(rows).length;
   }
 
-  /** Get the latest event (max seq) for a runId. */
+  /** Get the latest logical event (max logical seq) for a runId（packed 行展开后取最大 seq） */
   async latest(runId: string): Promise<AgentEvent | undefined> {
-    const row = this.db
-      .select()
-      .from(events)
-      .where(eq(events.runId, runId))
-      .orderBy(desc(events.seq))
-      .limit(1)
-      .get();
-    if (!row) return undefined;
-    return this.#rowToEvent(row);
+    const rows = this.db.select().from(events).where(eq(events.runId, runId)).all();
+    const expanded = this.#rowsToEvents(rows);
+    if (expanded.length === 0) return undefined;
+    return expanded.reduce((max, ev) => (ev.seq > max.seq ? ev : max));
   }
 
   /**

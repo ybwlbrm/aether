@@ -131,14 +131,14 @@ export function Terminal() {
         {entries.length === 0 ? (
           <div style={{ color: 'var(--text-tertiary)', textAlign: 'center', paddingTop: '30%' }}>
             <TerminalIcon size={32} style={{ opacity: 0.3, margin: '0 auto 12px', display: 'block' }} />
-            <div style={{ fontSize: 'var(--font-base)', marginBottom: 4 }}>输入命令开始</div>
+            <div style={{ fontSize: 'var(--font-base)', marginBottom: 8 }}>输入命令开始</div>
             <div style={{ fontSize: 'var(--font-xs)' }}>Agent 执行的命令也会显示在这里</div>
           </div>
         ) : (
           entries.map(entry => (
             <motion.div key={entry.id} initial={{ opacity: 0, y: 4 }} animate={{ opacity: 1, y: 0 }}
               style={{ marginBottom: 16, opacity: entry.output === '⏳ 执行中...' ? 0.6 : 1 }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 8 }}>
                 <ChevronRight size={12} style={{ color: entry.source === 'agent' ? 'var(--color-success)' : 'var(--color-accent)', flexShrink: 0 }} />
                 <span style={{ color: 'var(--text-primary)', fontWeight: 500 }}>{entry.command}</span>
                 {entry.source === 'agent' && (

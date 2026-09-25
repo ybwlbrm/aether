@@ -1,8 +1,8 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type { BackendConfig } from '../../config/index.js';
 import { getDb, saveDb, runInTransaction } from '../../db/client.js';
-import { conversations, messages, providers, mcpServers } from '../../db/schema/index.js';
-import { eq, desc, sql } from 'drizzle-orm';
+import { conversations, messages, mcpServers } from '../../db/schema/index.js';
+import { eq, sql } from 'drizzle-orm';
 import { randomUUID } from 'node:crypto';
 import { resolve } from 'node:path';
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
@@ -13,18 +13,12 @@ import { clearReadFileCache } from '../../lib/files.js';
 import { dedupToolResultReplacement } from '../../lib/deduplicate.js';
 import { truncateHistoryByTokenBudget } from '../../lib/context-window.js';
 import { listMcpTools } from '../../lib/mcp-client.js';
-import { syncMessageToSupabase, getSyncClient } from '../../lib/supabase-sync.js';
+import { syncMessageToSupabase } from '../../lib/supabase-sync.js';
 import { createEventBus } from '../../lib/event-bus.js';
-import { buildToolPayload } from '@pacc/shared';
 import { buildAllTools, filterToolsByWebSearch } from '../../lib/tool-registry.js';
-import { parseSse, withChunkTimeout, SseStreamError } from '../../lib/sse-parser.js';
-import { translate, buildChatRequestBody, parseToolArgsSafe } from '../../lib/stream-translate.js';
-import { SSE_CHUNK_TIMEOUT_MS, startHeartbeat } from '../../lib/sse-utils.js';
+import { startHeartbeat } from '../../lib/sse-utils.js';
 import { SISYPHUS_SYSTEM_PROMPT, MANDATORY_COMPLIANCE_PROMPT } from '../../lib/system-prompts.js';
 import { getEffectivePrompt } from '../../lib/prompt-registry.js';
-import { compactRemovedHistory, buildCompactionSystemMessage } from '../../lib/compaction.js';
-import { createPendingApproval } from '../../lib/approvals-center.js';
-import { pushDirective, drainDirectives } from '../../lib/inbox.js';
 import { runCancellationRegistry } from '../../lib/run-cancellation-registry.js';
 // P0-02/P0-04/P0-05: 统一 Run 上下文 + RunLifecycleManager（普通 Chat 与 Super 模式同构）
 import { createRunContext } from '../../core/runtime/index.js';
@@ -32,10 +26,9 @@ import { RunLifecycleManager } from '../../core/runtime/index.js';
 // §30/§31 收口：预算统一来源 —— AgentDefinition limits → budgetFromAgentLimits（禁止 30/50/128000 散落硬编码）
 import { budgetFromAgentLimits } from '../../core/runtime/execution-loop.js';
 import { getWorkspaceContext } from '../../core/workspace/workspace-context.js';
-import { fetchWithRetry } from '../../lib/fetch-retry.js';
 import { initSseHeaders, createSseSender, startSseHeartbeat, clearSseHeartbeat, sendSseError, sendSseDone, endSseResponse } from './sse-stream.js';
 import { processCompaction, executeForceSummary } from './compaction.js';
-import { executeToolLoop, ToolLoopConfig } from './tool-loop.js';
+import { executeToolLoop } from './tool-loop.js';
 
 interface ChatHandlerContext {
   app: FastifyInstance;

@@ -5,7 +5,7 @@ import swaggerUi from '@fastify/swagger-ui';
 import { registerErrorHandler } from './plugins/error-handler.js';
 import { buildLoggerConfig } from './lib/logger-config.js';
 import { loadBackendConfig, type BackendConfig, migratePlaintextApiKeys } from './config/index.js';
-import { initDb, markDirty, flushDbSync } from './db/client.js';
+import { initDb, getDb, markDirty, flushDbSync } from './db/client.js';
 import { runMigrations } from './db/migrate.js';
 import { registerHealthRoutes } from './modules/health/index.js';
 import { registerProviderRoutes } from './modules/providers/index.js';
@@ -33,6 +33,8 @@ import { registerTerminalRoutes } from './modules/terminal/index.js';
 import { registerApprovalRoutes } from './modules/approvals/index.js';
 import { registerAuthRoutes } from './modules/auth/index.js';
 import { registerRunRoutes, registerRunEventsRoutes, registerRunStreamRoutes } from './modules/runs/index.js';
+// §27/P0-10 持久化：启动时从 agent_configs.system_prompt 加载自定义 Prompt 覆盖（重启不丢失）
+import { loadPromptsFromDb } from './lib/prompt-registry.js';
 import { closeAllMcpClients } from './lib/mcp-client.js';
 import { generateLocalAuthToken } from './lib/auth-token.js';
 import { installAuthGuard } from './lib/auth-guard.js';
@@ -159,6 +161,9 @@ export async function buildApp(config?: BackendConfig) {
   registerDocumentRoutes(app, cfg);
   registerDataRoutes(app, cfg);
   registerAgentRoutes(app, cfg);
+  // §27/P0-10 持久化：注册 Agent 路由后加载持久化 Prompt 覆盖（重启不丢失），
+  // 使 GET/PUT /api/agents/:id/prompt 与所有生产路径（Chat/Super/Synth/Direct）生效。
+  try { loadPromptsFromDb(getDb()); } catch { /* 加载失败回退默认 */ }
   registerWorkspaceRoutes(app, cfg);
   registerBackgroundRoutes(app, cfg);
   registerToolboxRoutes(app, cfg);

@@ -13,6 +13,9 @@ import { isSafeFetchUrl } from '../../lib/safe-fetch.js';
 import { buildModelRuntime, type ModelRequest } from '../../core/models/index.js';
 // P0-03 收口：取消统一走 RunCancellationRegistry（run-scoped）
 import { runCancellationRegistry } from '../../lib/run-cancellation-registry.js';
+// 第五部分：Sisyphus Direct 生产旁路收口 —— 统一走 Run → ExecutionLoop（不再 direct complete()）
+import { RunLifecycleManager } from '../../core/runtime/index.js';
+import { runExecutionLoop, type ExecutionLoopDeps, type ExecutionBudget } from '../../core/runtime/execution-loop.js';
 
 // P0-10/§27 修复：运行时自定义提示词统一由 PromptRegistry 管理（不再使用局部 Map），
 // 与 orchestration.ts 共享同一实例 —— 前端编辑 Prompt 后所有生产路径（普通 Chat /
@@ -214,7 +217,9 @@ export function registerAgentRoutes(app: FastifyInstance, config: BackendConfig)
       id: userMsgId, conversationId: convId, role: 'user', content: body.prompt, createdAt: now,
     }).run();
 
-    // 3. 调用 Sisyphus
+    // 3. 调用 Sisyphus —— 第五部分收口：统一走 Run → Task → AgentRuntime → ExecutionLoop
+    // （不再 direct runtime.complete() 旁路；与普通 Chat 共用同一执行语义与终态事件）
+    const runId = randomUUID();
     try {
       // 纵深防御：显式校验 baseUrl（虽受控但防配置篡改/注入）
       if (!isSafeFetchUrl(activeProvider.baseUrl)) throw new Error('Provider baseUrl 存在 SSRF 风险：禁止访问链路本地/元数据地址或非 http(s) 协议');
@@ -230,34 +235,80 @@ export function registerAgentRoutes(app: FastifyInstance, config: BackendConfig)
         capabilities: activeProvider.capabilities,
       };
       const runtime = buildModelRuntime(providerConfig);
-      
-      const request: ModelRequest = {
-        provider: activeProvider.id,
-        model: activeModel,
-        systemPrompt: getEffectivePrompt(sisyphus.id, sisyphus.systemPrompt),
-        messages: (body.history || [])
-          .filter((m: any) => m.role === 'user' || m.role === 'assistant')
-          .map((m: any) => ({
-            ...m,
-            // 剥离图片 markdown URL（服务端虚拟路径 AI 无法访问）
-            content: typeof m.content === 'string'
-              ? m.content
-                .replace(/!\[[^\]]*\]\(\/data\/chat-images\/[^)]+\)/g, '[图片]')
-                .replace(/!\[[^\]]*\]\((data:image\/[^)]+)\)/g, '[图片]')
-                .trim()
-              : m.content,
-          })),
-        maxTokens: 2048,
-        signal: AbortSignal.timeout(60000),
+
+      // Run 统一创建（第六部分：创建失败必须立刻终止，不得继续执行 Model）
+      const lifecycle = new RunLifecycleManager(db);
+      try {
+        lifecycle.createAndStart({
+          runId,
+          conversationId: convId,
+          mode: 'normal',
+          rootAgentId: sisyphus.id,
+          metadata: { source: 'sisyphus-direct' },
+        });
+      } catch (runErr: unknown) {
+        db.insert(messages).values({
+          id: randomUUID(), conversationId: convId, role: 'assistant',
+          content: `[Run 创建失败] ${runErr instanceof Error ? runErr.message : String(runErr)}`,
+          createdAt: new Date().toISOString(),
+        }).run();
+        return { error: 'Run 创建失败，无法执行', conversationId: convId };
+      }
+
+      // 历史消息（剥离图片 markdown URL —— 服务端虚拟路径 AI 无法访问）
+      const historyMessages = (body.history || [])
+        .filter((m: any) => m.role === 'user' || m.role === 'assistant')
+        .map((m: any) => ({
+          ...m,
+          content: typeof m.content === 'string'
+            ? m.content
+              .replace(/!\[[^\]]*\]\(\/data\/chat-images\/[^)]+\)/g, '[图片]')
+              .replace(/!\[[^\]]*\]\((data:image\/[^)]+)\)/g, '[图片]')
+              .trim()
+            : m.content,
+        }));
+
+      // 统一 ExecutionLoop 依赖注入（Normal 模式：完成必要调用后立即结束）
+      const deps: ExecutionLoopDeps = {
+        model: runtime,
+        hasTools: false,
+        buildRequest: (msgs, _turn): ModelRequest => ({
+          provider: activeProvider.id,
+          model: activeModel,
+          systemPrompt: getEffectivePrompt(sisyphus.id, sisyphus.systemPrompt),
+          messages: msgs,
+          maxTokens: 2048,
+          signal: AbortSignal.timeout(60000),
+        }),
+        executeTool: async () => '',
       };
-      
-      const response = await runtime.complete(request);
-      const reply = response.content.trim();
-      const usage = response.usage ? {
-        prompt_tokens: response.usage.inputTokens,
-        completion_tokens: response.usage.outputTokens,
-        total_tokens: response.usage.totalTokens,
-      } : {};
+      const loopBudget: ExecutionBudget = {
+        maxTurns: 1,
+        maxToolCalls: 0,
+        maxTimeMs: 60_000,
+        maxTokens: 0,
+        maxCostCny: 0,
+      };
+      const result = await runExecutionLoop(deps, historyMessages, {
+        loop: false,
+        budget: loopBudget,
+      });
+
+      const reply = result.content.trim();
+      const usage = {
+        prompt_tokens: result.usage.cumulativeInputTokens,
+        completion_tokens: result.usage.cumulativeOutputTokens,
+        total_tokens: result.usage.cumulativeTotalTokens,
+      };
+
+      // Run 终态写入（状态机统一；失败/中断 → fail 而非假成功）
+      try {
+        if (result.state === 'completed') {
+          lifecycle.transition(runId, 'complete', { endReason: 'completed', inputTokens: usage.prompt_tokens, outputTokens: usage.completion_tokens });
+        } else {
+          lifecycle.transition(runId, 'fail', { error: result.content || 'AI 执行失败', endReason: result.state === 'budget_exceeded' ? 'max_turns' : 'error', inputTokens: usage.prompt_tokens, outputTokens: usage.completion_tokens });
+        }
+      } catch { /* 终态写入失败不阻塞回复 */ }
 
       // 4. 保存 AI 回复
       const aiMsgId = randomUUID();
@@ -276,8 +327,13 @@ export function registerAgentRoutes(app: FastifyInstance, config: BackendConfig)
           .run();
       }
 
-      return { reply, usage, conversationId: convId };
+      return { reply, usage, conversationId: convId, runId };
     } catch (e: unknown) {
+      // Run 执行失败 → 统一终态（第六部分：失败必须可见）
+      try {
+        const lc = new RunLifecycleManager(db);
+        lc.transition(runId, 'fail', { error: e instanceof Error ? e.message : String(e), endReason: 'error' });
+      } catch { /* ignore */ }
       db.insert(messages).values({
         id: randomUUID(), conversationId: convId, role: 'assistant',
         content: `[Error] ${(e instanceof Error ? e.message : String(e))}`, createdAt: new Date().toISOString(),

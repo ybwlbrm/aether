@@ -54,6 +54,12 @@ const WRITE_ROUTES: Array<{ method: 'POST' | 'PUT' | 'DELETE' | 'PATCH'; url: st
   { method: 'POST', url: '/api/toolbox/utility' },
   { method: 'POST', url: '/api/toolbox/pdf-read' },
   { method: 'POST', url: '/api/toolbox/pdf-to-docx' },
+  // P2-4 修复（审计）：补齐工具箱写操作端点鉴权矩阵（此前缺失）
+  { method: 'POST', url: '/api/toolbox/unlock-music' },
+  { method: 'POST', url: '/api/toolbox/pdf-compress' },
+  { method: 'POST', url: '/api/toolbox/encode' },
+  { method: 'POST', url: '/api/toolbox/video-extract' },
+  { method: 'POST', url: '/api/toolbox/youtube-download' },
   // skills
   { method: 'POST', url: '/api/skills/skill-1/install' },
   { method: 'DELETE', url: '/api/skills/skill-1' },

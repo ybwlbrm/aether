@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import {
   getMessages,
   sendCommand,
+  cancelCommand,
   subscribeMessages,
   getSyncState,
   onSyncStateChange,
@@ -484,8 +485,11 @@ export default function MessageView({ conversationId, conversationTitle, onBack 
     }
   };
 
-  // §18：停止执行（UI 状态协议：processing → cancelling → cancelled）
+  // §18/§15.1 收口：停止执行 —— 不只改本地 UI 状态，必须真正取消后端 Run。
+  // Mobile Stop → cancel API（remote_commands /cancel 命令）→ 桌面端 RunCancellationRegistry
+  // → AbortSignal → runExecutionLoop state='cancelled' → run.cancelled 终态事件 → Mobile terminal state。
   const handleStop = () => {
+    if (!['sending', 'queued', 'waiting', 'processing', 'streaming'].includes(phase)) return;
     setPhase((p) => {
       if (!['sending', 'queued', 'waiting', 'processing', 'streaming'].includes(p)) return p;
       return 'cancelling';
@@ -494,12 +498,14 @@ export default function MessageView({ conversationId, conversationTitle, onBack 
     if (timeoutRef.current) { clearTimeout(timeoutRef.current); timeoutRef.current = null; }
     activeCommandIdRef.current = null;
     setLiveReasoning('');
+    // §15.1：向桌面端发送真正的取消命令（取消信号，桌面端据此中止 Run 执行流）
+    void cancelCommand(conversationId, `cancel-${Date.now()}`);
     setTimeout(() => {
       setPhase((p) => (p === 'cancelling' ? 'cancelled' : p));
       setMessages((prev) => [...prev, {
         id: `cancel-${Date.now()}`,
         role: 'system',
-        content: '已停止当前任务（桌面端执行状态请以桌面端为准）',
+        content: '已停止当前任务（已通知桌面端取消执行）',
         created_at: new Date().toISOString(),
       }]);
     }, 300);

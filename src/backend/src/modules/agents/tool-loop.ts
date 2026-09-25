@@ -16,6 +16,8 @@ import { AppError } from '@pacc/shared';
 import { createProductionToolExecutor, type ProductionToolExecutor } from '../../lib/production-tool-executor.js';
 // §30/§31 收口：预算统一来源 —— AgentDefinition limits → budgetFromAgentLimits（禁止 30/50/128000 散落硬编码）
 import { budgetFromAgentLimits } from '../../core/runtime/execution-loop.js';
+// 统一 ExecutionLoop：唯一生产循环控制器（第四部分：ToolLoop 收口为薄 wrapper，无第二套循环）
+import { runExecutionLoop, type ExecutionLoopDeps, type ExecutionBudget } from '../../core/runtime/execution-loop.js';
 
 export interface ToolLoopContext {
   agent: any;
@@ -53,8 +55,18 @@ export interface ToolLoopResult {
   agentTokens: number;
   lastToolResult: string;
   toolCallCount: number;
+  /** 流中断/失败标记（§16：断流不得伪装成功 —— 上层据此标记 agent.error 而非 agent.completed） */
+  interrupted?: boolean;
 }
 
+/**
+ * 超级 Chat 子 Agent 工具循环。
+ *
+ * 第四部分收口：本函数已改造为**薄 wrapper** —— 不再自建 while 循环，
+ * 统一委托 core/runtime/execution-loop.ts::runExecutionLoop 作为唯一生产循环控制器。
+ * SSE 实时输出 / 事件总线 / 审批副作用经 ExecutionLoopDeps 回调转发，语义保持不变。
+ * 保留：强制总结（agent 只调工具无文本时追加一轮总结）、工具结果去重。
+ */
 export async function runAgentToolLoop(ctx: ToolLoopContext): Promise<ToolLoopResult> {
   let agentReply = '';
   let agentTokens = 0;
@@ -62,13 +74,10 @@ export async function runAgentToolLoop(ctx: ToolLoopContext): Promise<ToolLoopRe
   let toolCallCount = 0;
 
   // §30/§31 收口：预算统一来源 —— AgentDefinition limits → budgetFromAgentLimits
-  // 循环模式默认上限从 500 降到安全值 30 的逻辑收敛到统一预算函数（loop 基线 30 轮 / 100 工具调用）
   const agentLimits = (ctx.agent as { limits?: { maxTurns?: number; maxToolCalls?: number; maxTimeMs?: number; maxTokens?: number } } | undefined)?.limits;
   const unifiedBudget = budgetFromAgentLimits(agentLimits, !!ctx.body.loop);
-  let fcTurns = ctx.body.loop ? unifiedBudget.maxTurns : unifiedBudget.maxTurns;
 
   // P0-01 收口：统一生产工具执行器（PolicyEngine 唯一裁决 + Approval 完整绑定 + Timeout + Cancel）
-  // 在循环外构建一次（工具注册只做一遍），循环内复用。
   const productionExecutor: ProductionToolExecutor = createProductionToolExecutor({
     mcpTools: ctx.mcpTools,
     getMcpServers: () => ctx.db.select().from(mcpServers).all() as any[],
@@ -108,29 +117,14 @@ export async function runAgentToolLoop(ctx: ToolLoopContext): Promise<ToolLoopRe
   };
   const runtime = buildModelRuntime(providerConfig);
 
-  while (fcTurns-- > 0) {
-    // inbox 指令（steer/followup）：运行中用户补充的指令 → drain 为 user 消息注入下一轮
-    const convKey = (ctx.body.conversationId as string | undefined) ?? 'anonymous';
-    const directives = drainDirectives(convKey);
-    for (const d of directives) {
-      ctx.agentMessages.push({ role: 'user', content: `[补充指令] ${d.text}` });
-    }
-
-    const reqBody = buildChatRequestBody({
-      model: ctx.ep.model,
-      messages: ctx.agentMessages,
-      tools: ctx.toolListForThisAgent,
-      tool_choice: 'auto',
-      deepThinking: ctx.deepThinking,
-      reasoningEffort: ctx.reasoningEffort,
-      supportsThinking: ctx.epSupportsThinking,
-      max_tokens: 4096,
-    });
-
-    const request: ModelRequest = {
+  // ExecutionLoopDeps：唯一循环控制器的依赖注入（第四部分收口）
+  const deps: ExecutionLoopDeps = {
+    model: runtime,
+    hasTools: ctx.toolListForThisAgent.length > 0,
+    buildRequest: (msgs, _turn): ModelRequest => ({
       provider: providerConfig.id,
       model: ctx.ep.model,
-      messages: ctx.agentMessages,
+      messages: msgs,
       tools: ctx.toolListForThisAgent.map(t => ({
         type: 'function' as const,
         function: {
@@ -141,199 +135,160 @@ export async function runAgentToolLoop(ctx: ToolLoopContext): Promise<ToolLoopRe
       })),
       maxTokens: 4096,
       signal: ctx.clientAbort.signal,
-    };
-
-    let accumulatedContent = '';
-    let accumulatedReasoning = '';
-    let currentToolCalls: any[] = [];
-    let hasToolCalls = false;
-    let turnFinish: 'stop' | 'tool_calls' | 'max-tokens' | 'error' = 'stop';
-
-    try {
-      for await (const c of runtime.stream(request)) {
-        switch (c.type) {
-          case 'reasoning-delta': {
-            const r = c.text;
-            accumulatedReasoning += r;
-            ctx.sseSend('reasoning', JSON.stringify({ content: r, agentId: ctx.agent.id, agentName: ctx.agent.name }));
-            if (ctx.body.conversationId) {
-              ctx.eventBus.emit(ctx.convId, 'agent.reasoning.delta', {
-                taskId: ctx.runTaskId,
-                agentId: ctx.agent.id,
-                agentType: ctx.agentCtx.agentType,
-                content: r,
-              });
-            }
-            break;
-          }
-          case 'text-delta': {
-            const t = c.text;
-            accumulatedContent += t;
-            if (ctx.body.conversationId) {
-              ctx.eventBus.emit(ctx.convId, 'agent.message.delta', {
-                taskId: ctx.runTaskId,
-                agentId: ctx.agent.id,
-                agentType: ctx.agentCtx.agentType,
-                content: t,
-              });
-            }
-            break;
-          }
-          case 'block-end': {
-            if (c.block.kind === 'tool-call') {
-              hasToolCalls = true;
-              currentToolCalls.push({ id: c.block.id, type: 'function', function: { name: c.block.name, arguments: c.block.arguments } });
-            }
-            break;
-          }
-          case 'usage': {
-            agentTokens += c.usage.totalTokens ?? (c.usage.inputTokens + c.usage.outputTokens);
-            break;
-          }
-          case 'finish': {
-            if (c.reason.kind === 'error') {
-              throw new Error(c.reason.message || 'LLM 流式响应错误');
-            }
-            turnFinish = c.reason.kind;
-            break;
-          }
+    }),
+    executeTool: async (tool, _turn): Promise<string> => {
+      // 工具执行副作用：SSE tool-call/tool-result、eventBus tool.started/completed
+      const funcName = tool.name;
+      // parseToolArgsSafe：非法 JSON 降级为 {ok:false}，走工具降级路径（不炸流）
+      const parsed = parseToolArgsSafe(tool.arguments);
+      let args: any = parsed.args;
+      if (!parsed.ok) {
+        const errMsg = `工具参数不是合法 JSON: ${String(tool.arguments || '').slice(0, 500)}`;
+        ctx.sseSend('tool-call', JSON.stringify({ name: funcName, arguments: {}, id: tool.id }));
+        ctx.sseSend('tool-result', JSON.stringify({ name: funcName, result: errMsg, id: tool.id }));
+        if (ctx.body.conversationId) {
+          ctx.eventBus.emit(ctx.convId, 'tool.completed', {
+            taskId: ctx.runTaskId,
+            agentId: ctx.agent.id,
+            agentType: ctx.agentCtx.agentType,
+            status: 'error',
+            content: errMsg,
+            tool: { ...buildToolPayload(funcName, {}), error: { message: errMsg }, toolOutput: undefined },
+            parentEventId: undefined,
+          });
         }
+        return errMsg;
       }
-    } catch (e: unknown) {
-      if (e instanceof Error && e.name === 'StreamError') {
-        ctx.sseSend('error', JSON.stringify({ message: `AI 响应流中断: ${e.message}` }));
+
+      // 统一协议：tool.started（带 agentId —— 多 Agent 并行归属的关键修复）
+      const toolStarted = ctx.body.conversationId
+        ? ctx.eventBus.emit(ctx.convId, 'tool.started', {
+            taskId: ctx.runTaskId,
+            agentId: ctx.agent.id,
+            agentType: ctx.agentCtx.agentType,
+            status: 'started',
+            tool: buildToolPayload(funcName, args),
+          })
+        : null;
+
+      let result: string;
+      try {
+        // P0-01 收口：统一生产执行器（PolicyEngine 唯一裁决 + Approval + Timeout + Cancel）
+        const execResult = await productionExecutor.execute(funcName, args);
+        result = execResult.result;
+        if (execResult.error) throw new Error(execResult.error);
+      } catch (e: unknown) {
+        const errMsg = (e instanceof Error ? e.message : String(e)) || '工具执行失败';
+        result = `错误: ${errMsg}`;
+        lastToolResult = result;
+        if (ctx.body.conversationId && toolStarted) {
+          ctx.eventBus.emit(ctx.convId, 'tool.error', {
+            taskId: ctx.runTaskId,
+            agentId: ctx.agent.id,
+            agentType: ctx.agentCtx.agentType,
+            status: 'error',
+            content: errMsg,
+            tool: { ...buildToolPayload(funcName, args), error: { message: errMsg }, toolOutput: undefined },
+            parentEventId: toolStarted.eventId,
+          });
+        }
+        ctx.sseSend('tool-call', JSON.stringify({ name: funcName, arguments: args, id: tool.id }));
+        ctx.sseSend('tool-result', JSON.stringify({ name: funcName, result: result.slice(0, 500), id: tool.id }));
+        return `错误: ${errMsg}`;
       }
-      throw e;
-    }
 
-    // 流结束后处理结果
-    if (hasToolCalls && currentToolCalls.length > 0) {
-      // 有工具调用 — 执行并继续循环
-      // 对齐 harness：纯工具调用轮 content 发空串（而非 null）；reasoning_content 必须回传防会话"砖化"
-      ctx.agentMessages.push({
-        role: 'assistant',
-        content: accumulatedContent || '',
-        tool_calls: currentToolCalls,
-        ...(accumulatedReasoning ? { reasoning_content: accumulatedReasoning } : {}),
-      });
+      lastToolResult = result; // 记录工具结果供去重
 
-      for (const tc of currentToolCalls) {
-        // §30/§31 收口：工具调用预算统一来自 unifiedBudget（budgetFromAgentLimits 派生）
-        toolCallCount++;
-        if (toolCallCount > unifiedBudget.maxToolCalls) {
-          const budgetMsg = `⚠️ 已达到工具调用上限 (${unifiedBudget.maxToolCalls} 次)，本次请求停止执行。如需继续，请发送新消息。`;
-          ctx.sseSend('message', JSON.stringify({ content: budgetMsg }));
+      // 旧协议（兼容旧前端）
+      ctx.sseSend('tool-call', JSON.stringify({ name: funcName, arguments: args, id: tool.id }));
+      ctx.sseSend('tool-result', JSON.stringify({ name: funcName, result: result.slice(0, 500), id: tool.id }));
+
+      // 统一协议：tool.completed（完整结果入 envelope，带 agentId + 关联 started）
+      if (ctx.body.conversationId && toolStarted) {
+        ctx.eventBus.emit(ctx.convId, 'tool.completed', {
+          taskId: ctx.runTaskId,
+          agentId: ctx.agent.id,
+          agentType: ctx.agentCtx.agentType,
+          status: 'completed',
+          tool: buildToolPayload(funcName, args, result),
+          parentEventId: toolStarted.eventId,
+        });
+      }
+      return result.slice(0, 50000);
+    },
+    // 流式 chunk 转发：SSE 实时输出 + 事件总线（进入统一 Loop 不丢失实时输出）
+    onChunk: (chunk: StreamChunk) => {
+      switch (chunk.type) {
+        case 'reasoning-delta': {
+          const r = chunk.text;
+          ctx.sseSend('reasoning', JSON.stringify({ content: r, agentId: ctx.agent.id, agentName: ctx.agent.name }));
+          if (ctx.body.conversationId) {
+            ctx.eventBus.emit(ctx.convId, 'agent.reasoning.delta', {
+              taskId: ctx.runTaskId,
+              agentId: ctx.agent.id,
+              agentType: ctx.agentCtx.agentType,
+              content: r,
+            });
+          }
+          break;
+        }
+        case 'text-delta': {
+          const t = chunk.text;
           if (ctx.body.conversationId) {
             ctx.eventBus.emit(ctx.convId, 'agent.message.delta', {
               taskId: ctx.runTaskId,
               agentId: ctx.agent.id,
               agentType: ctx.agentCtx.agentType,
-              content: budgetMsg,
+              content: t,
             });
           }
-          agentReply = budgetMsg;
           break;
         }
-
-        const funcName = tc.function?.name || '';
-        // parseToolArgsSafe：非法 JSON 降级为 {ok:false}，走工具降级路径（不炸流）
-        const parsed = parseToolArgsSafe(tc.function?.arguments);
-        let args: any = parsed.args;
-        if (!parsed.ok) {
-          const errMsg = `工具参数不是合法 JSON: ${String(tc.function?.arguments || '').slice(0, 500)}`;
-          ctx.sseSend('tool-call', JSON.stringify({ name: funcName, arguments: {}, id: tc.id }));
-          ctx.sseSend('tool-result', JSON.stringify({ name: funcName, result: errMsg, id: tc.id }));
-          if (ctx.body.conversationId) {
-            ctx.eventBus.emit(ctx.convId, 'tool.completed', {
-              taskId: ctx.runTaskId,
-              agentId: ctx.agent.id,
-              agentType: ctx.agentCtx.agentType,
-              status: 'error',
-              content: errMsg,
-              tool: { ...buildToolPayload(funcName, {}), error: { message: errMsg }, toolOutput: undefined },
-              parentEventId: undefined,
-            });
-          }
-          ctx.agentMessages.push({ role: 'tool', tool_call_id: tc.id, content: errMsg });
-          continue;
-        }
-
-        const mcpTool = ctx.mcpTools.find((t: any) => t.name === funcName);
-        let result: string;
-
-        // 统一协议：tool.started（带 agentId —— 多 Agent 并行归属的关键修复）
-        const toolStarted = ctx.body.conversationId
-          ? ctx.eventBus.emit(ctx.convId, 'tool.started', {
-              taskId: ctx.runTaskId,
-              agentId: ctx.agent.id,
-              agentType: ctx.agentCtx.agentType,
-              status: 'started',
-              tool: buildToolPayload(funcName, args),
-            })
-          : null;
-
-        try {
-          // P0-01 收口：统一生产执行器（PolicyEngine 唯一裁决 + Approval + Timeout + Cancel）
-          // 审批在 executor 内部完整处理（onApprovalPrompt 回调推送 ask-confirm）
-          const execResult = await productionExecutor.execute(funcName, args);
-          result = execResult.result;
-          if (execResult.error) throw new Error(execResult.error);
-        } catch (e: unknown) {
-          const errMsg = (e instanceof Error ? e.message : String(e)) || '工具执行失败';
-          result = `错误: ${errMsg}`;
-          lastToolResult = result;
-          if (ctx.body.conversationId && toolStarted) {
-            ctx.eventBus.emit(ctx.convId, 'tool.error', {
-              taskId: ctx.runTaskId,
-              agentId: ctx.agent.id,
-              agentType: ctx.agentCtx.agentType,
-              status: 'error',
-              content: errMsg,
-              tool: { ...buildToolPayload(funcName, args), error: { message: errMsg }, toolOutput: undefined },
-              parentEventId: toolStarted.eventId,
-            });
-          }
-          ctx.sseSend('tool-call', JSON.stringify({ name: funcName, arguments: args, id: tc.id }));
-          ctx.sseSend('tool-result', JSON.stringify({ name: funcName, result: result.slice(0, 500), id: tc.id }));
-          ctx.agentMessages.push({ role: 'tool', tool_call_id: tc.id, content: `错误: ${errMsg}` });
-          continue;
-        }
-
-        lastToolResult = result; // 记录工具结果供去重
-        ctx.agentMessages.push({ role: 'tool', tool_call_id: tc.id, content: result.slice(0, 50000) });
-
-        // 旧协议（兼容旧前端）
-        ctx.sseSend('tool-call', JSON.stringify({ name: funcName, arguments: args, id: tc.id }));
-        ctx.sseSend('tool-result', JSON.stringify({ name: funcName, result: result.slice(0, 500), id: tc.id }));
-
-        // 统一协议：tool.completed（完整结果入 envelope，带 agentId + 关联 started）
-        if (ctx.body.conversationId && toolStarted) {
-          ctx.eventBus.emit(ctx.convId, 'tool.completed', {
-            taskId: ctx.runTaskId,
-            agentId: ctx.agent.id,
-            agentType: ctx.agentCtx.agentType,
-            status: 'completed',
-            tool: buildToolPayload(funcName, args, result),
-            parentEventId: toolStarted.eventId,
-          });
-        }
+        default: break;
       }
+    },
+    // 完成判定：缺省有文本即完成（与 Normal 一致）
+    isTaskComplete: (resp) => resp.content.trim() !== '',
+  };
 
-      // §30/§31 收口：工具调用预算统一来自 unifiedBudget（budgetFromAgentLimits 派生）
-      if (toolCallCount > unifiedBudget.maxToolCalls) {
-        break;
-      }
-    } else {
-      // 纯文本回复 — 结束
-      agentReply = accumulatedContent || '';
-      break;
-    }
+  // inbox 指令（steer/followup）：运行中用户补充的指令 → 注入为初始消息尾部（Loop 启动前读取一次）
+  const convKey = (ctx.body.conversationId as string | undefined) ?? 'anonymous';
+  const directives = drainDirectives(convKey);
+  for (const d of directives) {
+    ctx.agentMessages.push({ role: 'user', content: `[补充指令] ${d.text}` });
   }
+
+  // 唯一生产循环控制器（第四部分：ToolLoop 收口）
+  const executionBudget: ExecutionBudget = {
+    maxTurns: unifiedBudget.maxTurns,
+    maxToolCalls: unifiedBudget.maxToolCalls,
+    maxTimeMs: unifiedBudget.maxTimeMs,
+    maxTokens: unifiedBudget.maxTokens,
+    maxCostCny: unifiedBudget.maxCostCny,
+  };
+  const result = await runExecutionLoop(deps, ctx.agentMessages, {
+    loop: !!ctx.body.loop,
+    budget: executionBudget,
+    signal: ctx.clientAbort.signal,
+  });
+
+  agentReply = result.content;
+  agentTokens = result.usage.cumulativeTotalTokens;
+  toolCallCount = result.toolCallCount;
+  // §16/§17 收口：流中断/失败不得伪装成功 —— 即使已有部分内容，也必须标记 interrupted，
+  // 由上层（orchestration）据此发 agent.error 而非 agent.completed。
+  const loopInterrupted = result.interrupted === true || result.state === 'failed';
 
   // 去重：若 AI 回复原样复述了工具执行结果，替换为简短提示（避免白字+绿框重复显示）
   const dedupReplacement = dedupToolResultReplacement(agentReply, lastToolResult);
   if (dedupReplacement) {
     agentReply = dedupReplacement;
+  }
+
+  // 流中断时不走"强制总结"（强制总结会掩盖中断事实），直接标记 interrupted
+  if (loopInterrupted) {
+    if (!agentReply) agentReply = '⚠️ 响应流中断（未收到完整结束标记）';
+    return { agentReply, agentTokens, lastToolResult, toolCallCount, interrupted: true };
   }
 
   // 核心修复：工具循环结束后，若 agent 一直调工具没给文本总结（agentReply 为空），

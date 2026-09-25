@@ -171,7 +171,7 @@ export function SyncSettings({
 
           {/* 文件存储 */}
           <div className="p-4 rounded-lg" style={{ background: 'var(--card-bg)', border: '1px solid var(--card-border)' }}>
-            <div style={{ fontSize: '14px', fontWeight: 600, color: 'var(--text-primary)', marginBottom: 4 }}>文件存储</div>
+            <div style={{ fontSize: '14px', fontWeight: 600, color: 'var(--text-primary)', marginBottom: 8 }}>文件存储</div>
             <div style={{ fontSize: '12px', color: 'var(--text-tertiary)', marginBottom: 12 }}>上传文件到云端（base64 存储于 knowledge 表）</div>
             <div className="flex items-center gap-3">
               <input ref={fileInputRef} type="file" className="hidden" onChange={handleFileUpload} />

@@ -29,19 +29,19 @@ function NodeConfigPanel({ node, onChange }: NodeConfigProps) {
 
       <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
         <div>
-          <label style={{ fontSize: 12, color: 'var(--text-secondary)', display: 'block', marginBottom: 4 }}>节点名称</label>
+          <label style={{ fontSize: 12, color: 'var(--text-secondary)', display: 'block', marginBottom: 8 }}>节点名称</label>
           <input style={inputStyle} value={node.label} onChange={e => setLabel(e.target.value)} />
         </div>
 
         {node.type === 'tool' && (
           <>
             <div>
-              <label style={{ fontSize: 12, color: 'var(--text-secondary)', display: 'block', marginBottom: 4 }}>工具名称</label>
+              <label style={{ fontSize: 12, color: 'var(--text-secondary)', display: 'block', marginBottom: 8 }}>工具名称</label>
               <input style={inputStyle} placeholder="如: read_file / write_file / list_dir"
                 value={String(node.config.name || '')} onChange={e => set('name', e.target.value)} />
             </div>
             <div>
-              <label style={{ fontSize: 12, color: 'var(--text-secondary)', display: 'block', marginBottom: 4 }}>参数 (JSON)</label>
+              <label style={{ fontSize: 12, color: 'var(--text-secondary)', display: 'block', marginBottom: 8 }}>参数 (JSON)</label>
               <textarea style={{ ...inputStyle, minHeight: 90, fontFamily: 'monospace', resize: 'vertical' }}
                 placeholder='{"path": "D:/test.txt"}'
                 value={JSON.stringify(node.config.args || {}, null, 2)}
@@ -55,23 +55,23 @@ function NodeConfigPanel({ node, onChange }: NodeConfigProps) {
         {node.type === 'agent' && (
           <>
             <div>
-              <label style={{ fontSize: 12, color: 'var(--text-secondary)', display: 'block', marginBottom: 4 }}>提示词</label>
+              <label style={{ fontSize: 12, color: 'var(--text-secondary)', display: 'block', marginBottom: 8 }}>提示词</label>
               <textarea style={{ ...inputStyle, minHeight: 110, resize: 'vertical' }}
                 placeholder="告诉 AI 做什么…"
                 value={String(node.config.prompt || '')} onChange={e => set('prompt', e.target.value)} />
             </div>
             <div>
-              <label style={{ fontSize: 12, color: 'var(--text-secondary)', display: 'block', marginBottom: 4 }}>Provider ID（留空用默认）</label>
+              <label style={{ fontSize: 12, color: 'var(--text-secondary)', display: 'block', marginBottom: 8 }}>Provider ID（留空用默认）</label>
               <input style={inputStyle} placeholder="可选"
                 value={String(node.config.providerId || '')} onChange={e => set('providerId', e.target.value)} />
             </div>
             <div>
-              <label style={{ fontSize: 12, color: 'var(--text-secondary)', display: 'block', marginBottom: 4 }}>模型（留空用默认）</label>
+              <label style={{ fontSize: 12, color: 'var(--text-secondary)', display: 'block', marginBottom: 8 }}>模型（留空用默认）</label>
               <input style={inputStyle} placeholder="可选"
                 value={String(node.config.model || '')} onChange={e => set('model', e.target.value)} />
             </div>
             <div>
-              <label style={{ fontSize: 12, color: 'var(--text-secondary)', display: 'block', marginBottom: 4 }}>最大 Token</label>
+              <label style={{ fontSize: 12, color: 'var(--text-secondary)', display: 'block', marginBottom: 8 }}>最大 Token</label>
               <input style={inputStyle} type="number" placeholder="2048"
                 value={String(node.config.maxTokens || '')} onChange={e => set('maxTokens', Number(e.target.value) || 2048)} />
             </div>
@@ -81,14 +81,14 @@ function NodeConfigPanel({ node, onChange }: NodeConfigProps) {
         {node.type === 'media' && (
           <>
             <div>
-              <label style={{ fontSize: 12, color: 'var(--text-secondary)', display: 'block', marginBottom: 4 }}>类型</label>
+              <label style={{ fontSize: 12, color: 'var(--text-secondary)', display: 'block', marginBottom: 8 }}>类型</label>
               <select style={inputStyle} value={String(node.config.type || 'image')} onChange={e => set('type', e.target.value)}>
                 <option value="image">图片</option>
                 <option value="video">视频</option>
               </select>
             </div>
             <div>
-              <label style={{ fontSize: 12, color: 'var(--text-secondary)', display: 'block', marginBottom: 4 }}>提示词</label>
+              <label style={{ fontSize: 12, color: 'var(--text-secondary)', display: 'block', marginBottom: 8 }}>提示词</label>
               <textarea style={{ ...inputStyle, minHeight: 90, resize: 'vertical' }}
                 value={String(node.config.prompt || '')} onChange={e => set('prompt', e.target.value)} />
             </div>
@@ -98,14 +98,14 @@ function NodeConfigPanel({ node, onChange }: NodeConfigProps) {
         {node.type === 'document' && (
           <>
             <div>
-              <label style={{ fontSize: 12, color: 'var(--text-secondary)', display: 'block', marginBottom: 4 }}>类型</label>
+              <label style={{ fontSize: 12, color: 'var(--text-secondary)', display: 'block', marginBottom: 8 }}>类型</label>
               <select style={inputStyle} value={String(node.config.kind || 'doc')} onChange={e => set('kind', e.target.value)}>
                 <option value="doc">Word 文档</option>
                 <option value="ppt">PPT 演示</option>
               </select>
             </div>
             <div>
-              <label style={{ fontSize: 12, color: 'var(--text-secondary)', display: 'block', marginBottom: 4 }}>标题</label>
+              <label style={{ fontSize: 12, color: 'var(--text-secondary)', display: 'block', marginBottom: 8 }}>标题</label>
               <input style={inputStyle} value={String(node.config.title || '')} onChange={e => set('title', e.target.value)} />
             </div>
           </>
@@ -114,7 +114,7 @@ function NodeConfigPanel({ node, onChange }: NodeConfigProps) {
         {node.type === 'condition' && (
           <>
             <div>
-              <label style={{ fontSize: 12, color: 'var(--text-secondary)', display: 'block', marginBottom: 4 }}>判断方式</label>
+              <label style={{ fontSize: 12, color: 'var(--text-secondary)', display: 'block', marginBottom: 8 }}>判断方式</label>
               <select style={inputStyle} value={String(node.config.expression || 'truthy')} onChange={e => set('expression', e.target.value)}>
                 <option value="truthy">值非空/非 false</option>
                 <option value="equals">等于</option>
@@ -122,13 +122,13 @@ function NodeConfigPanel({ node, onChange }: NodeConfigProps) {
               </select>
             </div>
             <div>
-              <label style={{ fontSize: 12, color: 'var(--text-secondary)', display: 'block', marginBottom: 4 }}>输入值</label>
+              <label style={{ fontSize: 12, color: 'var(--text-secondary)', display: 'block', marginBottom: 8 }}>输入值</label>
               <input style={inputStyle} placeholder="可用 {{prev.节点ID}} 引用上游输出"
                 value={String(node.config.value || '')} onChange={e => set('value', e.target.value)} />
             </div>
             {(node.config.expression === 'equals' || node.config.expression === 'contains') && (
               <div>
-                <label style={{ fontSize: 12, color: 'var(--text-secondary)', display: 'block', marginBottom: 4 }}>比较值</label>
+                <label style={{ fontSize: 12, color: 'var(--text-secondary)', display: 'block', marginBottom: 8 }}>比较值</label>
                 <input style={inputStyle} value={String(node.config.compare || '')} onChange={e => set('compare', e.target.value)} />
               </div>
             )}
@@ -144,7 +144,7 @@ function NodeConfigPanel({ node, onChange }: NodeConfigProps) {
         {node.type === 'system' && (
           <>
             <div>
-              <label style={{ fontSize: 12, color: 'var(--text-secondary)', display: 'block', marginBottom: 4 }}>系统命令</label>
+              <label style={{ fontSize: 12, color: 'var(--text-secondary)', display: 'block', marginBottom: 8 }}>系统命令</label>
               <textarea style={{ ...inputStyle, minHeight: 80, fontFamily: 'monospace', resize: 'vertical' }}
                 placeholder="如: powercfg /setactive 381b4222-fb78-11d3-915d-00c04f72d4e8 (设置音量)&#10;或: start notepad (打开记事本)&#10;或: echo Hello > D:\\test.txt"
                 value={String(node.config.command || '')} onChange={e => set('command', e.target.value)} />
@@ -156,7 +156,7 @@ function NodeConfigPanel({ node, onChange }: NodeConfigProps) {
               • 可用 {'{{prev.节点ID}}'} 引用上游输出作为命令参数
             </div>
             <div>
-              <label style={{ fontSize: 12, color: 'var(--text-secondary)', display: 'block', marginBottom: 4, marginTop: 8 }}>常用命令示例</label>
+              <label style={{ fontSize: 12, color: 'var(--text-secondary)', display: 'block', marginBottom: 8, marginTop: 8 }}>常用命令示例</label>
               <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
                 <button className="btn btn-ghost" style={{ fontSize: 11, padding: '4px 8px', justifyContent: 'flex-start' }}
                   onClick={() => set('command', 'powershell -Command "(New-Object -ComObject WScript.Shell).SendKeys([char]175)"')}>

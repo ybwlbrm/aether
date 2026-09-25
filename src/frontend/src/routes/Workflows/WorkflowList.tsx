@@ -7,6 +7,8 @@ import { Workflow as WorkflowIcon, Play, Save, Plus, Trash, Bot, FileText, Loade
 import type { Workflow } from './types';
 import { NodePalette } from './NodePalette';
 import { uid } from './constants';
+// P0 通知幂等化：工作流终态通知统一经 NotificationCenter（dedupeKey 幂等）
+import { notificationCenter, buildTerminalDedupeKey } from '../../lib/notification-center';
 
 interface WorkflowListProps {
   workflows: Workflow[];
@@ -147,10 +149,28 @@ export function WorkflowList({
                         e.stopPropagation();
                         try {
                           const result = await api.runWorkflow(wf.id, {});
+                          // P0 通知幂等化：工作流终态 → NotificationCenter（唯一入口，dedupeKey 幂等）
                           if (result.status === 'completed') {
-                            try { const { sendNotification } = await import('../../lib/notifications'); sendNotification('✅ 工作流运行完成', { body: `${wf.name} 执行成功` }); } catch { /* ignore */ }
+                            notificationCenter.notifyOnce({
+                              id: `wf-list-${result.runId ?? wf.id}`,
+                              type: 'completed',
+                              title: '✅ 工作流运行完成',
+                              body: `${wf.name} 执行成功`,
+                              createdAt: new Date().toISOString(),
+                              dedupeKey: buildTerminalDedupeKey('workflow', result.runId ?? wf.id, 'completed'),
+                            });
+                          } else if (result.status === 'failed') {
+                            notificationCenter.notifyOnce({
+                              id: `wf-list-${result.runId ?? wf.id}`,
+                              type: 'failed',
+                              title: '❌ 工作流运行失败',
+                              body: result.error || '未知错误',
+                              createdAt: new Date().toISOString(),
+                              dedupeKey: buildTerminalDedupeKey('workflow', result.runId ?? wf.id, 'failed'),
+                              always: true,
+                            });
                           } else {
-                            alert(`${wf.name} 运行${result.status === 'failed' ? '失败' : '完成'}: ${result.error || ''}`);
+                            alert(`${wf.name} 运行完成: ${result.error || ''}`);
                           }
                         } catch (err: unknown) {
                           alert('运行失败: ' + (err instanceof Error ? err.message : String(err)));
