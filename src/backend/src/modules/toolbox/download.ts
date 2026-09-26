@@ -2,7 +2,10 @@ import type { FastifyInstance } from 'fastify';
 import type { BackendConfig } from '../../config/index.js';
 import { exportDir } from './utils.js';
 import { existsSync, readFileSync } from 'node:fs';
-import { resolve, relative } from 'node:path';
+import { resolve, relative, sep } from 'node:path';
+// AEX-P0-29: 统一 path-guard —— realpath 解析后校验仍落在 exportDir 内，
+// 防 exportDir 内 junction/symlink 指向外部目录的读取逃逸（替代自建 relative 判断）
+import { resolvePhysicalPath } from '../../lib/path-guard.js';
 
 /** 下载转换结果端点 */
 export function registerDownloadRoutes(app: FastifyInstance, config: BackendConfig): void {
@@ -16,11 +19,18 @@ export function registerDownloadRoutes(app: FastifyInstance, config: BackendConf
       return reply.code(400).send({ error: '非法文件名' });
     }
     const filePath = resolve(baseDir, filename);
-    if (relative(baseDir, filePath).startsWith('..') || !existsSync(filePath)) {
+    // AEX-P0-29: 物理路径解析校验（realpath 防 junction/symlink 逃逸），替换自建 relative 判断
+    if (!existsSync(filePath)) {
       return reply.code(404).send({ error: '文件不存在' });
+    }
+    const physical = resolvePhysicalPath(filePath);
+    const basePhysical = resolvePhysicalPath(baseDir);
+    const basePrefix = basePhysical.endsWith(sep) ? basePhysical : basePhysical + sep;
+    if (!physical.startsWith(basePrefix) && physical !== basePhysical) {
+      return reply.code(403).send({ error: '路径不在允许目录内' });
     }
     reply.header('Content-Disposition', `attachment; filename="${filename}"`);
     reply.type('application/octet-stream');
-    return readFileSync(filePath);
+    return readFileSync(physical);
   });
 }

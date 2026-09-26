@@ -5,22 +5,23 @@ import { writeFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { resolve, basename } from 'node:path';
 import { URL } from 'node:url';
 import { logger } from '../../lib/logger.js';
+// AEX-P0-26: 与全站出站请求统一 —— 经 safe-fetch 的 DNS 解析级校验（防 DNS rebinding，
+// 不能只查 URL 字符串），替代原 testing 模块自建的字符串级 isSafeTestUrl
+import { assertPublicResolve } from '../../lib/safe-fetch.js';
 import type { Browser, ConsoleMessage, Page } from 'playwright';
 
-/** P0-1: SSRF 防护 — 禁止本地/内网/file 协议 URL */
-function isSafeTestUrl(raw: string): { ok: boolean; reason?: string } {
-  let u: URL;
-  try { u = new URL(raw); } catch { return { ok: false, reason: '非法 URL 格式' }; }
-  if (u.protocol !== 'http:' && u.protocol !== 'https:') {
-    return { ok: false, reason: `禁止协议: ${u.protocol}（仅允许 http/https）` };
+/**
+ * AEX-P0-26: 校验测试 URL 为可公网访问的 http(s) 地址。
+ * 委托 safe-fetch 的 assertPublicResolve —— 真实 DNS 解析 + 私网/回环/链路本地/元数据
+ * IP 全拒 + 重定向跳转逐跳校验。原自建 isSafeTestUrl 只做字符串匹配，无法防 DNS rebinding。
+ */
+async function assertSafeTestUrl(raw: string): Promise<{ ok: true } | { ok: false; reason: string }> {
+  try {
+    await assertPublicResolve(raw);
+    return { ok: true };
+  } catch (e: unknown) {
+    return { ok: false, reason: e instanceof Error ? e.message : String(e) };
   }
-  const host = u.hostname.toLowerCase();
-  const BLOCKED = ['127.0.0.1', 'localhost', '0.0.0.0', '::1', '169.254.169.254', 'metadata.google.internal'];
-  if (BLOCKED.includes(host)) return { ok: false, reason: '禁止访问本地/元数据地址' };
-  if (/^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(host)) {
-    return { ok: false, reason: '禁止访问私网地址' };
-  }
-  return { ok: true };
 }
 
 // SEC-025 修复：测试运行会拉起 Chromium（重资源、有外网访问面），必须限流。
@@ -68,8 +69,8 @@ export function registerTestingRoutes(app: FastifyInstance, config: BackendConfi
       return reply.code(429).send({ error: '已有测试正在运行，请等待其完成' });
     }
 
-    // P0-1: SSRF 校验
-    const urlCheck = isSafeTestUrl(body.url);
+    // AEX-P0-26: SSRF 校验 —— DNS 解析级（防 rebinding），替代原字符串级 isSafeTestUrl
+    const urlCheck = await assertSafeTestUrl(body.url);
     if (!urlCheck.ok) {
       return reply.code(400).send({ error: urlCheck.reason });
     }

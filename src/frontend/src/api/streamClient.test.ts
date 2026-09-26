@@ -150,4 +150,32 @@ describe('streamClient — SSE 流错误必须 reject（P0-14/P0-15）', () => {
     await expect(streamConversation('conv1', 'hi', { onEvent })).resolves.toBeUndefined();
     vi.unstubAllGlobals();
   });
+
+  it('AEX-P0-011: 同一 eventId 的 envelope 重复到达只 emit 一次（防 SSE 重连/polling 双发）', async () => {
+    const onEvent = vi.fn();
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      body: new ReadableStream<Uint8Array>({
+        start(controller) {
+          // 同一 eventId 出现两次（模拟重连重放 / 服务端双发）
+          const frame = 'event: agent.message.delta\ndata: {"eventId":"dup-1","eventType":"agent.message.delta","seq":3,"content":"hello"}\n\n';
+          controller.enqueue(new TextEncoder().encode(frame + frame));
+          controller.enqueue(new TextEncoder().encode(
+            'event: task.completed\ndata: {"eventId":"done-1","eventType":"task.completed","seq":4,"status":"completed"}\n\n',
+          ));
+          controller.close();
+        },
+      }),
+    } as unknown as Response));
+
+    await expect(streamConversation('conv1', 'hi', { onEvent })).resolves.toBeUndefined();
+    // 去重后仅 1 次 envelope + 1 次终结事件
+    const envelopes = onEvent.mock.calls
+      .map((c: unknown[]) => (c[0] as { kind?: string; ev?: { eventId?: string } }))
+      .filter((e: { kind?: string }) => e.kind === 'envelope');
+    expect(envelopes).toHaveLength(2);
+    const deltaEvents = envelopes.filter((e: { ev?: { eventId?: string } }) => e.ev?.eventId === 'dup-1');
+    expect(deltaEvents).toHaveLength(1);
+    vi.unstubAllGlobals();
+  });
 });

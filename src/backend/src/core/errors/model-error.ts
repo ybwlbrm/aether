@@ -32,6 +32,10 @@ export interface ModelErrorOptions extends Omit<RuntimeErrorOptions, 'code' | 'r
   code?: string;
   /** Override retryable behavior (defaults to true for rate limits / 5xx) */
   retryable?: boolean;
+  /** AEX-P0-39: provider 请求 ID（供支持工单 / 日志关联；HTTP `x-request-id` 等） */
+  requestId?: string;
+  /** AEX-P0-39: 建议等待时长 ms（来自 `Retry-After` 头或 429 body retry_after）；retry-policy 直接消费 */
+  retryAfterMs?: number;
 }
 
 /**
@@ -56,6 +60,8 @@ export class ModelError extends RuntimeError {
   public readonly model?: string;
   public readonly rateLimitReset?: number;
   public readonly statusCode?: number;
+  public readonly requestId?: string;
+  public readonly retryAfterMs?: number;
 
   constructor(message: string, options: ModelErrorOptions) {
     const isRateLimit = options.statusCode === 429 || options.rateLimitReset != null;
@@ -74,6 +80,8 @@ export class ModelError extends RuntimeError {
     this.model = options.model;
     this.rateLimitReset = options.rateLimitReset;
     this.statusCode = options.statusCode;
+    this.requestId = options.requestId;
+    this.retryAfterMs = options.retryAfterMs;
 
     Object.setPrototypeOf(this, ModelError.prototype);
   }
@@ -90,6 +98,8 @@ export class ModelError extends RuntimeError {
       model: this.model,
       rateLimitReset: this.rateLimitReset,
       statusCode: this.statusCode,
+      requestId: this.requestId,
+      retryAfterMs: this.retryAfterMs,
     };
   }
 

@@ -1,6 +1,6 @@
 # Changelog
 
-## [2.3.1] - 2026-09-26 · Master Remediation（AEX-MASTER 规范整改）
+## [2.4.0] - 2026-09-26 · Master Remediation（AEX-MASTER 规范整改）
 
 ### 架构收口（单一执行模型）
 

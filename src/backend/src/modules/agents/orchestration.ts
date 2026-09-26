@@ -212,15 +212,17 @@ export async function handleOrchestrate(
   }
 
   // 解析 agent 的 provider + model 配置
-  function resolveAgentEndpoint(agentId: string): { baseUrl: string; apiKey: string; model: string } | null {
+  // P0-35: 返回 providerId —— agent 子循环经 ProviderRuntimeRegistry 按真实
+  // providerId 复用熔断器（此前伪 id 'ep' 每请求新建，熔断状态无法累积）
+  function resolveAgentEndpoint(agentId: string): { baseUrl: string; apiKey: string; model: string; providerId?: string } | null {
     const cfg = configMap.get(agentId);
     const fallback = getProviderByCapability('text', config.encryptionKey);
     if (cfg) {
       const p = getProviderById(cfg.providerId, config.encryptionKey);
-      if (p) return { baseUrl: p.baseUrl.replace(/\/$/, ''), apiKey: p.apiKey, model: cfg.model || p.defaultModel || fallback?.defaultModel || 'gpt-4o' };
+      if (p) return { baseUrl: p.baseUrl.replace(/\/$/, ''), apiKey: p.apiKey, model: cfg.model || p.defaultModel || fallback?.defaultModel || 'gpt-4o', providerId: p.id };
     }
     if (!fallback) return null;
-    return { baseUrl: fallback.baseUrl.replace(/\/$/, ''), apiKey: fallback.apiKey, model: fallback.defaultModel || 'gpt-4o' };
+    return { baseUrl: fallback.baseUrl.replace(/\/$/, ''), apiKey: fallback.apiKey, model: fallback.defaultModel || 'gpt-4o', providerId: fallback.id };
   }
 
   // 修复 L573：provider 检查移到 SSE 头之前，避免 writeHead 后 return JSON 导致协议冲突
@@ -560,6 +562,7 @@ export async function handleOrchestrate(
         const toolLoopCtx: ToolLoopContext = {
           agent,
           ep,
+          providerId: ep.providerId,
           agentMessages,
           toolListForThisAgent: filterToolsByWebSearch(allTools, body.webSearch !== false),
           allTools,

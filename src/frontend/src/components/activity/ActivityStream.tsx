@@ -11,9 +11,10 @@ const TOOL_LABELS: Record<string, string> = {
   execute_command: 'Shell', run_tests: 'Test', code_review: 'Review', lsp_diagnostics: 'LSP',
 };
 
-const ToolLine = React.memo(function ToolLine({ title, summary, state }: { title: string; summary: string; state: string }) {
+const ToolLine = React.memo(function ToolLine({ title, summary, state, retryReason }: { title: string; summary: string; state: string; retryReason?: string }) {
   const isRunning = state === 'running';
   const isError = state === 'error';
+  const isRetry = state === 'retry';
   return (
     <div
       data-state={state}
@@ -26,13 +27,13 @@ const ToolLine = React.memo(function ToolLine({ title, summary, state }: { title
         fontFamily: 'var(--font-mono, ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace)',
         fontSize: 14,
         lineHeight: '24px',
-        color: isError ? 'var(--color-danger, #f87171)' : 'var(--text-primary)',
+        color: isError ? 'var(--color-danger, #f87171)' : isRetry ? 'var(--color-warning, #fbbf24)' : 'var(--text-primary)',
       }}
     >
-      <span style={{ fontWeight: 400, flexShrink: 0 }}>{title}</span>
+      <span style={{ fontWeight: 400, flexShrink: 0 }}>{isRetry ? '↻' : ''}{title}</span>
       <span style={{ flexShrink: 0, display: 'inline-block', width: 2, height: 2, borderRadius: 1, margin: '0 8px', verticalAlign: 'middle', background: 'var(--text-tertiary)' }} />
-      <span style={{ flex: '1 1 auto', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 14, lineHeight: '24px', color: isError ? 'inherit' : 'var(--text-tertiary)' }}>
-        {summary}
+      <span style={{ flex: '1 1 auto', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 14, lineHeight: '24px', color: isError || isRetry ? 'inherit' : 'var(--text-tertiary)' }}>
+        {isRetry && retryReason ? `${summary} · ${retryReason}` : summary}
       </span>
       {isRunning && <div className="tool-row-sweep" />}
     </div>
@@ -92,8 +93,14 @@ export function ActivityStream({ events, taskCard }: { events: AgentEventEnvelop
     if (rec.kind === 'tool') {
       const label = rec.label ? (TOOL_LABELS[rec.label] ?? 'Tool') : 'Tool';
       const target = rec.target ?? '';
-      const state = rec.status === 'error' ? 'error' : rec.status === 'completed' ? 'ok' : 'running';
-      result.push(<ToolLine key={`t-${rec.seq}`} title={label} summary={target} state={state} />);
+      // AEX-P0-052: retry 状态独立渲染（此前折叠为 running，重试对用户不可见）；
+      // rec.side 在 tool.retry 时存了重试原因，随行展示。
+      const state = rec.status === 'error' ? 'error'
+        : rec.status === 'retry' ? 'retry'
+        : rec.status === 'completed' ? 'ok'
+        : 'running';
+      const retryReason = rec.status === 'retry' ? rec.side : undefined;
+      result.push(<ToolLine key={`t-${rec.seq}`} title={label} summary={target} state={state} retryReason={retryReason} />);
     } else if (rec.kind === 'agent' && rec.status === 'running' && rec.message) {
       result.push(<ThinkLine key={`a-${rec.seq}`} text={rec.message} running={rec.status === 'running'} />);
     }

@@ -481,4 +481,74 @@ describe('tool-executor', () => {
       assert.ok(result.approvalId.startsWith('legacy-approval:'));
     });
   });
+
+  describe('P0-19: PolicyEngine 唯一裁决者（enforce 模式不得再串联 legacy ToolPolicy）', () => {
+    test('enforce=true: PolicyEngine allow 不被 legacy ToolPolicy deny 覆盖（单裁决）', async () => {
+      const registry = new ToolRegistry();
+      registry.register(createTestTool({ name: 'single-adjudicator-tool' }));
+      // PolicyEngine 显式 allow
+      const engine = new PolicyEngine([{ id: 'allow-rule', capability: 'tool.single-adjudicator-tool', effect: 'allow' }]);
+      // legacy ToolPolicy 显式 deny —— 在 enforce 模式下不得二次裁决
+      const legacyPolicy = new ToolPolicy({ rules: [{ pattern: 'single-adjudicator-tool', action: 'deny' }] });
+      const executor = new ToolExecutor(registry, {
+        policy: legacyPolicy,
+        policyEngine: engine,
+        enforcePolicyEngine: true,
+      });
+
+      const result = await executor.execute('single-adjudicator-tool', { input: 'x' }, createContext());
+
+      assert.equal(result.kind, 'success', 'enforce 模式下 PolicyEngine 是唯一裁决者，legacy ToolPolicy 不得覆盖 allow');
+    });
+
+    test('enforce=true: PolicyEngine allow 不被 legacy require-approval 触发审批', async () => {
+      const registry = new ToolRegistry();
+      registry.register(createTestTool({ name: 'no-double-approval-tool' }));
+      const engine = new PolicyEngine([{ id: 'allow-rule', capability: 'tool.no-double-approval-tool', effect: 'allow' }]);
+      const legacyPolicy = new ToolPolicy({
+        rules: [{ pattern: 'no-double-approval-tool', action: 'require-approval' }],
+      });
+      const executor = new ToolExecutor(registry, {
+        policy: legacyPolicy,
+        policyEngine: engine,
+        enforcePolicyEngine: true,
+      });
+
+      const result = await executor.execute('no-double-approval-tool', { input: 'x' }, createContext());
+
+      assert.equal(result.kind, 'success', 'PolicyEngine allow 后不得再触发 legacy 审批');
+    });
+
+    test('enforce=true: PolicyEngine deny 仍最高优先（不被 legacy allow 覆盖）', async () => {
+      const registry = new ToolRegistry();
+      registry.register(createTestTool({ name: 'deny-wins-tool' }));
+      const engine = new PolicyEngine([{ id: 'deny-rule', capability: 'tool.deny-wins-tool', effect: 'deny' }]);
+      const legacyPolicy = new ToolPolicy({ rules: [{ pattern: '*', action: 'allow' }] });
+      const executor = new ToolExecutor(registry, {
+        policy: legacyPolicy,
+        policyEngine: engine,
+        enforcePolicyEngine: true,
+      });
+
+      const result = await executor.execute('deny-wins-tool', { input: 'x' }, createContext());
+
+      assert.equal(result.kind, 'error');
+      assert.equal((result as { error: { code: string } }).error.code, 'TOOL_DENIED');
+    });
+
+    test('enforce=true: 未注入 policyEngine 时 legacy ToolPolicy 仍生效（兼容）', async () => {
+      const registry = new ToolRegistry();
+      registry.register(createTestTool({ name: 'legacy-only-tool' }));
+      const legacyPolicy = new ToolPolicy({ rules: [{ pattern: 'legacy-only-tool', action: 'deny' }] });
+      const executor = new ToolExecutor(registry, {
+        policy: legacyPolicy,
+        enforcePolicyEngine: true,
+      });
+
+      const result = await executor.execute('legacy-only-tool', { input: 'x' }, createContext());
+
+      assert.equal(result.kind, 'error', '未注入 PolicyEngine 时 legacy ToolPolicy 仍是唯一裁决来源');
+      assert.equal((result as { error: { code: string } }).error.code, 'TOOL_DENIED');
+    });
+  });
 });

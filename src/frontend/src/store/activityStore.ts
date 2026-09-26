@@ -135,15 +135,17 @@ export function resetEventsCacheForTest(): void { eventsCache.clear(); }
 
 /**
  * 从 envelope 推导 runKey。
- * 优先使用 envelope.runId（v2 协议）；v1 协议用 sessionId+taskId 组合生成稳定 run key。
+ * AEX-P0-012: 优先使用 envelope.runId（v2 扩展字段，类型安全）；
+ * v1 协议以 taskId 承载 runId，回退 sessionId+taskId 组合生成稳定 run key。
+ * 修复：移除 `(ev as any).runId` 类型逃逸（此前 AgentEventEnvelope 无 runId
+ * 字段，v2 分支是死代码；现 shared 类型已显式声明可选 runId）。
  */
 function getRunKey(ev: AgentEventEnvelope): string {
-  // v2 协议有 runId 字段（通过 metadata 或扩展字段）
-  const runId = (ev as any).runId;
-  if (runId && typeof runId === 'string') {
-    return runId;
+  // v2 协议显式携带 runId
+  if (ev.runId && typeof ev.runId === 'string') {
+    return ev.runId;
   }
-  // v1 兼容：用 sessionId + taskId 组合
+  // v1 兼容：用 sessionId + taskId 组合（taskId 承载 runId）
   return `${ev.sessionId}:${ev.taskId}`;
 }
 

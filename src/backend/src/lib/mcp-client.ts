@@ -6,7 +6,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import type { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
-import { isSafeFetchUrl } from './safe-fetch.js';
+import { assertPublicResolve } from './safe-fetch.js';
 import { logger } from './logger.js';
 
 export interface McpServerEntry {
@@ -138,8 +138,11 @@ async function connectServer(server: McpServerEntry, timeout = 15000): Promise<{
     // 远程类型（HTTP/SSE）— 用 StreamableHTTPClientTransport
     const { StreamableHTTPClientTransport } = await import('@modelcontextprotocol/sdk/client/streamableHttp.js');
     if (!server.url) throw new Error(`远程 MCP 服务器 "${server.name}" 未配置 URL`);
-    // 纵深防御：显式校验 server.url（防配置篡改/注入）
-    if (!isSafeFetchUrl(server.url)) throw new Error(`MCP 服务器 "${server.name}" URL 存在 SSRF 风险：禁止访问链路本地/元数据地址或非 http(s) 协议`);
+    // AEX-P0-28: 纵深防御 —— 显式校验 server.url（防配置篡改/注入）。
+    // 升级为 DNS 解析级校验（assertPublicResolve）：解析后逐 IP 校验，杜绝 DNS
+    // rebinding（域名解析为公网 IP 通过、重定向后指向 169.254/私网等被拦截）。
+    // 注：远程 MCP 要求公网地址；本地 MCP server（type=local）走 stdio，不涉及 URL。
+    await assertPublicResolve(server.url);
     const headers = parseStringRecordField(server.headers) || {};
     const transport = new StreamableHTTPClientTransport(new URL(server.url), { requestInit: { headers } });
     const client = new Client({ name: 'pacc-mcp-client', version: '1.0.0' });

@@ -81,7 +81,7 @@ export function CommandCenter() {
 
   return (
     <div className="min-h-screen" style={{ background: 'var(--bg-base)', backgroundImage: 'var(--bg-gradient)' }}>
-      <div style={{ maxWidth: '1200px', margin: '0 auto', padding: '0 24px' }}>
+      <div style={{ maxWidth: 'var(--content-wide)', margin: '0 auto', padding: '0 24px' }}>
         {/* Header */}
         <motion.div 
           initial={{ opacity: 0, y: 20 }} 

@@ -238,16 +238,25 @@ export async function sendCommand(
   const commandKey = clientCommandId ?? generateUuid();
   try {
     // 幂等检查：同一 client_command_id 的原始命令已存在 → 视为已入队/已处理
+    // AEX-P0-095: select 补齐 result_summary/error/run_id —— 重复投递行必须能
+    // 取回上游完整结果（此前只查 id/status，重复命令显示"完成但空内容"）
     const { data: existing } = await sb
       .from('remote_commands')
-      .select('id, status')
+      .select('id, status, result_summary, error, run_id')
       .eq('client_command_id', commandKey)
       .eq('user_id', user.id)
       .in('status', ['pending', 'processing', 'completed'])
       .limit(1);
     if (existing && existing.length > 0) {
       console.log(`[supabase] 幂等跳过：命令已存在 (${existing[0].id}, ${existing[0].status})`);
-      return { status: 'sent', commandId: existing[0].id, clientCommandId: commandKey }
+      return {
+        status: 'sent' as const,
+        commandId: existing[0].id,
+        clientCommandId: commandKey,
+        ...(existing[0].result_summary != null ? { result: existing[0].result_summary } : {}),
+        ...(existing[0].error != null ? { error: existing[0].error } : {}),
+        ...(existing[0].run_id != null ? { runId: existing[0].run_id } : {}),
+      }
     }
 
     const { data: inserted, error } = await sb

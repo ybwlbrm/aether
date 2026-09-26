@@ -23,12 +23,14 @@ function isRecord(value: unknown): value is Record<string, unknown> {
  * AEX-P0-017：lib 层工具以「错误: xxx」字符串返回失败，executor 必须把它
  * 还原为结构化失败（error + code），否则引擎只看 error 字段会判为 completed。
  */
-function toolResult(output: string): NodeExecutionResult {
-  return nodeFailure(output, classifyToolOutput(output) ?? undefined)
+export function toolResult(output: string): NodeExecutionResult {
+  const detail = classifyToolOutput(output)
+  return detail ? nodeFailure(output, detail) : { output }
 }
 
-function commandResult(output: string): NodeExecutionResult {
-  return nodeFailure(output, classifyCommandOutput(output) ?? undefined)
+export function commandResult(output: string): NodeExecutionResult {
+  const detail = classifyCommandOutput(output)
+  return detail ? nodeFailure(output, detail) : { output }
 }
 
 function recordItems(value: unknown): Record<string, unknown>[] {

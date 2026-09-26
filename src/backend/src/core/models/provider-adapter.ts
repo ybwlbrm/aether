@@ -241,17 +241,25 @@ export function createFetchTransport(opts: FetchTransportOptions): Transport {
         // Retry-After 头（支持秒数/HTTP-date/0；由 extractRetryAfterMs 统一解析）→ 毫秒
         const retryAfterHeader = response.headers.get('retry-after');
         const retryAfterMs = retryAfterHeader !== null ? extractRetryAfterMs(retryAfterHeader) : undefined;
+        // AEX-P0-39: provider requestId（供日志/工单关联）—— 常见于 x-request-id 头
+        const requestIdHeader = response.headers.get('x-request-id')
+          ?? response.headers.get('x-amzn-requestid')
+          ?? response.headers.get('x-amz-request-id')
+          ?? undefined;
         const retryable = response.status === 429 || response.status >= 500;
+        // AEX-P0-39: retryAfterMs / requestId 作为 ModelError 结构化字段构造时传入
+        // （此前 Object.assign 外挂字段，错误在别处构造时丢失；现统一走构造选项）。
         const err = new ModelError(`provider request failed (${response.status}): ${text.slice(0, 200)}`, {
           provider: request.provider,
           model: request.model,
           code: response.status === 429 ? 'RATE_LIMIT' : 'PROVIDER_UNAVAILABLE',
           statusCode: response.status,
           retryable,
+          ...(retryAfterMs === undefined ? {} : { retryAfterMs }),
+          ...(requestIdHeader === undefined ? {} : { requestId: requestIdHeader }),
         });
         // 熔断只记录可重试的传输级失败（429/5xx）；4xx 属业务错误，不应累积熔断失败。
-        const withRetryAfter = Object.assign(err, { retryAfterMs })
-        const httpDecision = retryPolicy.decide(attempt, withRetryAfter, retryAfterMs)
+        const httpDecision = retryPolicy.decide(attempt, err, retryAfterMs)
         if (httpDecision.retry) {
           attempt += 1
           await retryPolicy.sleep(httpDecision.delayMs, signal)

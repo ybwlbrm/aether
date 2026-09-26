@@ -68,6 +68,24 @@ function ensureDir(p) {
   if (!fs.existsSync(p)) fs.mkdirSync(p, { recursive: true });
 }
 
+// ============ 0. 质量门禁（AEX-P0-099/100） ============
+// release:all 之前必须证明「代码是干净的」，否则禁止发布：
+//   typecheck（4 workspace 0 错）→ lint（0 error）→ 全量测试（backend/frontend/mobile/shared）
+// 显式 --skip-verify 仅用于极端紧急修复通道（默认禁止，打印醒目警告）。
+async function runQualityGate() {
+  if (process.argv.includes('--skip-verify')) {
+    console.warn('  ⚠️  --skip-verify 已指定：跳过质量门禁！风险自负。');
+    return;
+  }
+  log('VERIFY', '质量门禁：typecheck → lint → test（AEX-P0-099）');
+  run('npm run typecheck', PRIVATE_DIR);
+  run('npm run lint', PRIVATE_DIR);
+  run('npm run build -w src/shared', PRIVATE_DIR);
+  run('npm run build -w src/backend', PRIVATE_DIR);
+  run('npm test', PRIVATE_DIR);
+  log('VERIFY', '质量门禁全部通过');
+}
+
 // ============ 1. 打包 ============
 async function buildAll() {
   log('BUILD', '开始打包 Aether ' + VERSION);
@@ -236,6 +254,8 @@ async function main() {
   console.log('============================================');
 
   const start = Date.now();
+  // AEX-P0-099/100: 发布前强制质量门禁（typecheck/lint/test）—— 脏版本不得发布
+  await runQualityGate();
   if (!skipBuild) await buildAll();
   if (!skipSync) syncToOpenSource();
   if (!skipRelease) await release();

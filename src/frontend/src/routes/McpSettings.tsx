@@ -149,7 +149,7 @@ export function McpSettings() {
 
   return (
     <div className="min-h-screen" style={{ background: 'var(--bg-base)', backgroundImage: 'var(--bg-gradient)' }}>
-      <div style={{ maxWidth: '1100px', margin: '0 auto', padding: '0 24px' }}>
+      <div style={{ maxWidth: 'var(--content-standard)', margin: '0 auto', padding: '0 24px' }}>
         <PageHeader title="MCP & Skill 管理中心" description="管理 MCP 服务器与 Skill 技能" icon={<Server size={22} />} color="#8b5cf6"
           action={<div className="flex gap-2">
             <button className="btn btn-ghost" onClick={handleImport} disabled={importing}>

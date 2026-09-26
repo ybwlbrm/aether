@@ -37,7 +37,6 @@ function vibrancyOpacity(lum: number): number {
 
 export function Layout() {
   const location = useLocation();
-  const isCommandCenter = location.pathname === '/command-center' || location.pathname === '/';
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [customBg, setCustomBg] = useState<string | null>(null);
   // 背景轮播
@@ -538,8 +537,11 @@ export function Layout() {
           key={location.pathname}
           style={{
             padding: '0',
-            maxWidth: isCommandCenter ? 'none' : 'var(--max-content-width)',
-            margin: isCommandCenter ? '0' : '0 auto',
+            // AEX-P0-047: 不再全局截断宽度 —— 此前对所有路由施加
+            // `--max-content-width`(1120px)，覆盖了 Chat 声明的 1280px（双重复位 bug）。
+            // 页面宽度由各路由用语义 token 自控（--content-standard/wide/full）。
+            maxWidth: 'none',
+            margin: '0 auto',
           }}
           initial={{ opacity: 0, y: 6 }}
           animate={{ opacity: 1, y: 0 }}

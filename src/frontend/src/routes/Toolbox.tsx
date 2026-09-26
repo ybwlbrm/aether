@@ -392,7 +392,7 @@ export function Toolbox() {
 
   return (
     <div className="min-h-screen" style={{ background: 'var(--bg-base)', backgroundImage: 'var(--bg-gradient)' }}>
-      <div style={{ maxWidth: '1100px', margin: '0 auto', padding: '0 24px' }}>
+      <div style={{ maxWidth: 'var(--content-standard)', margin: '0 auto', padding: '0 24px' }}>
         <PageHeader title="工具箱" description="格式转换 · 文档处理 · 音频工具" icon={<Wrench size={22} />} color="var(--color-warning)" />
 
         {/* AEX-P1-017：依赖探测失败必须显式告知 —— 否则用户选了"视频提取音频"失败时

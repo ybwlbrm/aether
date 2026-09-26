@@ -127,6 +127,57 @@ describe('tool-timeout', () => {
     });
   });
 
+  describe('signal conduction (P0-25: timeout must actually stop the tool)', () => {
+    test('fn receives the combined signal and observes timeout abort', async () => {
+      const manager = new ToolTimeoutManager(5); // 5ms timeout
+      let observedSignal: AbortSignal | undefined;
+
+      try {
+        await manager.executeWithTimeout({
+          // fn now receives the combined signal so it can abort its own work
+          fn: async (signal) => {
+            observedSignal = signal;
+            await new Promise((r) => setTimeout(r, 50));
+            return 'should not reach';
+          },
+          toolName: 'signal-tool',
+        });
+        assert.fail('Should have thrown');
+      } catch (error) {
+        assert.ok(error instanceof ToolError);
+        assert.equal(error.code, 'TOOL_TIMEOUT');
+      }
+      assert.ok(observedSignal, 'fn must receive the combined AbortSignal');
+      assert.equal(observedSignal?.aborted, true, 'timeout must abort the signal handed to the tool');
+    });
+
+    test('fn observes external cancel via the same signal', async () => {
+      const manager = new ToolTimeoutManager(1000);
+      const controller = new AbortController();
+      let observedSignal: AbortSignal | undefined;
+
+      // Abort while the tool body is still awaiting (P0-25: cancel must reach the tool)
+      setTimeout(() => controller.abort(), 10);
+
+      try {
+        await manager.executeWithTimeout({
+          fn: async (signal) => {
+            observedSignal = signal;
+            await new Promise((r) => setTimeout(r, 100));
+            return 'should not reach';
+          },
+          toolName: 'cancel-signal-tool',
+          signal: controller.signal,
+        });
+        assert.fail('Should have thrown');
+      } catch (error) {
+        assert.ok(isCancellationError(error));
+      }
+      assert.ok(observedSignal, 'fn must receive the combined AbortSignal');
+      assert.equal(observedSignal?.aborted, true, 'external cancel must abort the signal handed to the tool');
+    });
+  });
+
   describe('constructor', () => {
     test('uses default timeout of 30000ms when not specified', () => {
       const manager = new ToolTimeoutManager();

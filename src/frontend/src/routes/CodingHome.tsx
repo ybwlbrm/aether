@@ -1026,9 +1026,10 @@ export function CodingHome() {
 
   return (
     <PageShell
-      className="h-screen max-w-[1280px] px-4!"
+      // AEX-P0-047: 宽度收敛到语义 token（--content-wide = min(100%, 1260px)）
+      className="h-screen px-4!"
       contentClassName="flex flex-col overflow-hidden! p-0!"
-      style={{ background: 'var(--bg-base)', backgroundImage: 'var(--bg-gradient)' }}
+      style={{ maxWidth: 'var(--content-wide)', margin: '0 auto', background: 'var(--bg-base)', backgroundImage: 'var(--bg-gradient)' }}
       header={(
         <PageHeader
           title="Aether"

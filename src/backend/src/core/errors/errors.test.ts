@@ -176,6 +176,33 @@ describe('core/errors', () => {
       assert.equal(json.rateLimitReset, 1234567890);
     });
 
+    it('AEX-P0-39: requestId/retryAfterMs 为结构化字段（不再 Object.assign 外挂）', () => {
+      const err = new ModelError('Rate limited', {
+        provider: 'deepseek',
+        model: 'deepseek-chat',
+        statusCode: 429,
+        requestId: 'req_abc123',
+        retryAfterMs: 2400,
+      });
+
+      assert.equal(err.requestId, 'req_abc123');
+      assert.equal(err.retryAfterMs, 2400);
+      const json = err.toJSON();
+      assert.equal(json.requestId, 'req_abc123');
+      assert.equal(json.retryAfterMs, 2400);
+      // 关键断言：toJSON 必须含 requestId/retryAfterMs —— 日志/监控据此关联工单与等待时长
+      assert.equal(json.name, 'ModelError');
+    });
+
+    it('AEX-P0-39: 缺省时 requestId/retryAfterMs 为 undefined（不影响既有 toJSON 形状）', () => {
+      const err = new ModelError('Test', { provider: 'openai' });
+      assert.equal(err.requestId, undefined);
+      assert.equal(err.retryAfterMs, undefined);
+      const json = err.toJSON();
+      assert.equal(json.requestId, undefined);
+      assert.equal(json.retryAfterMs, undefined);
+    });
+
     it('isModelError type guard works', () => {
       const err = new ModelError('test', { provider: 'test' });
       assert.ok(ModelError.isModelError(err));

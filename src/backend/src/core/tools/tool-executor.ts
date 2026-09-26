@@ -172,8 +172,14 @@ export class ToolExecutor {
         return pendingApprovalResult(toolName, approvalId, durationMs);
       }
 
-      // legacy ToolPolicy（仅未批准时评估；已批准直接放行）
-      if (this.#policy) {
+      // P0-19 收口：enforce + 已注入 policyEngine 时，PolicyEngine 是唯一裁决者 ——
+      // allow/deny/approval 三态已完整覆盖，不再串联 legacy ToolPolicy 二次裁决
+      // （此前 enforce=true 时 PolicyEngine allow 仍会被 legacy deny/require-approval
+      // 覆盖，形成"双裁决"，与 AEX-MASTER 唯一裁决者目标冲突）。
+      // 兼容兜底：enforce=true 但未注入 policyEngine 时，legacy ToolPolicy 仍是
+      // 唯一裁决来源（不能因 enforce 开关让 legacy 规则静默失效）。
+      if (this.#policy && (!this.#enforcePolicyEngine || !this.#policyEngine)) {
+        // legacy ToolPolicy（仅未批准时评估；已批准直接放行）—— 兼容模式保留
         const legacyPolicyResult = this.#policy.evaluate(toolName);
         if (legacyPolicyResult.action === 'deny') {
           const durationMs = Date.now() - startTime;
@@ -218,12 +224,18 @@ export class ToolExecutor {
     // Execute tool with timeout
     try {
       const result = await this.#timeoutManager.executeWithTimeout({
-        fn: async () => {
+        fn: async (timeoutSignal) => {
           // Check for cancellation before execution
-          if (context.abortSignal?.aborted) {
-            throw new CancellationError('Operation cancelled', context.abortSignal.reason);
+          if (timeoutSignal.aborted) {
+            throw this.#reasonToError(timeoutSignal.reason);
           }
-          return tool.execute(input, context);
+          // P0-25: hand the combined (timeout+cancel) signal to the tool body
+          // so it can abort its own underlying work — not just reject the race.
+          const toolContext: ToolContext =
+            timeoutSignal === context.abortSignal || context.abortSignal === undefined
+              ? context
+              : { ...context, abortSignal: timeoutSignal };
+          return tool.execute(input, toolContext);
         },
         timeoutMs: undefined, // Use default
         signal: context.abortSignal,
@@ -275,10 +287,24 @@ export class ToolExecutor {
   }
 
   /**
+   * Maps an abort reason to the correct typed error (P0-25):
+   * ToolError (timeout) rethrown as-is; CancellationError rethrown as-is;
+   * anything else → CancellationError('Operation cancelled').
+   */
+  #reasonToError(reason: unknown): unknown {
+    if (reason instanceof ToolError) {
+      return reason;
+    }
+    if (isCancellationError(reason)) {
+      return reason;
+    }
+    return new CancellationError('Operation cancelled', reason);
+  }
+
+  /**
    * Type guard to check if a value is a ToolResult.
    */
-  #isToolResult(value: unknown): value is ToolResult {
-    if (!value || typeof value !== 'object') return false;
+  #isToolResult(value: unknown): value is ToolResult {    if (!value || typeof value !== 'object') return false;
     const obj = value as Record<string, unknown>;
     return typeof obj.kind === 'string' &&
       ['success', 'error', 'pending-approval', 'timeout', 'cancelled'].includes(obj.kind);

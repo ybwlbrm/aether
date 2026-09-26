@@ -1,6 +1,6 @@
 import { useEffect, useState, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Settings as SettingsIcon, Palette, Save, Image, Trash2, Plus, FolderOpen, FileText, Star, Check, Cloud, Upload, Download, RefreshCw, Link2, Unlink, Wrench, Search, BookOpen, Workflow, FolderKanban, Database, KeyRound, Globe, Activity, Shield, Compass } from 'lucide-react';
+import { Settings as SettingsIcon, Palette, Save, Image, Trash2, Plus, FolderOpen, FileText, Star, Cloud, Upload, Download, RefreshCw, Link2, Unlink, Wrench, Search, BookOpen, Workflow, FolderKanban, Database, KeyRound, Globe, Activity, Shield, Compass, GlassWater } from 'lucide-react';
 import { useSafeTimeout } from '../hooks/useSafeTimeout';
 import { api } from '../api/client';
 import { PageHeader } from '../components/PageHeader';
@@ -871,7 +871,7 @@ export function Settings() {
 
   return (
     <div className="min-h-screen" style={{ background: 'var(--bg-base)', backgroundImage: 'var(--bg-gradient)' }}>
-      <div style={{ maxWidth: 'min(1100px, 100%)', margin: '0 auto', padding: '0 16px' }}>
+      <div style={{ maxWidth: 'var(--content-standard)', margin: '0 auto', padding: '0 16px' }}>
         <PageHeader title="设置" description="应用设置与外观定制" icon={<SettingsIcon size={22} />} color="var(--color-accent)" />
         {/* Coding 模式：功能导航（未在侧边栏展示的功能） */}
         {uiMode === 'coding' && (
@@ -1129,53 +1129,39 @@ export function Settings() {
                     </div>
                   </div>
 
-                  {/* 玻璃效果滑块 */}
+                  {/* AEX-P0-043/071: Liquid Glass 由设计语言决定，不再暴露用户可调材质参数。
+                      删除 模糊半径/饱和度/透明度 滑块 —— 高级产品不要求普通用户调 blur/saturate/opacity。
+                      保留 On/Off 开关（设计系统主开关），下方展示四种设计层级说明。 */}
                   <div style={{ borderTop: '1px solid var(--border-primary)', paddingTop: 24, marginTop: 24 }}>
                     <div className="flex items-center justify-between mb-4">
                       <div className="flex items-center gap-3">
-                        <h3 style={{ fontSize: 'var(--font-card-title)', fontWeight: 600, color: 'var(--text-primary)' }}>Liquid Glass 效果</h3>
+                        <h3 style={{ fontSize: 'var(--font-card-title)', fontWeight: 600, color: 'var(--text-primary)' }}>Liquid Glass</h3>
                         <button onClick={handleToggleGlass}
                           role="switch" aria-checked={glassEnabled} aria-label="Liquid Glass 效果开关"
-                          style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: 18, color: glassEnabled ? 'var(--color-accent)' : 'var(--text-tertiary)' }}>
-                          {glassEnabled ? '🔵' : '⚪'}
+                          style={{ background: 'none', border: 'none', cursor: 'pointer', display: 'inline-flex', color: glassEnabled ? 'var(--color-accent)' : 'var(--text-tertiary)' }}>
+                          <GlassWater size={18} />
                         </button>
                       </div>
                       <div className="flex items-center gap-2">
                         <button className="btn btn-ghost btn-sm" onClick={handleResetGlass} style={{ fontSize: 12 }}>重置默认</button>
                       </div>
                     </div>
-                    <div className="space-y-5">
-                      {/* 模糊半径 */}
-                      <div>
-                        <div className="flex items-center justify-between mb-2">
-                          <label style={{ fontSize: 13, color: 'var(--text-secondary)' }}>模糊半径</label>
-                          <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-primary)', fontFamily: 'var(--font-mono)', minWidth: 50, textAlign: 'right' }}>{glassBlur}px</span>
-                        </div>
-                        <input type="range" min="0" max="60" value={glassBlur} onChange={e => handleGlassBlur(parseInt(e.target.value))}
-                          style={{ width: '100%', height: 6, borderRadius: 3, appearance: 'none', WebkitAppearance: 'none', background: 'linear-gradient(to right, var(--color-accent) ' + (glassBlur / 60 * 100) + '%, rgba(255,255,255,0.1) ' + (glassBlur / 60 * 100) + '%)', outline: 'none', cursor: 'pointer' }} />
-                        <div className="flex justify-between text-xs" style={{ color: 'var(--text-tertiary)', marginTop: 4 }}><span>0px</span><span>60px</span></div>
+                    <div className="space-y-3" style={{ fontSize: 13, color: 'var(--text-secondary)' }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                        <span style={{ width: 8, height: 8, borderRadius: 4, background: 'var(--color-accent)', flexShrink: 0 }} />
+                        <span>导航层（Sidebar / Toolbar）— 主要 Liquid Glass</span>
                       </div>
-
-                      {/* 饱和度 */}
-                      <div>
-                        <div className="flex items-center justify-between mb-2">
-                          <label style={{ fontSize: 13, color: 'var(--text-secondary)' }}>饱和度</label>
-                          <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-primary)', fontFamily: 'var(--font-mono)', minWidth: 50, textAlign: 'right' }}>{glassSaturate}%</span>
-                        </div>
-                        <input type="range" min="50" max="400" value={glassSaturate} onChange={e => handleGlassSaturate(parseInt(e.target.value))}
-                          style={{ width: '100%', height: 6, borderRadius: 3, appearance: 'none', WebkitAppearance: 'none', background: 'linear-gradient(to right, var(--color-accent) ' + ((glassSaturate - 50) / 350 * 100) + '%, rgba(255,255,255,0.1) ' + ((glassSaturate - 50) / 350 * 100) + '%)', outline: 'none', cursor: 'pointer' }} />
-                        <div className="flex justify-between text-xs" style={{ color: 'var(--text-tertiary)', marginTop: 4 }}><span>50%</span><span>400%</span></div>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                        <span style={{ width: 8, height: 8, borderRadius: 4, background: 'var(--glass-border)', flexShrink: 0 }} />
+                        <span>浮层（Overlay / Modal）— 更厚玻璃 + 背景调暗</span>
                       </div>
-
-                      {/* 透明度 */}
-                      <div>
-                        <div className="flex items-center justify-between mb-2">
-                          <label style={{ fontSize: 13, color: 'var(--text-secondary)' }}>透明度</label>
-                          <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-primary)', fontFamily: 'var(--font-mono)', minWidth: 50, textAlign: 'right' }}>{glassOpacity.toFixed(2)}</span>
-                        </div>
-                        <input type="range" min="0.02" max="0.30" step="0.01" value={glassOpacity} onChange={e => handleGlassOpacity(parseFloat(e.target.value))}
-                          style={{ width: '100%', height: 6, borderRadius: 3, appearance: 'none', WebkitAppearance: 'none', background: 'linear-gradient(to right, var(--color-accent) ' + ((glassOpacity - 0.02) / 0.28 * 100) + '%, rgba(255,255,255,0.1) ' + ((glassOpacity - 0.02) / 0.28 * 100) + '%)', outline: 'none', cursor: 'pointer' }} />
-                        <div className="flex justify-between text-xs" style={{ color: 'var(--text-tertiary)', marginTop: 4 }}><span>0.02</span><span>0.30</span></div>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                        <span style={{ width: 8, height: 8, borderRadius: 4, background: 'var(--text-tertiary)', flexShrink: 0 }} />
+                        <span>内容层 — 普通材质 / 轻量表面（不使用 Liquid Glass）</span>
+                      </div>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                        <span style={{ width: 8, height: 8, borderRadius: 4, background: 'var(--bg-surface)', flexShrink: 0 }} />
+                        <span>自适应 — 深浅模式 / 背景图片 / 降低透明度时自动适配</span>
                       </div>
                     </div>
                   </div>

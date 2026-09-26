@@ -314,7 +314,7 @@ export function Knowledge() {
 
   return (
     <div className="min-h-screen" style={{ background: 'var(--bg-base)', backgroundImage: 'var(--bg-gradient)' }}>
-      <div style={{ maxWidth: '1100px', margin: '0 auto', padding: '0 24px' }}>
+      <div style={{ maxWidth: 'var(--content-standard)', margin: '0 auto', padding: '0 24px' }}>
         <PageHeader title="知识管理" description="收藏夹 · 闪念备忘录 · 知识库 · 记忆" icon={<BookOpen size={22} />} color="#a78bfa" />
 
         {/* AEX-P1-017：加载失败与"确实没有数据"分开呈现（原先两者共用同一个空态） */}

@@ -141,8 +141,11 @@ export async function processRemoteCommand(
     const clientCommandId = command.client_command_id;
     if (clientCommandId) {
       try {
+        // AEX-P0-095: select 补齐 result_summary/error/run_id ——
+        // 此前只查 id/status/conversation_id，重复投递行被标记为 completed 但结果为空，
+        // 手机端显示「完成但无内容」。幂等去重必须完整复制上游结果字段。
         const { data: dup } = await sb.from('remote_commands')
-          .select('id, status, conversation_id')
+          .select('id, status, conversation_id, result_summary, error, run_id')
           .eq('client_command_id', clientCommandId)
           .neq('id', commandId)
           .in('status', ['processing', 'completed'])
@@ -157,6 +160,10 @@ export async function processRemoteCommand(
               status: dup[0].status,
               conversation_id: dup[0].conversation_id,
               processed_at: new Date().toISOString(),
+              // AEX-P0-095: 复制完整结果（此前缺失导致重复行 completed 但 result_summary 为 NULL）
+              ...(dup[0].result_summary != null ? { result_summary: dup[0].result_summary } : {}),
+              ...(dup[0].error != null ? { error: dup[0].error } : {}),
+              ...(dup[0].run_id != null ? { run_id: dup[0].run_id } : {}),
             }).eq('id', commandId);
           } catch { /* 重复行结果复制失败不阻塞 */ }
           return;

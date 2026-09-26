@@ -12,6 +12,8 @@ import { pushDirective, drainDirectives } from '../../lib/inbox.js';
 import { handleSendMessage } from './chat-handler.js';
 import { runCancellationRegistry } from '../../lib/run-cancellation-registry.js';
 import { deleteConversationCascade } from './delete-conversation.js';
+// AEX-P0-21: 删除会话后禁止后台 run 的迟到事件写入（deleted conversation guard）
+import { markConversationDeleted } from '../../lib/event-bus/deleted-conversation-guard.js';
 import { logger } from '../../lib/logger.js';
 
 /**
@@ -200,6 +202,9 @@ export function registerConversationRoutes(app: FastifyInstance, config: Backend
     }
     // P0-21: 按 FK 依赖顺序级联删除全部关联行（tasks/events/activity_events/messages/runs → conversations），
     // 否则 sql.js 抛 FOREIGN KEY constraint failed
+    // AEX-P0-21: 先登记删除 guard —— 删除后任何迟到事件（不观察 abort 的后台 run）一律丢弃，
+    // 防止 activity_events 出现"删除后复活"的幽灵行
+    markConversationDeleted(id);
     deleteConversationCascade(db, id);
     try { saveDb(config); } catch (e: unknown) { console.error('[Conversations] 删除持久化失败:', (e instanceof Error ? e.message : String(e)) || e); }
     // A4 修复：删除同步到 Supabase（手机端不再看到已删除的"幽灵对话"）

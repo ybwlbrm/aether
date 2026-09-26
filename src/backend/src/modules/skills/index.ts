@@ -1,9 +1,12 @@
 import type { FastifyInstance } from 'fastify';
 import type { BackendConfig } from '../../config/index.js';
 import { readdirSync, readFileSync, existsSync, rmSync, mkdirSync, copyFileSync, writeFileSync } from 'node:fs';
-import { resolve, basename } from 'node:path';
+import { resolve, basename, sep } from 'node:path';
 import { homedir } from 'node:os';
 import { logger } from '../../lib/logger.js';
+// AEX-P0-29: 统一 path-guard —— 复制/删除目标路径经物理路径解析（realpath）防 symlink 逃逸，
+// 与 documents/workspace 等模块共用同一实现（不再各自自建 resolve+basename 判断）
+import { resolvePhysicalPath } from '../../lib/path-guard.js';
 
 /** 技能状态存储路径 */
 function getSkillsStatePath(config: BackendConfig): string {
@@ -122,6 +125,17 @@ export function registerSkillsRoutes(app: FastifyInstance, config: BackendConfig
     // 复制到项目 skills 目录
     const projectSkillsDir = resolve(process.cwd(), 'skills', name);
     if (!existsSync(projectSkillsDir)) mkdirSync(projectSkillsDir, { recursive: true });
+
+    // AEX-P0-29: 目标物理路径解析 —— 若 projectSkillsDir 或其父链含 junction/symlink
+    // 指向外部，复制会写入逃逸路径；realpath 解析后校验仍落在项目 skills 目录内。
+    const projectSkillsPhysical = resolvePhysicalPath(projectSkillsDir);
+    const skillsRootPhysical = resolvePhysicalPath(resolve(process.cwd(), 'skills'));
+    const withinProjectSkills = projectSkillsPhysical.startsWith(
+      skillsRootPhysical.endsWith(sep) ? skillsRootPhysical : skillsRootPhysical + sep,
+    );
+    if (!withinProjectSkills) {
+      return reply.code(403).send({ error: '技能安装目标路径存在符号链接逃逸风险' });
+    }
 
     const copyDir = (src: string, dest: string) => {
       if (!existsSync(src)) return;

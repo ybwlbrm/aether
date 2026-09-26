@@ -6,7 +6,7 @@ import { randomUUID } from 'node:crypto';
 import { desc, like, eq } from 'drizzle-orm';
 import { getDb, saveDb } from '../../db/client.js';
 import { searchHistory, messages, conversations } from '../../db/schema/index.js';
-import { isPublicFetchUrl } from '../../lib/safe-fetch.js';
+import { assertPublicResolve } from '../../lib/safe-fetch.js';
 import { logger } from '../../lib/logger.js';
 
 /** 扫描目录查找文件名/内容匹配本地文件的简单全文搜索 */
@@ -66,8 +66,12 @@ function searchLocalFiles(dir: string, query: string, maxResults = 10): { title:
 // （云元数据）等内网地址；IPv6 字面量与 DNS rebinding 由 safe-fetch 层统一拦截。
 
 async function fetchWebPage(url: string, query: string): Promise<{ title: string; url: string; snippet: string }[]> {
-  // Wave0-SS: 公网-only 校验 — 不安全地址直接跳过，不发出请求
-  if (!isPublicFetchUrl(url)) return [];
+  // AEX-P0-28: 公网-only 校验升级为 DNS 解析级（防 rebinding）—— 不安全地址直接跳过，不发出请求
+  try {
+    await assertPublicResolve(url);
+  } catch {
+    return [];
+  }
 
   let currentUrl = url;
   let redirectCount = 0;
@@ -95,8 +99,10 @@ async function fetchWebPage(url: string, query: string): Promise<{ title: string
         } catch {
           return [];
         }
-        // Wave0-SS: 重定向目标同样走公网-only 校验
-        if (!isPublicFetchUrl(nextUrl)) {
+        // AEX-P0-28: 重定向目标同样走 DNS 解析级公网校验（防 rebinding）
+        try {
+          await assertPublicResolve(nextUrl);
+        } catch {
           return [];
         }
         currentUrl = nextUrl;

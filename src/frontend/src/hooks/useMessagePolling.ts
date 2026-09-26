@@ -180,14 +180,29 @@ export function useMessagePolling(options: UseMessagePollingOptions): UseMessage
         }
 
         // Start with local messages, replace with server where IDs match
-        const merged = prev.map(localMsg => serverMap.get(localMsg.id) || localMsg);
+        // AEX-P0-062: SSE 与 Polling 统一合并 —— 正在流式的占位消息（temp-ai-streaming）
+        // 是 SSE 的实时投影，polling 的 server 快照可能更旧（DB 写入滞后于 SSE 显示），
+        // 不得覆盖 UI。已完成占位（temp-ai-streaming-done）与真实消息才允许被替换。
+        const merged = prev.map(localMsg => {
+          if (localMsg.id === 'temp-ai-streaming') return localMsg;
+          const server = serverMap.get(localMsg.id);
+          if (!server) return localMsg;
+          // 只允许"更新"的 server 版本覆盖本地（createdAt 即版本序）
+          if (server.createdAt && localMsg.createdAt && server.createdAt < localMsg.createdAt) return localMsg;
+          return server;
+        });
 
         // Add any server messages not in local (new messages from other clients)
         for (const sm of serverMessages) {
           if (!prev.some(m => m.id === sm.id)) {
             // Try to find optimistic placeholder to replace
+            // AEX-P0-062: 跳过正在流式的 temp-ai-streaming（SSE 实时投影优先）；
+            // 仅替换已完成占位 / 用户乐观消息。比较 createdAt 防止旧快照覆盖新显示。
             const optIdx = merged.findIndex(m =>
-              (m.id.startsWith('u-') || m.id.startsWith('a-') || m.id.startsWith('remote-u-') || m.id.startsWith('temp-')) && m.role === sm.role
+              (m.id.startsWith('u-') || m.id.startsWith('a-') || m.id.startsWith('remote-u-') ||
+                (m.id.startsWith('temp-') && m.id !== 'temp-ai-streaming')) &&
+              m.role === sm.role &&
+              (!sm.createdAt || !m.createdAt || sm.createdAt >= m.createdAt)
             );
             if (optIdx !== -1) {
               merged[optIdx] = sm;

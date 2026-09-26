@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
 import { execFile, spawnSync } from 'node:child_process';
 import { exportDir } from './utils.js';
-import { isSafeFetchUrl, isPublicFetchUrl, parseIpv4, isLinkLocal, isPrivateOrLoopback, isMetadataHostname } from '../../lib/safe-fetch.js';
+import { isSafeFetchUrl, isPublicFetchUrl, parseIpv4, isLinkLocal, isPrivateOrLoopback, isMetadataHostname, assertPublicResolve } from '../../lib/safe-fetch.js';
 import { assertMagicMatches } from '../../lib/magic-bytes.js';
 import { logger } from '../../lib/logger.js';
 
@@ -123,18 +123,15 @@ export function extractAudioFromVideo(input: Buffer, videoExt: string, target: s
 }
 
 /**
- * SEC-001: yt-dlp 下载 URL 必须为公网地址（SSRF 收紧校验）
+ * AEX-P0-28: yt-dlp 下载 URL 必须为公网地址（SSRF 收紧校验 + DNS rebinding 防护）
  *
  * 与普通 fetch（允许本地 AI Provider）不同，yt-dlp 是"拉取式"下载器，
  * 若允许内网/回环地址，攻击者可借它访问后端自身 API（127.0.0.1:3000）、
- * 云元数据（169.254.169.254）与内网资源。因此此处必须拒绝所有非公网地址：
- * - 链路本地 169.254.0.0/16（含云元数据）
- * - 回环 127.0.0.0/8、::1、0.0.0.0
- * - 私网 10/8、172.16/12、192.168/16
- * - IPv6 字面量（::1 / fe80:: / fc00:: 等一律拒绝，公网域名走 DNS 不产生字面量）
- * - 元数据/内部域名（*.internal / *.local / metadata.* 等）
- * - IP 伪装（十进制/八进制/十六进制混淆 → parseIpv4 归一化后检查）
- * 通过时静默返回，失败时抛错（含原因）。
+ * 云元数据（169.254.169.254）与内网资源。因此此处必须拒绝所有非公网地址。
+ * 校验委托 lib/safe-fetch 的 assertPublicResolve —— 真实 DNS 解析 + 逐 IP
+ * 校验（私网/回环/链路本地/元数据全拒 + IPv6 字面量全拒 + 重定向跳逐跳校验）。
+ * 注意：本函数保持同步签名（yt-dlp 调用链为同步栈），DNS 解析在 downloadWithYtDlp
+ * 入口以异步方式先行执行，此处做字符串级快速预检（fail-fast），两者配合。
  */
 export function assertPublicHttpUrl(raw: string): void {
   let u: URL;
@@ -147,8 +144,8 @@ export function assertPublicHttpUrl(raw: string): void {
     throw new Error('仅支持 http/https 链接');
   }
   const host = u.hostname.toLowerCase();
-  // Wave0-SS: 核心判定复用统一公网-only 校验（safe-fetch.isPublicFetchUrl）
-  // 其余分支仅用于给出更具体的拒绝原因
+  // AEX-P0-28: 字符串级快速预检（fail-fast）—— DNS 级校验由 downloadWithYtDlp 入口
+  // await assertPublicResolve 完成（防 rebinding）。这里保留具体原因分支。
   if (!isPublicFetchUrl(raw)) {
     if (host.includes(':')) throw new Error('不允许 IPv6 字面量地址');
     if (host === 'localhost' || host === 'localhost.localdomain') {
@@ -165,9 +162,12 @@ export function assertPublicHttpUrl(raw: string): void {
 }
 
 /** YouTube / 通用视频下载（yt-dlp），返回文件 Buffer 与标题 */
-export function downloadWithYtDlp(url: string, format: string, quality: string): Promise<{ buffer: Buffer; title: string; ext: string }> {
-  // SEC-001: 入口强制 SSRF 校验（即使被其他调用方绕过路由层，核心函数仍防御）
+export async function downloadWithYtDlp(url: string, format: string, quality: string): Promise<{ buffer: Buffer; title: string; ext: string }> {
+  // SEC-001/AEX-P0-28: 入口强制 SSRF 校验（即使被其他调用方绕过路由层，核心函数仍防御）。
+  // 字符串级快速预检 + DNS 解析级校验（防 rebinding：域名解析结果逐 IP 校验，
+  // 拒绝私网/回环/链路本地/元数据地址）。
   assertPublicHttpUrl(url);
+  await assertPublicResolve(url);
   return new Promise((resolveP, rejectP) => {
     const ytDlp = resolveYtDlpPath();
     const tmpDir = resolve(process.env.TEMP || '.', `ytdl-${randomUUID()}`);

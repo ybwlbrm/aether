@@ -12,6 +12,9 @@ import { getFirstAvailableProvider } from '../../lib/provider.js';
 import { getSettings } from '../../lib/dal.js';
 import { buildModelRuntime, type ModelRequest } from '../../core/models/index.js';
 import { logger } from '../../lib/logger.js';
+// AEX-P0-29: 统一 path-guard —— resolvePhysicalPath 用 realpath 解析物理路径，
+// 防 allowedDirs 内 junction/symlink 指向外部目录的逃逸（替代自建 resolve+startsWith）
+import { resolvePhysicalPath } from '../../lib/path-guard.js';
 
 // 懒加载 pptxgenjs 和 docx
 let _pptxgen: typeof import('pptxgenjs')['default'] | null = null;
@@ -34,6 +37,23 @@ const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{
 /** Oracle-1: 纵深防御 — 下载/预览/删除路径必须在 allowedDirs 内 */
 interface SlideItem { title: string; content: string; }
 interface SectionItem { heading: string; body: string; }
+
+/**
+ * AEX-P0-29: 文档路径统一安全校验 —— 物理路径解析（realpath）后必须落在 docDir 内。
+ * 替代自建 `resolve + startsWith` 校验：后者无法识破 docDir 内 junction/symlink
+ * 指向外部目录的逃逸。路径不存在（即将创建）时 resolvePhysicalPath 回退父目录解析。
+ */
+function isDocPathSafe(candidate: string, baseDir: string): boolean {
+  const physical = resolvePhysicalPath(candidate);
+  const basePhysical = resolvePhysicalPath(baseDir);
+  const prefix = basePhysical.endsWith(sep) ? basePhysical : basePhysical + sep;
+  return physical.startsWith(prefix) || physical === basePhysical;
+}
+
+/** 下载/删除重建路径的 docDir 内校验（含 symlink 逃逸防护） */
+function assertDocPathInDir(filePath: string, baseDir: string): boolean {
+  return isDocPathSafe(filePath, baseDir);
+}
 
 export function registerDocumentRoutes(app: FastifyInstance, config: BackendConfig): void {
   const db = getDb();
@@ -163,9 +183,8 @@ export function registerDocumentRoutes(app: FastifyInstance, config: BackendConf
     // 根据文档类型确定预期扩展名
     const expectedExt = doc.type === 'ppt' ? '.pptx' : '.docx';
     const filePath = resolve(docDir, `${id}${expectedExt}`);
-    // SEC-004: 校验重建路径在 docDir 内
-    const docDirResolved = resolve(docDir);
-    if (!filePath.startsWith(docDirResolved + sep)) {
+    // SEC-004: 校验重建路径在 docDir 内（AEX-P0-29: 统一 path-guard —— realpath 防 junction/symlink 逃逸）
+    if (!assertDocPathInDir(filePath, docDir)) {
       return reply.code(403).send({ error: '路径不在允许目录内' });
     }
     // 兼容旧数据：若重建路径不存在，尝试另一种扩展名（迁移场景）
@@ -173,7 +192,7 @@ export function registerDocumentRoutes(app: FastifyInstance, config: BackendConf
     if (!existsSync(finalPath)) {
       const altExt = doc.type === 'ppt' ? '.docx' : '.pptx';
       const altPath = resolve(docDir, `${id}${altExt}`);
-      if (existsSync(altPath) && altPath.startsWith(docDirResolved + sep)) {
+      if (existsSync(altPath) && assertDocPathInDir(altPath, docDir)) {
         finalPath = altPath;
       }
     }
@@ -278,12 +297,11 @@ export function registerDocumentRoutes(app: FastifyInstance, config: BackendConf
           logger.debug({ event: 'documents.preview_cleanup_ignored', documentId: id }, '预览缓存删除失败，已忽略');
         }
       }
-      // SEC-004: 运行时从 id 重建文件路径，不信任 DB 中的 row.path
+      // SEC-004: 运行时从 id 重建文件路径，不信任 DB 中的 row.path（AEX-P0-29: 统一 path-guard）
       if (row) {
         const expectedExt = row.type === 'ppt' ? '.pptx' : '.docx';
         const filePath = resolve(docDir, `${id}${expectedExt}`);
-        const docDirResolved = resolve(docDir);
-        if (filePath.startsWith(docDirResolved + sep) && existsSync(filePath)) {
+        if (assertDocPathInDir(filePath, docDir) && existsSync(filePath)) {
           try {
             unlinkSync(filePath);
           } catch {
@@ -294,7 +312,7 @@ export function registerDocumentRoutes(app: FastifyInstance, config: BackendConf
           // 兼容旧数据：尝试另一种扩展名
           const altExt = row.type === 'ppt' ? '.docx' : '.pptx';
           const altPath = resolve(docDir, `${id}${altExt}`);
-          if (altPath.startsWith(docDirResolved + sep) && existsSync(altPath)) {
+          if (assertDocPathInDir(altPath, docDir) && existsSync(altPath)) {
             try {
               unlinkSync(altPath);
             } catch {

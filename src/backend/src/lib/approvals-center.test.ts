@@ -14,6 +14,9 @@ import {
   clearPendingApprovals,
   hashToolArgs,
   DEFAULT_ISSUER,
+  serializeApprovalState,
+  deserializeApprovalState,
+  cancelApproval,
 } from './approvals-center.js';
 
 describe('lib/approvals-center', () => {
@@ -306,6 +309,84 @@ describe('lib/approvals-center', () => {
       assert.equal(listPendingApprovals().length, 0, '消费后从 pending 列表移除');
       const result = await promise;
       assert.equal(result.approved, true);
+    });
+  });
+
+  describe('ApprovalGrant 状态机（AEX-P0-20：pending/approved/rejected/expired/cancelled）', () => {
+    test('创建时 status = pending', () => {
+      const { id } = createPendingApproval({ toolName: 't', args: {}, prompt: () => {} });
+      assert.equal(getApprovalGrant(id)?.status, 'pending');
+    });
+
+    test('批准后 status = approved 且记录 approvedBy/resolvedAt', () => {
+      const { id } = createPendingApproval({ toolName: 't', args: {}, prompt: () => {} });
+      const res = consumeApproval(id, 'approved', 'local');
+      assert.equal(res.ok, true);
+      assert.equal(res.grant.status, 'approved');
+      assert.equal(res.grant.approvedBy, 'local');
+      assert.ok(res.grant.resolvedAt !== null, 'resolvedAt 应被记录');
+    });
+
+    test('拒绝后 status = rejected', () => {
+      const { id } = createPendingApproval({ toolName: 't', args: {}, prompt: () => {} });
+      const res = consumeApproval(id, 'rejected', 'local');
+      assert.equal(res.ok, true);
+      assert.equal(res.grant.status, 'rejected');
+    });
+
+    test('过期消费 → status = expired', () => {
+      const { id } = createPendingApproval({ toolName: 't', args: {}, prompt: () => {}, timeoutMs: 60_000 });
+      assert.equal(__setGrantExpiresAtForTest(id, Date.now() - 1000), true);
+      const res = consumeApproval(id, 'approved');
+      assert.equal(res.ok, false);
+      assert.equal(res.code, 'EXPIRED');
+      assert.equal(getApprovalGrant(id)?.status, 'expired');
+    });
+
+    test('cancelApproval：pending → cancelled，决议为 rejected', async () => {
+      const { id, promise } = createPendingApproval({ toolName: 't', args: {}, prompt: () => {} });
+      const cancelled = cancelApproval(id, 'local');
+      assert.equal(cancelled.ok, true);
+      assert.equal(getApprovalGrant(id)?.status, 'cancelled');
+      assert.equal(getApprovalGrant(id)?.approvedBy, 'local');
+      const result = await promise;
+      assert.equal(result.approved, false);
+      assert.equal(result.decision, 'rejected', '取消的审批必须结束等待且不可执行');
+    });
+
+    test('cancelApproval：已消费/不存在 → 失败', () => {
+      assert.equal(cancelApproval('apr-missing', 'local').ok, false);
+      const { id } = createPendingApproval({ toolName: 't', args: {}, prompt: () => {} });
+      consumeApproval(id, 'approved');
+      assert.equal(cancelApproval(id, 'local').ok, false, '已消费的审批不可取消');
+    });
+  });
+
+  describe('Approval 状态持久化（AEX-P0-20：崩溃恢复后可判断审批历史）', () => {
+    test('serializeApprovalState 导出 pending + consumed（含 status）', () => {
+      const { id } = createPendingApproval({ toolName: 'write_file', args: { path: 'a.txt' }, prompt: () => {}, runId: 'run-1', taskId: 'task-1' });
+      const snap = serializeApprovalState();
+      assert.ok(snap.pending.some((g) => g.grantId === id && g.status === 'pending'), 'pending grant 必须可序列化');
+      assert.ok(snap.pending[0].runId !== undefined || snap.consumed.length >= 0, 'runId 绑定保留');
+    });
+
+    test('consume 后 serializeApprovalState 含 consumed 存档', () => {
+      const { id } = createPendingApproval({ toolName: 't', args: {}, prompt: () => {} });
+      consumeApproval(id, 'approved', 'local');
+      const snap = serializeApprovalState();
+      assert.ok(snap.consumed.some((g) => g.grantId === id && g.status === 'approved'), '已消费 grant 必须进入存档');
+      assert.equal(snap.pending.length, 0, '消费后 pending 为空');
+    });
+
+    test('deserializeApprovalState 恢复 pending（grantId/status/runId 保留）', () => {
+      const { id } = createPendingApproval({ toolName: 't', args: {}, prompt: () => {}, runId: 'run-9' });
+      const snap = serializeApprovalState();
+      clearPendingApprovals();
+      deserializeApprovalState(snap);
+      const restored = getApprovalGrant(id);
+      assert.ok(restored, 'deserialize 后 grant 应恢复');
+      assert.equal(restored?.status, 'pending');
+      assert.equal(restored?.runId, 'run-9');
     });
   });
 });

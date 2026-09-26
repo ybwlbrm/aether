@@ -239,7 +239,13 @@ export async function handleSendMessage(
   // 整改计划第 5 章（P1）：预算耗尽标记 —— 提升到 try 外部（终态写入/SSE 事件需要）
   let budgetExceeded: 'turns' | 'duration' | 'tokens' | 'tool_calls' | 'cost' | null = null;
   // 整改计划第 5 章（P1）：循环 UI 指标 —— 已用轮数/时长/工具调用（随终态事件推给前端）
-  let loopMetrics: { turnsUsed: number; elapsedMs: number; toolCalls: number; budgetExceeded: string | null } | null = null;
+  let loopMetrics: {
+    turnsUsed: number; elapsedMs: number; toolCalls: number; budgetExceeded: string | null;
+    retryCheckpoint?: {
+      retryCount: number; turn: number; lastError: string | null; currentObjective: string;
+      completedSteps: readonly string[]; pendingSteps: readonly string[];
+    }
+  } | null = null;
   let endedNormally = false;
   let executionEndReason: ToolLoopResult['endReason'] = 'error'
   let normalCompletion = false
@@ -421,6 +427,7 @@ ${fileAttachmentsHint}
         apiKey: provider.apiKey,
         activeModel,
         activeTools,
+        providerId: provider.id,
         maxTurns,
         clientAbortSignal: clientAbort.signal,
         sseSend,
@@ -461,6 +468,18 @@ ${fileAttachmentsHint}
         toolCalls: toolLoopResult.toolCallCount,
         budgetExceeded: toolLoopResult.budgetExceeded,
       };
+      // P0-008: 持久化 retry 摘要（崩溃恢复后可判断"已重试 N 次"）
+      // —— checkpoint 序列化 + 任务级重试计数进入 runs.metadata
+      if (toolLoopResult.checkpoint || toolLoopResult.retryCount > 0) {
+        loopMetrics.retryCheckpoint = {
+          retryCount: toolLoopResult.retryCount,
+          turn: toolLoopResult.checkpoint?.turn ?? toolLoopResult.turnsUsed,
+          lastError: toolLoopResult.checkpoint?.lastError ?? null,
+          currentObjective: toolLoopResult.checkpoint?.currentObjective ?? '',
+          completedSteps: toolLoopResult.checkpoint?.completedSteps ?? [],
+          pendingSteps: toolLoopResult.checkpoint?.pendingSteps ?? [],
+        };
+      }
 
       // maxTurns 耗尽后的兜底处理 — 这些变量在 while 循环内声明，循环外不可见。
       // AEX-P0-003：补文本的决策统一走 resolveTextFallback（唯一事实源）——

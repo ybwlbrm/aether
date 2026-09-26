@@ -1099,13 +1099,41 @@ table[data-streamdown="table"] tbody tr:nth-child(even) > td {
   color: var(--color-danger);
 }
 
+/* AEX-P0-045: prefers-reduced-motion —— 关闭常驻/重复动画与过度位移 */
 @media (prefers-reduced-motion: reduce) {
+  /* 滚动行为：自动滚动改为瞬时 */
   .ui-page-shell-content {
     scroll-behavior: auto;
   }
 
+  /* 瞬时反馈：去掉 transition */
   .ui-status-pill,
-  .ui-icon-button {
-    transition: none;
+  .ui-icon-button,
+  .glass-card,
+  .btn,
+  .input,
+  .select,
+  .tag,
+  .badge {
+    transition: none !important;
+  }
+
+  /* 常驻动画：glass-shimmer（全站玻璃卡片流动光泽）、连续呼吸、旋转一律关闭 */
+  .glass-card::before,
+  .glass-sidebar::before,
+  .glass-menu::before,
+  [class*="shimmer"],
+  [class*="breathing"],
+  [class*="pulse"] {
+    animation: none !important;
+  }
+
+  /* 玻璃模糊降级：减少过度 blur（可读性优先） */
+  .sidebar-glass,
+  .glass-card,
+  .glass-menu,
+  .glass-modal {
+    -webkit-backdrop-filter: blur(4px) saturate(1.2);
+    backdrop-filter: blur(4px) saturate(1.2);
   }
 }
