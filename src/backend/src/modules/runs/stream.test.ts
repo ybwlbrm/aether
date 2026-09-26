@@ -11,7 +11,7 @@ import { join } from 'node:path';
 import { runMigrations } from '../../db/migrate.js';
 import { initDb, getDb, flushDbSync } from '../../db/client.js';
 import { registerErrorHandler } from '../../plugins/error-handler.js';
-import { registerRunStreamRoutes, readEvents } from './stream.js';
+import { registerRunStreamRoutes, readEvents, RUN_TERMINAL_TYPES } from './stream.js';
 import { makeTestConfig } from '../../tests/helpers/mock-provider.sse.js';
 import type { BackendConfig } from '../../config/index.js';
 import { events, runs } from '../../db/schema/index.js';
@@ -129,5 +129,28 @@ describe('runs stream 端点 — v2 SSE + Last-Event-ID（P3-05/06）', () => {
     const frame = formatSseEvent(event);
     assert.ok(frame.startsWith('event: run.started\n'));
     assert.ok(frame.includes('\nid: 7\n\n'));
+  });
+
+  it('P1-019: run 终态集合覆盖 5 种终态（流端据此关闭 SSE）', () => {
+    // 规范 §42/§132：终态权威事件必须全部被流识别（任何新增终态类型都必须加入此集合）
+    assert.deepEqual(
+      [...RUN_TERMINAL_TYPES].sort(),
+      ['run.budget_exceeded', 'run.cancelled', 'run.completed', 'run.failed', 'run.interrupted'].sort(),
+      'RUN_TERMINAL_TYPES 必须完整覆盖 5 种 run 终态',
+    );
+  });
+
+  it('P1-019: 终态事件可被流读取（readEvents 返回终态类型）', () => {
+    const runId = 'run-terminal-types';
+    seedRun(runId);
+    const terminalTypes = ['run.completed', 'run.failed', 'run.cancelled', 'run.interrupted', 'run.budget_exceeded'];
+    terminalTypes.forEach((type, i) => seedEvent(runId, i + 1, type, `term-${i + 1}`));
+
+    const db: Db = getDb();
+    const rows = readEvents(db, runId, 0);
+    const types = rows.map((r) => r.type);
+    for (const t of terminalTypes) {
+      assert.ok(types.includes(t), `终态事件 ${t} 应被读取`);
+    }
   });
 });

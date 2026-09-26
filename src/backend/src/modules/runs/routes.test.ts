@@ -11,11 +11,13 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runMigrations } from '../../db/migrate.js';
-import { initDb, flushDbSync } from '../../db/client.js';
+import { getDb, initDb, flushDbSync } from '../../db/client.js';
 import { registerErrorHandler } from '../../plugins/error-handler.js';
 import { registerRunRoutes } from './index.js';
 import { makeTestConfig } from '../../tests/helpers/mock-provider.sse.js';
 import type { BackendConfig } from '../../config/index.js';
+import { RunLifecycleManager, type RunAction } from '../../core/runtime/index.js';
+import { RUN_STATUSES } from '@pacc/shared';
 
 interface RunJson {
   id: string;
@@ -207,5 +209,41 @@ describe('runs 端点 — Aether 2.0 Run API（P2）', () => {
     const cancelCreated = await postTransition(fresh.id, 'cancel');
     assert.equal(cancelCreated.statusCode, 409, 'created 状态直接 cancel 应 409（仅 running|waiting 可取消）');
     assert.equal(asError(cancelCreated.json()).error.code, 'INVALID_TRANSITION');
+  });
+
+  it('cancel：retry_waiting/retrying/verifying 同样可取消（AEX-P0-004 白名单与状态机对齐）', async () => {
+    const lifecycle = new RunLifecycleManager(getDb());
+    // 每段路径：created --start--> running --...--> 目标态
+    const paths: ReadonlyArray<{ readonly label: string; readonly actions: readonly RunAction[] }> = [
+      { label: 'retry_waiting', actions: ['retry_waiting'] },
+      { label: 'retrying', actions: ['retry_waiting', 'retrying'] },
+      { label: 'verifying', actions: ['verifying'] },
+    ];
+
+    for (const path of paths) {
+      const run = await createRun();
+      const startRes = await postTransition(run.id, 'start');
+      assert.equal(startRes.statusCode, 200);
+      for (const action of path.actions) {
+        lifecycle.transition(run.id, action);
+      }
+      assert.equal(lifecycle.get(run.id)?.status, path.label);
+
+      const cancelRes = await postTransition(run.id, 'cancel');
+      assert.equal(cancelRes.statusCode, 200, `${path.label} 状态应可取消`);
+      assert.equal((cancelRes.json() as RunJson).status, 'cancelled');
+    }
+  });
+
+  it('list：canonical 11 态均可作为 status 过滤（AEX-P0-002 不再 400）', async () => {
+    for (const status of RUN_STATUSES) {
+      const res = await app.inject({ method: 'GET', url: `/api/runs?status=${status}` });
+      assert.equal(res.statusCode, 200, `status=${status} 应被接受为过滤条件`);
+      const body = res.json() as { runs: RunJson[]; total: number };
+      assert.ok(
+        body.runs.every(run => run.status === status),
+        `status=${status} 过滤结果必须只含该状态`,
+      );
+    }
   });
 });

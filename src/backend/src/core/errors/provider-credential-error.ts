@@ -10,14 +10,17 @@
  * Transport-agnostic（继承 RuntimeError 体系），纯 TypeScript。
  */
 
+import { ErrorCode } from './error-code.js';
 import { RuntimeError } from './runtime-error.js';
 
 export class ProviderCredentialError extends RuntimeError {
   constructor(providerName: string, cause?: unknown) {
     super(`Provider "${providerName}" 凭据无法解密（密钥可能损坏或与加密密钥不匹配）`, {
-      code: 'PROVIDER_CREDENTIAL_ERROR',
+      code: ErrorCode.PROVIDER_CREDENTIAL_ERROR,
       cause,
+      // 不可重试：重试不会让坏掉的密文变好，只会让用户等更久
       retryable: false,
+      category: 'model',
       context: { providerName },
     });
     this.name = 'ProviderCredentialError';

@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+﻿import { useEffect, useState } from 'react';
 import { motion } from 'framer-motion';
 import { api } from '../api/client';
 import { Bot, Save, CheckCircle2, Wrench, Brain, Clock, Search, FileText, Database, GitBranch } from 'lucide-react';
@@ -89,7 +89,7 @@ export function AgentSettings() {
 
   return (
     <div className="min-h-screen" style={{ background: 'var(--bg-base)', backgroundImage: 'var(--bg-gradient)' }}>
-      <div style={{ maxWidth: '1100px', margin: '0 auto', padding: '0 24px' }}>
+      <div style={{ maxWidth: 'var(--content-standard)', margin: '0 auto', padding: '0 24px' }}>
         <PageHeader title="Agent 设置" description="为每个 Agent 配置使用的 AI 模型" icon={<Bot size={22} />} color="#a78bfa" />
 
         <div className="glass-card" style={{ padding: '24px' }}>
@@ -237,7 +237,7 @@ export function AgentSettings() {
             </div>
           </div>
 
-          <div className="grid grid-cols-2 gap-3">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             {[
               { name: '搜索包', desc: '聚合搜索、网页抓取、本地文件检索', icon: <Search size={18} />, color: 'var(--color-success)', enabled: true },
               { name: '文件包', desc: '读写、编辑、移动本地文件', icon: <FileText size={18} />, color: 'var(--color-accent)', enabled: true },

@@ -23,17 +23,36 @@ import type { AetherTool } from '../core/tools/tool-registry.js';
 import { PolicyEngine } from '../core/permissions/policy.js';
 import { createCapabilitySet } from '../core/permissions/capability.js';
 import { successResult, errorResult, cancelledResult } from '../core/tools/tool-result.js';
+import type { ToolResult } from '../core/tools/tool-result.js';
 import { registerLegacyTools } from './tool-runtime-bridge.js';
-import { callMcpTool } from './mcp-client.js';
+import { callMcpTool, type McpServerEntry } from './mcp-client.js';
 import { createPendingApproval } from './approvals-center.js';
 import { z } from 'zod';
+import { logger } from './logger.js';
+
+/** 边界守卫：非数组普通对象 */
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/**
+ * 边界守卫：从 ToolContext.metadata 取回 MCP 服务器读取函数。
+ * metadata 是 Record<string, unknown>，取值必须经守卫确认是可调用对象，
+ * 不能靠断言（metadata 可能被外部 handoff 构造）。
+ */
+function readMcpServersGetter(
+  metadata: Record<string, unknown> | undefined,
+): () => McpServerEntry[] {
+  const raw = metadata?.getMcpServers;
+  return typeof raw === 'function' ? (raw as () => McpServerEntry[]) : () => [];
+}
 
 /** 生产工具执行器选项 */
 export interface ProductionToolExecutorOptions {
   /** MCP 工具列表（OpenAI function-calling 格式，含 name/description/inputSchema） */
   mcpTools: Array<{ name: string; description?: string; inputSchema?: unknown }>;
   /** MCP 服务器读取函数 */
-  getMcpServers: () => any[];
+  getMcpServers: () => McpServerEntry[];
   /** 允许的工作目录 */
   allowedDirs: string[];
   /** 权限级别：1=只读（敏感工具需审批）| 2=受限 | 3=超级 */
@@ -59,7 +78,7 @@ export interface ProductionToolExecutorOptions {
 /** 执行结果（兼容现有 ToolLoop 消费形态） */
 export interface ProductionToolResult {
   name: string;
-  args: any;
+  args: Record<string, unknown>;
   result: string;
   error?: string;
   durationMs: number;
@@ -144,14 +163,14 @@ function buildMcpAetherTool(entry: { name: string; description?: string; inputSc
     name: serverToolName,
     description: entry.description ?? '',
     inputSchema: z.record(z.unknown()),
-    async execute(input: unknown, context: ToolContext): Promise<any> {
+    async execute(input: unknown, context: ToolContext): Promise<ToolResult> {
       const start = Date.now();
       const serverName = serverToolName.split('_')[0];
       const toolName = serverToolName.slice(serverName.length + 1);
-      const getServers = context.metadata?.getMcpServers as (() => any[]) | undefined ?? (() => []);
+      const getServers = readMcpServersGetter(context.metadata);
       const permLevel = (context.metadata?.permissionLevel as number | undefined) ?? 0;
       try {
-        const result = await callMcpTool(serverName, toolName, input as Record<string, unknown>, getServers, permLevel);
+        const result = await callMcpTool(serverName, toolName, isRecord(input) ? input : {}, getServers, permLevel);
         return successResult(serverToolName, result, Date.now() - start);
       } catch (err) {
         return errorResult(serverToolName, { message: err instanceof Error ? err.message : String(err) }, Date.now() - start);
@@ -174,8 +193,8 @@ export function createProductionToolExecutor(opts: ProductionToolExecutorOptions
       registry.register(buildMcpAetherTool(t));
     } catch (err) {
       // 同名工具跳过（registry 防重）
-      console.warn(`[ProductionToolExecutor] MCP 工具注册跳过（可能重名）: ${t.name}`,
-        err instanceof Error ? err.message : String(err));
+      // AEX-P2-004 分类：recoverable —— 重名只丢弃这一个 MCP 工具，其余工具照常注册。
+      logger.warn({ event: 'mcp.tool_register_skipped', err, toolName: t.name }, 'MCP 工具注册跳过（可能重名）');
     }
   }
 

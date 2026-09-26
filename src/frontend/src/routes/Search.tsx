@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
+﻿import { useState, useEffect, useRef } from 'react';
 import { motion } from 'framer-motion';
 import { PageHeader } from '../components/PageHeader';
 import { api } from '../api/client';
@@ -234,7 +234,7 @@ export function Search() {
 
   return (
     <div className="min-h-screen" style={{ background: 'var(--bg-base)', backgroundImage: 'var(--bg-gradient)' }}>
-      <div style={{ maxWidth: '1100px', margin: '0 auto', padding: '0 24px' }}>
+      <div style={{ maxWidth: 'var(--content-standard)', margin: '0 auto', padding: '0 24px' }}>
         <PageHeader title="搜索引擎" description="聚合多源搜索 · 知识库 · 媒体库 · 无广告" icon={<SearchIcon size={22} />} color="var(--color-success)" />
 
         {/* Search Bar */}
@@ -331,7 +331,7 @@ export function Search() {
                 key={i}
                 initial={{ opacity: 0, y: 8 }}
                 animate={{ opacity: 1, y: 0 }}
-                transition={{ delay: i * 0.05 }}
+                transition={{ delay: Math.min(i * 0.05, 0.2) }}
                 className="rounded-[14px] p-4 mb-3" style={{ background: 'var(--bg-surface)', border: '1px solid var(--border-primary)', borderRadius: 'var(--radius-md)' }}
               >
                 <div className="flex items-start gap-3">

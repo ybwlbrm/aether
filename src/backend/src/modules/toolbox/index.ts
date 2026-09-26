@@ -104,7 +104,7 @@ export function registerToolboxRoutes(app: FastifyInstance, config: BackendConfi
     const body = request.body as {
       files: { name: string; data: string }[]; // data = base64
       targetFormat: string;
-      options?: any;
+      options?: Record<string, unknown>;
     };
     const files = body.files || [];
     if (!Array.isArray(files) || files.length === 0) {
@@ -255,7 +255,7 @@ export function registerToolboxRoutes(app: FastifyInstance, config: BackendConfi
       body: { type: 'object', properties: { op: { type: 'string' }, input: { type: 'string' }, options: { type: 'object' } } },
     },
   }, async (request, reply) => {
-    const body = request.body as { op: string; input?: string; options?: any };
+    const body = request.body as { op: string; input?: string; options?: Record<string, unknown> };
     try {
       const result = await utilityOp(body.op, body.input, body.options);
       return result;

@@ -5,6 +5,7 @@ import { executeCommand } from '../../lib/command.js';
 import { isPathAllowed } from './utils.js';
 import { resolve, sep } from 'node:path';
 import { existsSync } from 'node:fs';
+import { logger } from '../../lib/logger.js';
 
 /** 项目执行相关路由 */
 export function registerExecRoutes(app: FastifyInstance, config: BackendConfig): void {
@@ -115,7 +116,13 @@ export function registerExecRoutes(app: FastifyInstance, config: BackendConfig):
             return { error: '脚本含危险操作模式，拒绝执行', code: 'BAT_DANGEROUS_CONTENT' };
           }
         }
-      } catch { /* 读取失败，继续执行（文件可能被锁） */ }
+      } catch (e: unknown) {
+        // AEX-P2-004 分类：bug（已修复）—— 此前读不到 bat 内容时静默「继续执行」，
+        // 等于让 P0-5 危险内容扫描 fail-open：被占用/编码异常的脚本可绕过检查直接执行。
+        // 改为 fail-closed：扫描是执行的前置条件，读不到内容就不执行。
+        logger.error({ event: 'data.bat_scan_unreadable', err: e, path: targetPath }, '无法读取 bat 脚本内容，拒绝执行（安全扫描无法完成）');
+        return { error: '无法读取脚本内容，安全检查未通过，已拒绝执行', code: 'BAT_SCAN_FAILED' };
+      }
       // P0-5: 使用 executeCommand 执行 bat 文件
       const settings = await getSettings();
       const permLevel = settings.permissionLevel ?? 2;

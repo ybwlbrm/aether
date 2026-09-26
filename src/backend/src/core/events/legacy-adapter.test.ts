@@ -95,7 +95,8 @@ describe('core/events/legacy-adapter', () => {
     const rows = [
       makeRow({ id: 'a', seq: 2, eventType: 'tool.completed' }),
       makeRow({ id: 'b', seq: 1, eventType: 'tool.started' }),
-      makeRow({ id: 'c', seq: 3, eventType: 'token.usage' }),
+      // activity_events.eventType 是 v1 命名空间：token（不是 v2 的 token.usage）
+      makeRow({ id: 'c', seq: 3, eventType: 'token' }),
     ];
     const events = syncLegacyToNew(rows, 'run-target');
 
@@ -103,6 +104,23 @@ describe('core/events/legacy-adapter', () => {
     assert.deepEqual(events.map((e) => e.seq), [1, 2, 3]);
     for (const e of events) assert.equal(e.runId, 'run-target');
     assert.equal(events[0].eventId, 'b');
+    assert.equal(events[2].type, 'token.usage');
+  });
+
+  // AEX-P0-016：legacy 行里的未知 eventType（含误写入的 v2 类型）必须 reject，
+  // 不得被伪造成 run.created（旧实现的 `?? 'run.created'` 让这类脏数据静默通过）。
+  it('fromLegacyRow 遇到未知 eventType 抛错（调用方负责跳过该行）', () => {
+    assert.throws(
+      () => fromLegacyRow(makeRow({ eventType: 'totally.unknown.event' }), 'run-1'),
+      /unknown legacy event type: totally\.unknown\.event/,
+    );
+  });
+
+  it('fromLegacyRow 遇到 v2 类型名（写错命名空间的脏行）同样抛错', () => {
+    assert.throws(
+      () => fromLegacyRow(makeRow({ eventType: 'token.usage' }), 'run-1'),
+      /unknown legacy event type: token\.usage/,
+    );
   });
 
   it('syncNewToLegacy drives legacyEmit with sessionId/eventType/seq', () => {

@@ -6,7 +6,8 @@ import type { ConvertOption } from './Toolbox/types';
 import { ToolboxList } from './Toolbox/ToolboxList';
 import { ToolboxProcess } from './Toolbox/ToolboxProcess';
 import { convertOptions, categories, catOf } from './Toolbox/constants';
-import { authHeaders } from '../api/client';
+import { api } from '../api/client';
+import type { ToolAvailability } from '../api/types';
 
 /**
  * P1-6/P1-Oracle 修复（审计）：Base64 判定不再"只看格式+长度%4"，增加：
@@ -69,14 +70,19 @@ export function Toolbox() {
   useEffect(() => () => { if (intervalRef.current) clearInterval(intervalRef.current); }, []);
 
   // 外部工具检测：ffmpeg / yt-dlp / LibreOffice（缺失时提示下载）
-  const [toolsStatus, setToolsStatus] = useState<Record<string, any> | null>(null);
+  // AEX-P1-017：区分 loading / success / error —— 原先 `catch { 静默 }` 让"后端没启动"
+  // 与"工具齐全"呈现同一个界面，用户无从判断该不该装依赖。
+  const [toolsStatus, setToolsStatus] = useState<Record<string, ToolAvailability> | null>(null);
+  const [toolsStatusError, setToolsStatusError] = useState<string | null>(null);
   useEffect(() => {
-    (async () => {
-      try {
-        const r = await fetch('/api/toolbox/tools-status', { headers: { 'X-Requested-With': 'XMLHttpRequest' } });
-        if (r.ok) setToolsStatus(await r.json());
-      } catch { /* 后端未启动，静默 */ }
+    let cancelled = false;
+    void (async () => {
+      const res = await api.result.getToolsStatus();
+      if (cancelled) return;
+      if (res.ok) { setToolsStatus(res.data); setToolsStatusError(null); }
+      else { setToolsStatus(null); setToolsStatusError(res.error.message); }
     })();
+    return () => { cancelled = true; };
   }, []);
 
   // 当前工具所需的外部工具（缺失时显示提示卡）
@@ -85,7 +91,7 @@ export function Toolbox() {
     : (selected?.kind === 'convert' && (selected.from[0] === 'mp3' || selected.from[0] === 'wav' || selected.from[0] === 'flac' || selected.from[0] === 'ogg' || selected.from[0] === 'm4a' || selected.from[0] === 'aac')) ? 'ffmpeg'
     : (selected?.kind === 'convert' && (selected.from[0] === 'docx' || selected.from[0] === 'xlsx') && selected.to[0] === 'pdf') ? 'libreOffice'
     : null;
-  const missingTool = requiredTool && toolsStatus ? toolsStatus[requiredTool === 'ytDlp' ? 'ytDlp' : requiredTool === 'libreOffice' ? 'libreOffice' : 'ffmpeg'] : null;
+  const missingTool = requiredTool && toolsStatus ? toolsStatus[requiredTool] : null;
   const toolMissing = !!missingTool && missingTool.available === false;
 
   const filteredOptions = activeCategory === 'all'
@@ -143,16 +149,15 @@ export function Toolbox() {
           const enc = encodeEncoding;
           const fmt = codecFormat;
 
-          // GBK/Big5/gb18030 走后端
+          // GBK/Big5/gb18030 走后端（AEX-P1-017：经 api.result，错误为结构化 ApiError）
           if (enc === 'gbk' || enc === 'big5' || enc === 'gb18030') {
-            const res = await fetch('/api/toolbox/encode', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest', ...authHeaders() },
-              body: JSON.stringify({ op: encodeDirection === 'encode' ? 'encode-text' : 'decode-text', input, encoding: enc, format: fmt }),
+            const res = await api.result.encode({
+              op: encodeDirection === 'encode' ? 'encode-text' : 'decode-text',
+              input, encoding: enc, format: fmt,
             });
-            const data = await res.json();
-            if (!res.ok) { setEncodeError(data?.error?.message || data?.error || '转换失败'); return; }
-            setEncodeOutput(data.result);
+            if (!res.ok) { setEncodeError(res.error.message); return; }
+            if (res.data.error) { setEncodeError(res.data.error); return; }
+            setEncodeOutput(res.data.result ?? '');
             return;
           }
 
@@ -240,14 +245,12 @@ export function Toolbox() {
           timestamp: /^\d{10}$|^\d{13}$/.test(utilityInput.trim()) ? 'timestamp-to-date' : 'date-to-timestamp',
           color: utilityInput.trim().startsWith('#') ? 'hex-rgb' : 'rgb-hex',
         };
-        const r = await fetch('/api/toolbox/utility', {
-          method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest', ...authHeaders() },
-          body: JSON.stringify({ op: opMap[selected.op || ''] || 'base64-encode', input: utilityInput }),
-        });
-        const data = await r.json();
+        const r = await api.result.utility({ op: opMap[selected.op || ''] || 'base64-encode', input: utilityInput });
         clearInterval(intervalRef.current!); setProgress(100);
-        if (data?.result) setResult(String(data.result));
-        else setError(data?.error || '处理失败，请检查文件格式或稍后重试');
+        // AEX-P1-017：区分"接口失败"（ApiError）与"接口成功但无结果"（业务错误文案）
+        if (!r.ok) setError(r.error.message);
+        else if (r.data.result) setResult(String(r.data.result));
+        else setError(r.data.error || '处理失败，请检查文件格式或稍后重试');
         setConverting(false);
         return;
       }
@@ -272,98 +275,107 @@ export function Toolbox() {
         fileData.push(item);
       }
 
-      let res: any;
+      // AEX-P1-017：所有工具箱端点统一经 api.result（ApiResult 契约）。
+      // finish() 收敛收尾动作（停秒表 / 进度 100 / 落结果或错误 / 清空已消费文件），
+      // 消除原先 7 个分支各自复制收尾代码的漂移风险。
+      const finish = (o: { downloads?: string[]; result?: string; error?: string }) => {
+        clearInterval(intervalRef.current!);
+        setProgress(100);
+        setFiles([]);
+        if (o.downloads) setDownloads(o.downloads);
+        if (o.result !== undefined) setResult(o.result);
+        if (o.error) setError(o.error);
+      };
+      /** 接口级失败（网络/非 2xx/解析失败）—— 统一收尾并结束 loading 态 */
+      const fail = (message: string) => {
+        clearInterval(intervalRef.current!);
+        setProgress(100);
+        setFiles([]);
+        setError(message);
+        setConverting(false);
+      };
+
       if (selected.kind === 'convert') {
         // 图片 → 图片：附带 quality 压缩 + width/height 缩放选项
         const isImageToImage = selected.from.every(f => ['png', 'jpg', 'jpeg', 'webp'].includes(f))
           && selected.to.every(f => ['png', 'jpg', 'jpeg', 'webp'].includes(f));
-        const options: any = {};
+        const options: Record<string, unknown> = {};
         if (isImageToImage) {
           options.quality = quality;
           if (width) options.width = Number(width);
           if (height) options.height = Number(height);
         }
-        res = await fetch('/api/toolbox/convert', {
-          method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest', ...authHeaders() },
-          body: JSON.stringify({ files: fileData, targetFormat, options }),
-        });
-        res = await res.json();
-        if (res?.results?.length > 0) {
-          const successCount = res.results.filter((r: any) => r.success).length;
-          setDownloads(res.results.filter((r: any) => r.output).map((r: any) => r.output));
-          setResult(`转换完成！${successCount}/${res.results.length} 个文件成功`);
-        } else if (res?.error) { setError(res.error); }
-        else setResult('转换完成！');
+        const r = await api.result.convert({ files: fileData, targetFormat, options });
+        if (!r.ok) { fail(r.error.message); return; }
+        const items = r.data.results ?? [];
+        if (items.length > 0) {
+          const successCount = items.filter(i => i.success).length;
+          finish({
+            downloads: items.flatMap(i => (i.output ? [i.output] : [])),
+            result: `转换完成！${successCount}/${items.length} 个文件成功`,
+          });
+        } else if (r.data.error) finish({ error: r.data.error });
+        else finish({ result: '转换完成！' });
       } else if (selected.kind === 'pdf-compress') {
-        res = await fetch('/api/toolbox/pdf-compress', {
-          method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest', ...authHeaders() },
-          body: JSON.stringify({ files: fileData }),
-        });
-        res = await res.json();
-        if (res?.output) { setDownloads([res.output]); setResult(`压缩完成！${Math.round((1 - res.compressedSize / res.originalSize) * 100)}% 体积减小`); }
-        else setError(res?.error || '压缩失败，请检查文件格式或稍后重试');
+        const r = await api.result.pdfCompress(fileData);
+        if (!r.ok) { fail(r.error.message); return; }
+        const { output, compressedSize, originalSize, error } = r.data;
+        if (output) {
+          const savedPct = compressedSize !== undefined && originalSize
+            ? Math.round((1 - compressedSize / originalSize) * 100) : 0;
+          finish({ downloads: [output], result: `压缩完成！${savedPct}% 体积减小` });
+        } else finish({ error: error || '压缩失败，请检查文件格式或稍后重试' });
       } else if (selected.kind === 'unlock') {
-        res = await fetch('/api/toolbox/unlock-music', {
-          method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest', ...authHeaders() },
-          body: JSON.stringify({ file: fileData[0] }),
-        });
-        res = await res.json();
-        if (res?.output) { setDownloads([res.output]); setResult(`解密完成！(格式: ${res.format || 'mp3'})`); }
-        else setError(res?.error || '解密失败，请检查文件是否为有效的 ncm 格式');
+        const r = await api.result.unlockMusic(fileData[0]);
+        if (!r.ok) { fail(r.error.message); return; }
+        const { output, format, error } = r.data;
+        if (output) finish({ downloads: [output], result: `解密完成！(格式: ${format || 'mp3'})` });
+        else finish({ error: error || '解密失败，请检查文件是否为有效的 ncm 格式' });
       } else if (selected.kind === 'pdf-operate') {
-        res = await fetch('/api/toolbox/pdf-operate', {
-          method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest', ...authHeaders() },
-          body: JSON.stringify({ operation: selected.op, files: fileData, text: watermarkText }),
-        });
-        res = await res.json();
-        if (res?.output) { setDownloads([res.output]); setResult('处理完成！'); }
-        else setError(res?.error || 'PDF 处理失败，请检查文件是否为有效的 PDF 格式');
+        const r = await api.result.pdfOperate({ operation: selected.op, files: fileData, text: watermarkText });
+        if (!r.ok) { fail(r.error.message); return; }
+        if (r.data.output) finish({ downloads: [r.data.output], result: '处理完成！' });
+        else finish({ error: r.data.error || 'PDF 处理失败，请检查文件是否为有效的 PDF 格式' });
       } else if (selected.kind === 'pdf-read') {
-        res = await fetch('/api/toolbox/pdf-read', {
-          method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest', ...authHeaders() },
-          body: JSON.stringify({ op: selected.op, file: fileData[0] }),
-        });
-        res = await res.json();
-        if (res?.output) { setDownloads([res.output]); setResult('处理完成！'); }
-        else if (res?.result) { setResult(String(res.result).slice(0, 500)); }
-        else setError(res?.error || 'PDF 读取失败，请检查文件是否为有效的 PDF 格式');
+        const r = await api.result.pdfRead({ op: selected.op, file: fileData[0] });
+        if (!r.ok) { fail(r.error.message); return; }
+        const { output, result: text, error } = r.data;
+        if (output) finish({ downloads: [output], result: '处理完成！' });
+        else if (text) finish({ result: String(text).slice(0, 500) });
+        else finish({ error: error || 'PDF 读取失败，请检查文件是否为有效的 PDF 格式' });
       } else if (selected.kind === 'pdf-to-docx') {
-        res = await fetch('/api/toolbox/pdf-to-docx', {
-          method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest', ...authHeaders() },
-          body: JSON.stringify({ file: fileData[0] }),
-        });
-        res = await res.json();
-        if (res?.output) { setDownloads([res.output]); setResult(`转换完成！${res.pageCount ? `共 ${res.pageCount} 页` : ''}`); }
-        else setError(res?.error || 'PDF → DOCX 转换失败，请检查文件是否为有效的 PDF 格式');
+        const r = await api.result.pdfToDocx(fileData[0]);
+        if (!r.ok) { fail(r.error.message); return; }
+        const { output, pageCount, error } = r.data;
+        if (output) finish({ downloads: [output], result: `转换完成！${pageCount ? `共 ${pageCount} 页` : ''}` });
+        else finish({ error: error || 'PDF → DOCX 转换失败，请检查文件是否为有效的 PDF 格式' });
       } else if (selected.kind === 'video-extract') {
         // 视频提取音频（ffmpeg）
-        res = await fetch('/api/toolbox/video-extract', {
-          method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest', ...authHeaders() },
-          body: JSON.stringify({ files: fileData, targetFormat }),
-        });
-        res = await res.json();
-        if (res?.results?.length > 0) {
-          const ok = res.results.filter((r: any) => r.success);
-          setDownloads(ok.map((r: any) => r.output));
-          const failed = res.results.filter((r: any) => !r.success);
-          if (ok.length > 0) setResult(`提取完成！${ok.length} 个成功${failed.length ? `，${failed.length} 个失败: ${failed[0].message || ''}` : ''}`);
-          else setError(failed[0]?.message || '音频提取失败');
-        } else setError(res?.error || '音频提取失败');
+        const r = await api.result.videoExtract({ files: fileData, targetFormat });
+        if (!r.ok) { fail(r.error.message); return; }
+        const items = r.data.results ?? [];
+        if (items.length > 0) {
+          const ok = items.filter(i => i.success);
+          const failed = items.filter(i => !i.success);
+          if (ok.length > 0) {
+            finish({
+              downloads: ok.flatMap(i => (i.output ? [i.output] : [])),
+              result: `提取完成！${ok.length} 个成功${failed.length ? `，${failed.length} 个失败: ${failed[0].message || ''}` : ''}`,
+            });
+          } else finish({ error: failed[0]?.message || '音频提取失败' });
+        } else finish({ error: r.data.error || '音频提取失败' });
       } else if (selected.kind === 'youtube-download') {
         // YouTube 下载（yt-dlp）
-        res = await fetch('/api/toolbox/youtube-download', {
-          method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest', ...authHeaders() },
-          body: JSON.stringify({ url: utilityInput.trim(), format: targetFormat, quality }),
-        });
-        res = await res.json();
-        if (res?.success && res?.output) {
-          setDownloads([res.output]);
-          setResult(`下载完成！${res.title || ''} (${res.format || ''})`);
-        } else setError(res?.error || '下载失败，请检查 URL 或网络');
+        const r = await api.result.youtubeDownload({ url: utilityInput.trim(), format: targetFormat, quality });
+        if (!r.ok) { fail(r.error.message); return; }
+        const { success, output, title, format, error } = r.data;
+        if (success && output) finish({ downloads: [output], result: `下载完成！${title || ''} (${format || ''})` });
+        else finish({ error: error || '下载失败，请检查 URL 或网络' });
+      } else {
+        clearInterval(intervalRef.current!);
+        setProgress(100);
+        setFiles([]);
       }
-      clearInterval(intervalRef.current!);
-      setProgress(100);
-      setFiles([]);
     } catch (e: unknown) {
       clearInterval(intervalRef.current!);
       setError((e instanceof Error ? e.message : String(e)) || '转换失败');
@@ -382,6 +394,14 @@ export function Toolbox() {
     <div className="min-h-screen" style={{ background: 'var(--bg-base)', backgroundImage: 'var(--bg-gradient)' }}>
       <div style={{ maxWidth: '1100px', margin: '0 auto', padding: '0 24px' }}>
         <PageHeader title="工具箱" description="格式转换 · 文档处理 · 音频工具" icon={<Wrench size={22} />} color="var(--color-warning)" />
+
+        {/* AEX-P1-017：依赖探测失败必须显式告知 —— 否则用户选了"视频提取音频"失败时
+            无从判断是缺 ffmpeg 还是后端没起来（原先 catch 静默，界面与"依赖齐全"完全一致）。 */}
+        {toolsStatusError && (
+          <div className="glass-card" style={{ padding: '10px 14px', marginBottom: 16, fontSize: 13, color: 'var(--color-warning)' }}>
+            ⚠️ 外部依赖检测失败：{toolsStatusError}（ffmpeg / yt-dlp / LibreOffice 缺失时相关工具将无法使用）
+          </div>
+        )}
 
         {!selected ? (
           <ToolboxList

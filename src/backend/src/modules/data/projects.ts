@@ -10,13 +10,16 @@ export function registerProjectsRoutes(app: FastifyInstance, config: BackendConf
   });
 
   app.post('/api/projects', { schema: { description: '新建项目', tags: ['数据'] } }, async (request) => {
-    const body = request.body as any;
-    return saveProject({ name: body.name, type: body.type || 'url', target: body.target, category: body.category, description: body.description });
+    const body = (request.body ?? {}) as Record<string, unknown>;
+    const str = (v: unknown): string | undefined => (typeof v === 'string' ? v : undefined);
+    const type: 'url' | 'bat' | 'command' = body.type === 'bat' || body.type === 'command' ? body.type : 'url';
+    const target = str(body.target) ?? '';
+    return saveProject({ name: str(body.name) ?? '', type, target, category: str(body.category), description: str(body.description) });
   });
 
   app.put('/api/projects/:id', { schema: { description: '更新项目', tags: ['数据'] } }, async (request) => {
     const { id } = request.params as { id: string };
-    const body = request.body as any;
+    const body = (request.body ?? {}) as Record<string, unknown>;
     const result = await updateProject(id, body);
     if (!result) return { error: 'Project not found' };
     return result;

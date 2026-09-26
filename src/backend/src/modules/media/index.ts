@@ -9,6 +9,35 @@ import { resolve, sep } from 'node:path';
 import { getProviderById, getProviderByCapability, type ResolvedProvider } from '../../lib/provider.js';
 import { getSettings } from '../../lib/dal.js';
 import { isPathSafe } from '../../lib/path-guard.js';
+import { logger } from '../../lib/logger.js';
+
+// ---- AI 供应商响应解析辅助（AEX-P2-002：异构 JSON 响应统一 unknown + 守卫）----
+function asRecord(v: unknown): Record<string, unknown> | null {
+  return v && typeof v === 'object' ? v as Record<string, unknown> : null;
+}
+
+/** 多路径取值：data?.url / output?.url / data.url 等异构供应商字段 */
+function pickUrl(v: unknown): string {
+  const r = asRecord(v);
+  if (!r) return '';
+  for (const key of ['video_url', 'url']) {
+    if (typeof r[key] === 'string') return r[key] as string;
+  }
+  const data = asRecord(r.data);
+  if (data && typeof data.url === 'string') return data.url as string;
+  const output = asRecord(r.output);
+  if (output && typeof output.url === 'string') return output.url as string;
+  return '';
+}
+
+function pickId(v: unknown): string {
+  const r = asRecord(v);
+  if (!r) return '';
+  if (typeof r.task_id === 'string') return r.task_id as string;
+  if (typeof r.id === 'string') return r.id as string;
+  const data = asRecord(r.data);
+  return data && typeof data.id === 'string' ? data.id as string : '';
+}
 
 /** W4-3: isPathSafe 统一至 lib/path-guard.ts（布尔版），下方调用点不变 */
 
@@ -64,7 +93,10 @@ function isSafeProviderUrl(url: string, providerBaseUrl: string): boolean {
       } else if (phost.endsWith('.local') || phost.endsWith('.internal')) {
         providerIsLocal = true;
       }
-    } catch { /* providerBaseUrl 解析失败视为非本地 */ }
+    } catch {
+      // AEX-P2-004 分类：intentional fallback —— providerBaseUrl 非法/缺失时按「非本地」处理，
+      // 从而走更严格的私网拒绝分支（fail-closed），解析错误不改变安全结论。
+    }
 
     // 禁止 link-local 和 0.0.0.0（无论 provider 是否本地）
     if (host === '0.0.0.0' || /^169\.254\./.test(host)) return false;
@@ -92,7 +124,10 @@ function isSafeProviderUrl(url: string, providerBaseUrl: string): boolean {
           if (!providerIsLocal) return false;
         }
       }
-    } catch { /* 忽略解析失败 */ }
+    } catch {
+      // AEX-P2-004 分类：intentional fallback —— 纯字符串解析的防御性 try；
+      // 失败时跳过十进制/八进制混淆检查，host 判定仍由上面的正则分支兜底。
+    }
 
     return true;
   } catch {
@@ -238,10 +273,10 @@ export function registerMediaRoutes(app: FastifyInstance, config: BackendConfig)
               throw new Error(`视频 API 返回错误: ${response.status} ${errText}`);
             }
 
-            const data = await response.json() as any;
+            const data = asRecord(await response.json());
             // 优先检查直接返回的视频 URL（支持 URL 与 Base64 data: 两种格式）
-            const directRaw = data?.video_url || data?.url || data?.data?.url || data?.output?.url
-              || (typeof data?.b64_json === 'string' ? `data:video/mp4;base64,${data.b64_json}` : '');
+            const directRaw = pickUrl(data)
+              || (data && typeof data.b64_json === 'string' ? `data:video/mp4;base64,${data.b64_json}` : '');
             if (directRaw) {
               if (directRaw.startsWith('data:')) {
                 // P2-3 修复：支持 data:video/mp4;base64,... 直接返回（此前抛"格式不支持"）
@@ -261,7 +296,7 @@ export function registerMediaRoutes(app: FastifyInstance, config: BackendConfig)
               }
             } else {
               // 视频任务可能返回 task_id，需要轮询结果
-              const taskId = data.task_id || data.id || data.data?.id;
+              const taskId = pickId(data);
               if (taskId) {
                 // 轮询视频结果（最多 5 分钟）
                 let videoUrl: string | null = null;
@@ -286,10 +321,10 @@ export function registerMediaRoutes(app: FastifyInstance, config: BackendConfig)
                       });
                     }
                     if (pollRes.ok) {
-                      const pollData = await pollRes.json() as any;
-                      if (pollData.status === 'completed' || pollData.state === 'completed') {
-                        const pollRaw = pollData.video_url || pollData.url || pollData.data?.url || pollData.output?.url
-                          || (typeof pollData.b64_json === 'string' ? `data:video/mp4;base64,${pollData.b64_json}` : '');
+                      const pollData = asRecord(await pollRes.json());
+                      if ((pollData?.status === 'completed' || pollData?.state === 'completed')) {
+                        const pollRaw = pickUrl(pollData)
+                          || (pollData && typeof pollData.b64_json === 'string' ? `data:video/mp4;base64,${pollData.b64_json}` : '');
                         if (pollRaw.startsWith('data:')) {
                           // P2-3 修复：轮询结果也支持 Base64
                           const b64 = pollRaw.split(',')[1];
@@ -303,11 +338,14 @@ export function registerMediaRoutes(app: FastifyInstance, config: BackendConfig)
                           throw new Error('AI 返回的视频 URL 被拒绝：不安全的地址（疑似 SSRF）');
                         }
                         break;
-                      } else if (pollData.status === 'failed' || pollData.state === 'failed') {
-                        throw new Error(`视频生成失败: ${pollData.error || '未知错误'}`);
+                      } else if (pollData?.status === 'failed' || pollData?.state === 'failed') {
+                        throw new Error(`视频生成失败: ${typeof pollData.error === 'string' ? pollData.error : '未知错误'}`);
                       }
                     }
-                  } catch { /* continue polling */ }
+                  } catch {
+                    // AEX-P2-004 分类：intentional fallback —— 单次轮询请求失败（网络抖动/Provider
+                    // 短暂不可用）不终止轮询，由外层 deadline 与次数上限收敛；超时后走「视频生成超时」。
+                  }
                 }
                 if (!videoUrl) throw new Error('视频生成超时，请检查 Provider 是否支持视频生成');
                 if (fileBuffer) {
@@ -356,8 +394,12 @@ export function registerMediaRoutes(app: FastifyInstance, config: BackendConfig)
               throw new Error(`图片 API 返回错误: ${response.status} ${errText}`);
             }
 
-            const data = await response.json() as any;
-            const imageUrl = data?.data?.[0]?.url || data?.data?.[0]?.b64_json || data?.url;
+            const data = asRecord(await response.json());
+            const dataArr = data && Array.isArray(data.data) ? data.data : [];
+            const firstItem = asRecord(dataArr[0]);
+            const imageUrl = (firstItem && typeof firstItem.url === 'string' ? firstItem.url as string : '')
+              || (firstItem && typeof firstItem.b64_json === 'string' ? `data:image/png;base64,${firstItem.b64_json}` : '')
+              || (data && typeof data.url === 'string' ? data.url as string : '');
             if (!imageUrl) throw new Error('API 未返回图片数据');
 
             if (imageUrl.startsWith('data:')) {
@@ -382,7 +424,7 @@ export function registerMediaRoutes(app: FastifyInstance, config: BackendConfig)
         if (body.type === 'video') {
           // P0-3 修复（审计）：视频生成失败时绝不把 SVG 假图伪装成 .mp4。
           // 返回失败态（results 不含该资产 + status=failed），前端不得显示"生成成功"。
-          console.warn(`[Media] 视频生成失败（${apiError || '未配置 API Key'}），跳过伪产物生成`);
+          logger.warn({ event: 'media.video.generate_failed', reason: apiError || 'no_api_key' }, '视频生成失败，跳过伪产物生成');
           continue;
         }
         // 图片生成失败 → 保留 SVG 占位图（图片可无损展示失败占位，语义正确）
@@ -402,7 +444,7 @@ export function registerMediaRoutes(app: FastifyInstance, config: BackendConfig)
         const isWebM = buf.length >= 4 && buf[0] === 0x1A && buf[1] === 0x45 && buf[2] === 0xDF && buf[3] === 0xA3;
         if (!isMp4 && !isWebM) {
           const preview = buf.toString('utf8', 0, Math.min(200, buf.length));
-          console.warn(`[Media] 视频响应内容不是有效视频（疑似错误页/JSON），已拒绝保存: ${preview.slice(0, 120)}`);
+          logger.warn({ event: 'media.video.invalid_payload', preview: preview.slice(0, 120) }, '视频响应内容不是有效视频（疑似错误页/JSON），已拒绝保存');
           apiError = apiError || 'Provider 返回的内容不是有效视频文件';
           continue;
         }
@@ -412,7 +454,7 @@ export function registerMediaRoutes(app: FastifyInstance, config: BackendConfig)
 
       db.insert(mediaAssets).values({
         id: itemId,
-        type: body.type as any,
+        type: body.type === 'video' ? 'video' : body.type === 'audio' ? 'audio' : 'image',
         name: body.name || `${body.type}_${now}`,
         path: filePath,
         mimeType: body.type === 'image' ? 'image/png' : 'video/mp4',
@@ -457,12 +499,13 @@ export function registerMediaRoutes(app: FastifyInstance, config: BackendConfig)
     schema: { description: '更新媒体资产', tags: ['媒体'] },
   }, async (request) => {
     const { id } = request.params as { id: string };
-    const body = request.body as any;
+    const body = (request.body ?? {}) as Record<string, unknown>;
     try {
-      db.update(mediaAssets).set({ name: body.name }).where(eq(mediaAssets.id, id)).run();
+      const name = typeof body.name === 'string' ? body.name : '';
+      db.update(mediaAssets).set({ name }).where(eq(mediaAssets.id, id)).run();
       return { success: true };
     } catch (e: unknown) {
-      console.error('[Media] 更新失败:', (e instanceof Error ? e.message : String(e)) || e);
+      logger.error({ event: 'media.update_failed', err: e, mediaId: id }, '更新媒体资产失败');
       return { error: '更新失败，请重试' };
     }
   });
@@ -482,12 +525,18 @@ export function registerMediaRoutes(app: FastifyInstance, config: BackendConfig)
       const dynDirs = (dynSettings?.allowedDirs || []).map((d: string) => resolve(d));
       const safeDirs = [...config.allowedDirs, ...dynDirs, mediaDir];
       if (row?.path && isPathSafe(row.path, safeDirs)) {
-        try { await import('node:fs/promises').then(fsp => fsp.unlink(row.path!)); } catch (_e: unknown) { /* ignore - intentional */ }
+        try {
+          await import('node:fs/promises').then(fsp => fsp.unlink(row.path!));
+        } catch {
+          // AEX-P2-004 分类：ignored —— 文件已被用户/清理工具移走（ENOENT 等）时 DB 行仍需删除；
+          // 删除失败不影响「资源消失」这一预期终态，故只记 debug 不阻断。
+          logger.debug({ event: 'media.file_unlink_ignored', mediaId: id, path: row.path }, '媒体文件删除失败，仅移除 DB 行');
+        }
       }
       db.delete(mediaAssets).where(eq(mediaAssets.id, id)).run();
       return { success: true };
     } catch (e: unknown) {
-      console.error('删除媒体失败:', (e instanceof Error ? e.message : String(e)) || e);
+      logger.error({ event: 'media.delete_failed', err: e, mediaId: id }, '删除媒体资产失败');
       return { error: '删除失败，请重试' };
     }
   });
@@ -520,16 +569,27 @@ export function registerMediaRoutes(app: FastifyInstance, config: BackendConfig)
         // Oracle-2: 运行时路径校验 — 防 DB 中 path 被篡改后删除任意文件
         // P1-5 修复：媒体文件存储在 dataDir/media，需将其加入安全目录集合
         if (row?.path && isPathSafe(row.path, safeDirs)) {
-          try { await import('node:fs/promises').then(fsp => fsp.unlink(row.path!)); } catch (_e: unknown) { /* ignore - intentional */ }
+          try {
+            await import('node:fs/promises').then(fsp => fsp.unlink(row.path!));
+          } catch {
+            // AEX-P2-004 分类：ignored —— 同单条删除：文件已不存在时仅移除 DB 行。
+            logger.debug({ event: 'media.file_unlink_ignored', mediaId: id, path: row.path }, '媒体文件删除失败，仅移除 DB 行');
+          }
         }
         db.delete(mediaAssets).where(eq(mediaAssets.id, id)).run();
         if (row) deleted++;
       } catch (e: unknown) {
-        console.error(`[Media] 批量删除失败 (${id}):`, (e instanceof Error ? e.message : String(e)) || e);
+        logger.error({ event: 'media.batch_delete_item_failed', err: e, mediaId: id }, '批量删除单项失败，继续处理其余项');
       }
     }
     // 持久化到 JSON 数据层（与 conversations 模块一致）
-    try { saveDb(config); } catch (e: unknown) { console.error('[Media] 持久化失败:', (e instanceof Error ? e.message : String(e)) || e); }
+    try {
+      saveDb(config);
+    } catch (e: unknown) {
+      // AEX-P2-004 分类：recoverable —— SQLite 已提交的删除不因 JSON 快照落盘失败而回滚，
+      // 记录后交由下一次 saveDb 自然补齐。
+      logger.error({ event: 'media.persist_failed', err: e }, '媒体数据持久化失败');
+    }
     return { success: true, deleted };
   });
 }

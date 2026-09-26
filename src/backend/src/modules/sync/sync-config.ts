@@ -8,6 +8,7 @@ import { conversations, messages } from '../../db/schema/index.js';
 import { eq, desc } from 'drizzle-orm';
 import { createHmac } from 'node:crypto';
 import { encrypt, decrypt, isEncrypted } from '../../lib/crypto.js';
+import { logger } from '../../lib/logger.js';
 
 // ============================================================
 // 同步配置管理
@@ -78,7 +79,10 @@ export function loadSyncConfig(config: BackendConfig): SyncConfig | null {
     }
   } catch (e: unknown) {
     // 解密失败（密钥变更等）不崩溃，返回 null 让上层提示重新配置
-    console.warn('[Sync] sync-config.json 读取失败:', e instanceof Error ? e.message : String(e));
+    logger.warn(
+      { event: 'sync.config_read_failed', error: e instanceof Error ? e.message : String(e) },
+      '[Sync] sync-config.json 读取失败:',
+    );
   }
   return null;
 }
@@ -95,7 +99,10 @@ export function persistSyncConfig(cfg: SyncConfig | null, config: BackendConfig)
       writeFileSync(path, encrypted, { mode: 0o600 });
     }
   } catch (e: unknown) {
-    console.warn('[Sync] sync-config.json 写入失败:', e instanceof Error ? e.message : String(e));
+    logger.warn(
+      { event: 'sync.config_write_failed', error: e instanceof Error ? e.message : String(e) },
+      '[Sync] sync-config.json 写入失败:',
+    );
   }
 }
 
@@ -200,7 +207,7 @@ export async function ensureSyncIdentity(sb: SupabaseClient, cfg: SyncConfig): P
       cfg.userId = userData.user.id;
       syncConfig = cfg;
       persistWithConfig();
-      console.log('[Sync] 身份已绑定（Auth session）:', cfg.userId);
+      logger.info({ event: 'sync.identity_bound_auth_session', userId: cfg.userId }, '[Sync] 身份已绑定（Auth session）:');
       return cfg.userId;
     }
     // 2. 匿名登录（个人模式默认路径）
@@ -209,15 +216,20 @@ export async function ensureSyncIdentity(sb: SupabaseClient, cfg: SyncConfig): P
       cfg.userId = anonData.user.id;
       syncConfig = cfg;
       persistWithConfig();
-      console.log('[Sync] 身份已绑定（匿名登录）:', cfg.userId);
+      logger.info({ event: 'sync.identity_bound_anonymous', userId: cfg.userId }, '[Sync] 身份已绑定（匿名登录）:');
       return cfg.userId;
     }
     if (anonErr) {
-      console.warn('[Sync] 匿名登录失败（Supabase 需启用 Anonymous sign-ins）:', anonErr.message);
+      logger.warn(
+        { event: 'sync.identity_anonymous_login_failed', error: anonErr.message },
+        '[Sync] 匿名登录失败（Supabase 需启用 Anonymous sign-ins）:',
+      );
     }
   } catch (e: unknown) {
-    console.warn('[Sync] 身份初始化失败（不阻塞，但数据将不绑定用户）:',
-      e instanceof Error ? e.message : String(e));
+    logger.warn(
+      { event: 'sync.identity_init_failed', error: e instanceof Error ? e.message : String(e) },
+      '[Sync] 身份初始化失败（不阻塞，但数据将不绑定用户）:',
+    );
   }
   return null;
 }
@@ -249,10 +261,10 @@ export async function registerDevice(sb: SupabaseClient, cfg: SyncConfig): Promi
     last_seen_at: new Date().toISOString(),
   }, { onConflict: 'id' });
   if (error) {
-    console.warn('[Sync] 设备注册失败:', error.message);
+    logger.warn({ event: 'sync.device_register_failed', deviceId: cfg.deviceId, error: error.message }, '[Sync] 设备注册失败:');
   } else {
     deviceRegistered = true;
-    console.log('[Sync] 设备已注册:', cfg.deviceId);
+    logger.info({ event: 'sync.device_registered', deviceId: cfg.deviceId }, '[Sync] 设备已注册:');
   }
 }
 
@@ -349,8 +361,14 @@ export function registerSyncConfigRoutes(app: FastifyInstance, config: BackendCo
           // BE-UA-01: 启动全量同步 fire-and-forget → 保存 promise 供 shutdown 等待
           return syncConversationsToSupabase(sb, cfg);
         })
-        .then(r => console.log(`[Sync] 启动全量同步完成: ${r.ok} 条消息，${r.fail} 条失败`))
-        .catch(e => console.warn('[Sync] 启动身份初始化/同步失败:', e instanceof Error ? e.message : e));
+        .then(r => logger.info(
+          { event: 'sync.startup_full_sync_completed', ok: r.ok, fail: r.fail },
+          `[Sync] 启动全量同步完成: ${r.ok} 条消息，${r.fail} 条失败`,
+        ))
+        .catch(e => logger.warn(
+          { event: 'sync.startup_identity_or_sync_failed', error: e instanceof Error ? e.message : String(e) },
+          '[Sync] 启动身份初始化/同步失败:',
+        ));
     }
   }
 
@@ -380,7 +398,10 @@ export function registerSyncConfigRoutes(app: FastifyInstance, config: BackendCo
     const newFingerprint = computeConfigFingerprint(newConfig);
     const fingerprintChanged = newFingerprint !== configFingerprint;
     if (fingerprintChanged) {
-      console.log('[Sync] 配置指纹变化，重置设备注册状态:', { old: configFingerprint, new: newFingerprint });
+      logger.info(
+        { event: 'sync.config_fingerprint_changed', old: configFingerprint, new: newFingerprint },
+        '[Sync] 配置指纹变化，重置设备注册状态:',
+      );
       deviceRegistered = false;
       configFingerprint = newFingerprint;
     }
@@ -407,7 +428,10 @@ export function registerSyncConfigRoutes(app: FastifyInstance, config: BackendCo
       // 连接成功后全量同步本地对话（手机端立即可见所有历史对话）
       // BE-UA-02: 连接后全量同步 fire-and-forget → await 确保错误可感知，同时不阻塞响应
       const syncResult = await syncConversationsToSupabase(sb, syncConfig);
-      console.log(`[Sync] 连接后全量同步完成: ${syncResult.ok} 条消息，${syncResult.fail} 条失败`);
+      logger.info(
+        { event: 'sync.post_connect_full_sync_completed', ok: syncResult.ok, fail: syncResult.fail },
+        `[Sync] 连接后全量同步完成: ${syncResult.ok} 条消息，${syncResult.fail} 条失败`,
+      );
       
       // P1-15: 同步日志状态必须来自真实 SyncResult（partial/failed/success），不硬编码 success
       const overallOk = syncResult.fail === 0 && boundUserId !== null;

@@ -12,7 +12,7 @@ import { runs } from '../../db/schema/index.js';
 import { and, desc, eq, sql, type SQL } from 'drizzle-orm';
 import type { SQLJsDatabase } from 'drizzle-orm/sql-js';
 import * as schema from '../../db/schema/index.js';
-import { AppError } from '@pacc/shared';
+import { AppError, RUN_STATUSES } from '@pacc/shared';
 // P0-01/P0-02: Run-scoped cancellation registry
 import { runCancellationRegistry } from '../../lib/run-cancellation-registry.js';
 // P0-05 收口：唯一 Run 状态写入入口（禁止路由层直接 db.update(runs) 绕过状态机）
@@ -23,11 +23,13 @@ type RunRow = typeof runs.$inferSelect;
 type RunStatus = RunRow['status'];
 type RunMode = RunRow['mode'];
 
-const RUN_STATUSES = ['created', 'running', 'waiting', 'completed', 'failed', 'cancelled', 'interrupted'] as const;
+// AEX-P0-002：状态集合来自 @pacc/shared canonical 11 态（此前私有 7 态会让
+// retry_waiting 等状态的 run 无法被 status 查询命中）
+const CANONICAL_RUN_STATUSES: readonly string[] = RUN_STATUSES;
 const RUN_MODES = ['normal', 'super', 'workflow', 'background'] as const;
 
 function isRunStatus(value: unknown): value is RunStatus {
-  return typeof value === 'string' && (RUN_STATUSES as readonly string[]).includes(value);
+  return typeof value === 'string' && CANONICAL_RUN_STATUSES.includes(value);
 }
 
 function isRunMode(value: unknown): value is RunMode {
@@ -224,9 +226,16 @@ export function registerRunRoutes(app: FastifyInstance, config: BackendConfig): 
   registerTransition('/api/runs/:runId/pause', 'pause', ['running']);
   registerTransition('/api/runs/:runId/resume', 'resume', ['waiting']);
   // Wave0-CX: cancel 除状态机转移外，真正 abort 执行流（runCancellationRegistry，幂等）
-  registerTransition('/api/runs/:runId/cancel', 'cancel', ['running', 'waiting'], (runId) => {
-    runCancellationRegistry.cancel(runId);
-  });
+  // AEX-P0-004：白名单与 RunLifecycleManager.ACTION_FROM.cancel 对齐（5 态），
+  // 否则处于重试/验证中的 run 只能等超时，用户无法真正取消
+  registerTransition(
+    '/api/runs/:runId/cancel',
+    'cancel',
+    ['running', 'waiting', 'retry_waiting', 'retrying', 'verifying'],
+    (runId) => {
+      runCancellationRegistry.cancel(runId);
+    },
+  );
 
   // GET /api/runs/:runId — 获取单个 Run
   app.get('/api/runs/:runId', {

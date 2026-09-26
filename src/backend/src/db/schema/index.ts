@@ -186,6 +186,26 @@ export const workflowRuns = sqliteTable('workflow_runs', {
 });
 
 /**
+ * 工作流节点运行表（AEX-P0-015）— 节点级执行态的事实源。
+ *
+ * 此前节点态只有 workflow_runs.current_node_id 单列 + 终态一次性覆盖 results JSON：
+ * 并行节点互相覆盖、运行中状态不可见、重启后无法定位卡在哪个节点。
+ * 本表按 (workflow_run_id, node_id) 一行一节点，节点开始/完成/重试即时落库。
+ */
+export const workflowNodeRuns = sqliteTable('workflow_node_runs', {
+  id: text('id').primaryKey(), // `${workflowRunId}:${nodeId}` —— 确定性主键，重试幂等 upsert
+  workflowRunId: text('workflow_run_id').notNull().references(() => workflowRuns.id, { onDelete: 'cascade' }),
+  nodeId: text('node_id').notNull(),
+  status: text('status', { enum: ['pending', 'running', 'completed', 'failed', 'cancelled'] }).notNull().default('pending'),
+  attempt: integer('attempt').notNull().default(1), // 最近一次尝试序号（1 = 首次）
+  retryCount: integer('retry_count').notNull().default(0), // 已发生的重试次数（attempt - 1）
+  startedAt: text('started_at'),
+  completedAt: text('completed_at'),
+  error: text('error'),
+  output: text('output'),
+});
+
+/**
  * Agent Activity Event 表 — Event-driven Activity Stream 的事件日志（append-only）
  * 设计对齐 DeepSeek Harness 的 event-sourced sessions：事件是唯一事实源，
  * 前端 Activity Stream / 任务进度 / 消息列表均为事件投影。

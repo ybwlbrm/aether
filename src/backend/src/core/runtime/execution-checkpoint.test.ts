@@ -5,6 +5,9 @@ import {
   deserializeCheckpoint,
   mergeStepResult,
   serializeCheckpoint,
+  clearExecutionCheckpoints,
+  getExecutionCheckpoint,
+  recordExecutionCheckpoint,
   ExecutionCheckpointError,
   type CreateExecutionCheckpointInput,
   type ExecutionCheckpoint,
@@ -193,5 +196,30 @@ describe('core/runtime/execution-checkpoint', () => {
 
     // Then
     assert.equal(checkpoint.seq, checkpoint.turn)
+  })
+
+  it('records the latest checkpoint per run and reads it back for retry recovery', () => {
+    // Given
+    clearExecutionCheckpoints()
+    const first = createExecutionCheckpoint(input({ runId: 'run-store', turn: 1 }))
+    const latest = createExecutionCheckpoint(input({ runId: 'run-store', turn: 2 }))
+
+    // When
+    recordExecutionCheckpoint(first)
+    recordExecutionCheckpoint(latest)
+
+    // Then
+    assert.deepEqual(getExecutionCheckpoint('run-store'), latest)
+    assert.equal(getExecutionCheckpoint('run-missing'), undefined)
+  })
+
+  it('rejects a checkpoint that cannot be recorded', () => {
+    // Given
+    clearExecutionCheckpoints()
+    const invalid = { ...createExecutionCheckpoint(input()), runId: '' }
+
+    // When / Then
+    assert.throws(() => recordExecutionCheckpoint(invalid))
+    assert.equal(getExecutionCheckpoint('run-1'), undefined)
   })
 })

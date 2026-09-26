@@ -29,7 +29,7 @@ import type {
   TaskEndReason,
 } from './events.js';
 
-/** v1 eventType -> v2 type 映射表 */
+/** v1 eventType -> v2 type 映射表（穷尽：覆盖 AgentEventType 全部 32 个成员） */
 const V1_TO_V2_TYPE: Readonly<Record<AgentEventType, AgentEvent['type']>> = {
   'session.started': 'run.created',
   'session.closed': 'run.completed',
@@ -64,6 +64,35 @@ const V1_TO_V2_TYPE: Readonly<Record<AgentEventType, AgentEvent['type']>> = {
   'tool.retry': 'tool.retry',
   'token': 'token.usage',
 };
+
+/**
+ * 面向不可信输入的查找视图（刻意带 undefined）。
+ *
+ * AEX-P0-016：legacy activity_events.eventType 是无约束 TEXT 列，DB 里可能存在
+ * 未登记的取值。未知类型必须 reject，绝不伪造 run.created —— 伪造会让回放把任意
+ * 历史事件读成「run 起点」，掩盖真实轨迹并污染 afterSeq 增量消费。
+ */
+const V1_TYPE_LOOKUP: Readonly<Record<string, AgentEvent['type'] | undefined>> = V1_TO_V2_TYPE;
+
+/** AEX-P0-016：未知 legacy eventType 的显式失败（调用方可按类型捕获后决定跳过该行） */
+export class LegacyEventTypeError extends Error {
+  readonly eventType: string;
+
+  constructor(eventType: string) {
+    super(`unknown legacy event type: ${eventType}`);
+    this.name = 'LegacyEventTypeError';
+    this.eventType = eventType;
+  }
+}
+
+/** v1 eventType -> v2 type；未登记的类型抛 LegacyEventTypeError（不返回任何伪造类型） */
+function resolveV2Type(eventType: string): AgentEvent['type'] {
+  const mapped = V1_TYPE_LOOKUP[eventType];
+  if (mapped === undefined) {
+    throw new LegacyEventTypeError(eventType);
+  }
+  return mapped;
+}
 
 /** v2 type -> v1 eventType 反向映射（用于 toLegacy） */
 const V2_TO_V1_TYPE: Readonly<Partial<Record<AgentEvent['type'], AgentEventType>>> = {
@@ -484,9 +513,15 @@ function buildV2Payload(envelope: AgentEventEnvelope, v2Type: AgentEvent['type']
   }
 }
 
-/** 将 v1 AgentEventEnvelope 转换为 v2 AgentEvent（需要提供 runId，因为 v1 无此字段） */
+/**
+ * 将 v1 AgentEventEnvelope 转换为 v2 AgentEvent（需要提供 runId，因为 v1 无此字段）
+ *
+ * AEX-P0-016：未登记的 eventType 直接抛 LegacyEventTypeError —— 绝不降级为
+ * run.created。调用方（backend core/events/legacy-adapter.fromLegacyRow）
+ * 应按类型捕获并跳过该行，而不是伪造一个假的 run 起点。
+ */
 export function toV2(envelope: AgentEventEnvelope, runId: string): AgentEvent {
-  const v2Type = V1_TO_V2_TYPE[envelope.eventType] ?? 'run.created';
+  const v2Type = resolveV2Type(envelope.eventType);
   const payload = buildV2Payload(envelope, v2Type);
 
   const base: BaseEvent = {

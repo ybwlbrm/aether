@@ -6,8 +6,8 @@
  * Pure TypeScript only.
  */
 
+import { RUN_STATUSES, type RunStatus } from '@pacc/shared';
 import { RuntimeError } from '../errors/index.js';
-import type { RunStatus } from './run.js';
 
 /**
  * Checkpoint interface for run state persistence.
@@ -102,16 +102,9 @@ export function deserializeCheckpoint(raw: string): Checkpoint {
     });
   }
 
-  const validStatuses: RunStatus[] = [
-    'created',
-    'running',
-    'waiting',
-    'completed',
-    'failed',
-    'cancelled',
-    'interrupted',
-  ];
-  if (!validStatuses.includes(cp.status)) {
+  // AEX-P0-002：校验集合来自 @pacc/shared canonical 11 态（此前私有 7 态会把
+  // retry_waiting/retrying/verifying/budget_exceeded 误判为非法 checkpoint）
+  if (!(RUN_STATUSES as readonly string[]).includes(cp.status)) {
     throw new RuntimeError(`Invalid checkpoint: invalid status ${cp.status}`, {
       code: 'INVALID_CHECKPOINT',
       context: { status: cp.status },

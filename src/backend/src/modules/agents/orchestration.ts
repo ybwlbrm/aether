@@ -254,8 +254,10 @@ export async function handleOrchestrate(
       rootAgentId: 'sisyphus',
       metadata: { prompt: body.prompt?.slice(0, 200) },
     });
-    // P0-11: run.created 为关键事件，失败必须显式暴露（不再静默吞错）
-    void emitV2Event({
+    // P0-11 / AEX-P0-011: run.created 为关键事件，失败必须显式暴露（不再静默吞错）。
+    // 必须 await —— `void` 会让 rejection 变成无主 Promise，下面的补偿代码永远不执行
+    // （死代码），从而默许「run 已经在跑但 events 表没有起点」的假稳定状态。
+    await emitV2Event({
       runId: runTaskId,
       sessionId: convId,
       taskId: runTaskId,
@@ -476,8 +478,11 @@ export async function handleOrchestrate(
         content: `正在分析任务并分派 Agent`,
       });
       // v2 mirror: run.started + agent.started (sisyphus orchestrator)
-void emitV2Event({ runId: runTaskId, sessionId: convId, taskId: runTaskId, agentId: 'sisyphus', type: 'run.started', payload: { status: 'running' }, critical: true });
-  void emitV2Event({ runId: runTaskId, sessionId: convId, taskId: runTaskId, agentId: 'sisyphus', type: 'agent.started', payload: { status: 'running' }, critical: true });
+      // AEX-P0-011: 关键事件必须 await —— 失败由本函数外层 catch 兜底（标记 run 失败
+      // + 发 run.failed）。`void` 会让关键事件失败变成无主 rejection，主流程照跑，
+      // 事件轨迹却缺起点/中段。
+      await emitV2Event({ runId: runTaskId, sessionId: convId, taskId: runTaskId, agentId: 'sisyphus', type: 'run.started', payload: { status: 'running' }, critical: true });
+      await emitV2Event({ runId: runTaskId, sessionId: convId, taskId: runTaskId, agentId: 'sisyphus', type: 'agent.started', payload: { status: 'running' }, critical: true });
     }
 
     // 2. 每个 Agent 使用自己的配置模型并行调用，逐个发送结果
@@ -904,14 +909,20 @@ ${errorResults.length > 0 ? `\n注意：以下 Agent 执行失败，结果不可
            taskId: runTaskId, agentId: 'sisyphus', agentType: 'orchestrator',
            status: 'cancelled', content: '已停止', endReason: 'aborted',
          })
-         try {
-           runLifecycle.transition(runTaskId, 'cancel', { totalTokens: totalAgentTokens })
-           void emitV2Event({
-             runId: runTaskId, sessionId: convId, taskId: runTaskId, agentId: 'sisyphus',
-             type: 'run.cancelled',
-             payload: { endReason: 'aborted', tokenUsage: { inputTokens: 0, outputTokens: 0, totalTokens: totalAgentTokens } },
-           })
-         } catch { /* v2 runtime must never break legacy orchestration */ }
+          try {
+            runLifecycle.transition(runTaskId, 'cancel', { totalTokens: totalAgentTokens })
+            // AEX-P0-011: 终态事件必须 await —— 必须在 reply.raw.end() 之前落库，
+            // 否则回放读不到终点（run 永远「在跑」）。非关键事件失败仅记日志。
+            await emitV2Event({
+              runId: runTaskId, sessionId: convId, taskId: runTaskId, agentId: 'sisyphus',
+              type: 'run.cancelled',
+              payload: { endReason: 'aborted', tokenUsage: { inputTokens: 0, outputTokens: 0, totalTokens: totalAgentTokens } },
+            })
+          } catch (e: unknown) {
+            // v2 runtime must never break legacy orchestration（终态已由状态机持久化）
+            console.error('[orchestration] run.cancelled 事件写入失败:', e instanceof Error ? e.message : String(e));
+          }
+
        } else if (orchestrationFailed) {
          const endReason = synthesisFailed ? synthesisEndReason : 'error'
          eventBus.emit(convId, 'agent.error', {
@@ -922,18 +933,22 @@ ${errorResults.length > 0 ? `\n注意：以下 Agent 执行失败，结果不可
            taskId: runTaskId, agentId: 'sisyphus', agentType: 'orchestrator',
            status: endReason, content, endReason,
          })
-         try {
-           runLifecycle.transition(runTaskId, 'fail', {
-             error: content,
-             endReason,
-             totalTokens: totalAgentTokens,
-           })
-           void emitV2Event({
-             runId: runTaskId, sessionId: convId, taskId: runTaskId, agentId: 'sisyphus',
-             type: 'run.failed',
-             payload: { endReason, error: { message: content }, tokenUsage: { inputTokens: 0, outputTokens: 0, totalTokens: totalAgentTokens } },
-           })
-         } catch { /* v2 runtime must never break legacy orchestration */ }
+          try {
+            runLifecycle.transition(runTaskId, 'fail', {
+              error: content,
+              endReason,
+              totalTokens: totalAgentTokens,
+            })
+            // AEX-P0-011: 终态事件必须 await（见 run.cancelled 处的说明）
+            await emitV2Event({
+              runId: runTaskId, sessionId: convId, taskId: runTaskId, agentId: 'sisyphus',
+              type: 'run.failed',
+              payload: { endReason, error: { message: content }, tokenUsage: { inputTokens: 0, outputTokens: 0, totalTokens: totalAgentTokens } },
+            })
+          } catch (e: unknown) {
+            console.error('[orchestration] run.failed 事件写入失败:', e instanceof Error ? e.message : String(e));
+          }
+
        } else {
          eventBus.emit(convId, 'agent.completed', {
            taskId: runTaskId, agentId: 'sisyphus', agentType: 'orchestrator',
@@ -943,14 +958,18 @@ ${errorResults.length > 0 ? `\n注意：以下 Agent 执行失败，结果不可
            taskId: runTaskId, agentId: 'sisyphus', agentType: 'orchestrator',
            status: 'completed', content: '完成', endReason: 'completed',
          })
-         try {
-           runLifecycle.transition(runTaskId, 'complete', { totalTokens: totalAgentTokens, endReason: 'completed' })
-           void emitV2Event({
-             runId: runTaskId, sessionId: convId, taskId: runTaskId, agentId: 'sisyphus',
-             type: 'run.completed',
-             payload: { endReason: 'completed', tokenUsage: { inputTokens: 0, outputTokens: 0, totalTokens: totalAgentTokens } },
-           })
-         } catch { /* v2 runtime must never break legacy orchestration */ }
+          try {
+            runLifecycle.transition(runTaskId, 'complete', { totalTokens: totalAgentTokens, endReason: 'completed' })
+            // AEX-P0-011: 终态事件必须 await（见 run.cancelled 处的说明）
+            await emitV2Event({
+              runId: runTaskId, sessionId: convId, taskId: runTaskId, agentId: 'sisyphus',
+              type: 'run.completed',
+              payload: { endReason: 'completed', tokenUsage: { inputTokens: 0, outputTokens: 0, totalTokens: totalAgentTokens } },
+            })
+          } catch (e: unknown) {
+            console.error('[orchestration] run.completed 事件写入失败:', e instanceof Error ? e.message : String(e));
+          }
+
        }
      }
 
@@ -977,12 +996,15 @@ ${errorResults.length > 0 ? `\n注意：以下 Agent 执行失败，结果不可
             error: (e instanceof Error ? e.message : String(e)) || '内部错误',
             endReason: 'error',
           });
-          void emitV2Event({
+          // AEX-P0-011: 终态事件必须 await（见 run.cancelled 处的说明）
+          await emitV2Event({
             runId: runTaskId, sessionId: convId, taskId: runTaskId, agentId: 'sisyphus',
             type: 'run.failed',
             payload: { endReason: 'error', error: { message: (e instanceof Error ? e.message : String(e)) || '内部错误' } },
           });
-        } catch { /* v2 runtime must never break legacy orchestration */ }
+        } catch (emitErr: unknown) {
+          console.error('[Agents] run.failed 事件写入失败:', emitErr instanceof Error ? emitErr.message : String(emitErr));
+        }
       } catch (emitErr: unknown) { console.error('[Agents] task.failed 事件发射失败:', emitErr instanceof Error ? emitErr.message : String(emitErr)); }
     }
     try { sseSend('message', '[DONE]'); } catch { /* SSE 写入失败=客户端已断开，忽略 */ }

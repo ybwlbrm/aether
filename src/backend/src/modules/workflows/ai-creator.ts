@@ -81,27 +81,38 @@ export async function aiCreateWorkflow(opts: AiCreateWorkflowOptions): Promise<A
   const response = await runtime.complete(request);
   const rawText = response.content.trim();
   const parsed = extractJson(rawText);
+  const parsedObj = parsed && typeof parsed === 'object' ? parsed as Record<string, unknown> : null;
 
-  if (!parsed || !Array.isArray(parsed.nodes)) {
+  if (!parsedObj || !Array.isArray(parsedObj.nodes)) {
     throw new Error('AI 返回格式不正确，请重试');
   }
 
-  // 确保节点有 id 和 label
-  const nodes: WorkflowNode[] = parsed.nodes.map((n: any, i: number) => ({
-    id: n.id || `node-${i + 1}`,
-    type: n.type || 'agent',
-    label: n.label || `节点${i + 1}`,
-    config: n.config || {},
-  }));
+  // 确保节点含 id 和 label
+  const nodes: WorkflowNode[] = parsedObj.nodes.map((n: unknown, i: number) => {
+    const item = n as Record<string, unknown>;
+    const str = (v: unknown): string => (typeof v === 'string' ? v : '');
+    const rawType = str(item.type);
+    const type: WorkflowNode['type'] = rawType === 'tool' || rawType === 'media' || rawType === 'document' || rawType === 'condition' || rawType === 'system' ? rawType : 'agent';
+    return {
+      id: str(item.id) || `node-${i + 1}`,
+      type,
+      label: str(item.label) || `节点${i + 1}`,
+      config: item.config && typeof item.config === 'object' ? item.config as Record<string, unknown> : {},
+    };
+  });
 
-  // 确保边有 id
-  const edges: WorkflowEdge[] = (Array.isArray(parsed.edges) ? parsed.edges : []).map((e: any, i: number) => ({
-    id: e.id || `edge-${i + 1}`,
-    source: e.source,
-    target: e.target,
-  }));
+  // 确保边含 id
+  const edges: WorkflowEdge[] = (Array.isArray(parsedObj.edges) ? parsedObj.edges : []).map((e: unknown, i: number) => {
+    const item = e as Record<string, unknown>;
+    const str = (v: unknown): string => (typeof v === 'string' ? v : '');
+    return {
+      id: str(item.id) || `edge-${i + 1}`,
+      source: str(item.source),
+      target: str(item.target),
+    };
+  });
 
-  const finalName = parsed.name || wfName;
+  const finalName = typeof parsedObj.name === 'string' ? parsedObj.name : wfName;
   const db = getDb();
   const now = new Date().toISOString();
   const id = randomUUID();

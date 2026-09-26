@@ -62,7 +62,7 @@ import {
   RetryFailedEvent,
   RetryExhaustedEvent,
 } from './events.js';
-import { toLegacy, toV2, verifyRoundTrip } from './legacy-adapter.js';
+import { toLegacy, toV2, verifyRoundTrip, LegacyEventTypeError } from './legacy-adapter.js';
 import type { AgentEventEnvelope } from '../agent-event.js';
 
 // Helper to create a minimal valid BaseEvent
@@ -351,6 +351,62 @@ describe('v2 AgentEvent protocol', () => {
       assert.equal(v2.runId, 'run-456');
       assert.equal(v2.version, 2);
       assert.equal(v2.type, 'task.started');
+    });
+  });
+
+  // AEX-P0-016：未知 legacy eventType 绝不允许被伪造成 run.created ——
+  // 伪造会让回放把任意历史事件读成「run 起点」，掩盖真实轨迹。
+  describe('AEX-P0-016 未知 legacy 事件类型必须 reject', () => {
+    function envelopeWithEventType(eventType: string): AgentEventEnvelope {
+      return {
+        eventId: 'evt-unknown',
+        sessionId: 'sess-1',
+        taskId: 'task-1',
+        agentId: 'agent-1',
+        agentType: 'conversation',
+        // legacy activity_events.eventType 是无约束 TEXT 列：DB 里可能是任何字符串，
+        // 因此这里必须绕过 AgentEventType 联合类型。
+        eventType: eventType as AgentEventEnvelope['eventType'],
+        timestamp: '2026-09-05T00:00:00.000Z',
+        seq: 1,
+      };
+    }
+
+    it('未知 eventType 抛 LegacyEventTypeError（不返回伪造的 run.created）', () => {
+      assert.throws(
+        () => toV2(envelopeWithEventType('totally.unknown.event'), 'run-456'),
+        (err: unknown) => {
+          assert.ok(err instanceof LegacyEventTypeError);
+          assert.equal(err.eventType, 'totally.unknown.event');
+          return true;
+        },
+      );
+    });
+
+    it('空 eventType 同样 reject（不得退化为 run.created）', () => {
+      assert.throws(
+        () => toV2(envelopeWithEventType(''), 'run-456'),
+        LegacyEventTypeError,
+      );
+    });
+
+    it('全部已登记的 v1 eventType 均可映射（映射表保持穷尽）', () => {
+      const known: Array<AgentEventEnvelope['eventType']> = [
+        'session.started', 'session.closed',
+        'task.started', 'task.plan', 'task.progress', 'task.ask-confirm',
+        'task.completed', 'task.cancelled', 'task.failed',
+        'agent.started', 'agent.status', 'agent.waiting', 'agent.resumed',
+        'agent.completed', 'agent.error', 'agent.retry', 'agent.spawned',
+        'agent.handoff', 'agent.failed', 'agent.stopped', 'agent.inbox.directive',
+        'agent.message.delta', 'agent.message.completed', 'agent.reasoning.delta',
+        'agent.output.delta', 'agent.output.completed',
+        'tool.started', 'tool.progress', 'tool.completed', 'tool.error', 'tool.retry',
+        'token',
+      ];
+      for (const eventType of known) {
+        const v2 = toV2(envelopeWithEventType(eventType), 'run-456');
+        assert.equal(v2.type, eventType === 'token' ? 'token.usage' : eventType === 'session.started' ? 'run.created' : eventType === 'session.closed' ? 'run.completed' : eventType);
+      }
     });
   });
 

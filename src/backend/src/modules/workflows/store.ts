@@ -1,10 +1,11 @@
 import { getDb, saveDb } from '../../db/client.js'
-import { workflows, workflowRuns, runs } from '../../db/schema/index.js'
-import { eq, desc } from 'drizzle-orm';
+import { workflows, workflowRuns, workflowNodeRuns, runs } from '../../db/schema/index.js'
+import { eq, desc, inArray } from 'drizzle-orm';
 import { randomUUID } from 'node:crypto';
 import type { BackendConfig } from '../../config/index.js';
 import { RunLifecycleManager } from '../../core/runtime/index.js'
-import type { WorkflowNode, WorkflowEdge } from './types.js';
+import { closeDanglingNodeRuns } from './node-run-store.js'
+import type { WorkflowNode, WorkflowEdge, WorkflowNodeRun } from './types.js';
 
 type WorkflowDatabase = ReturnType<typeof getDb>
 
@@ -198,6 +199,8 @@ export function repairOrphanWorkflowRuns(db: WorkflowDatabase, config: BackendCo
         completedAt: new Date().toISOString(),
       }).where(eq(workflowRuns.id, workflowRun.id)).run()
     }
+    // AEX-P0-015：父 run 已收口，停在 running 的节点行也必须收口
+    closeDanglingNodeRuns(db, orphan.map(workflowRun => workflowRun.id))
     if (orphan.length > 0) saveDb(config)
     return orphan.length
   } catch (error: unknown) {
@@ -234,19 +237,53 @@ export async function updateWorkflowRun(runId: string, updates: {
   saveDb(config);
 }
 
-/** 获取工作流运行记录 */
+/** AEX-P0-015：把 workflow_node_runs 行投影为对外的节点态 */
+function toNodeRunView(row: typeof workflowNodeRuns.$inferSelect): WorkflowNodeRun {
+  return {
+    nodeId: row.nodeId,
+    status: row.status,
+    attempt: row.attempt,
+    retryCount: row.retryCount,
+    output: row.output ?? undefined,
+    error: row.error ?? undefined,
+    startedAt: row.startedAt ?? undefined,
+    completedAt: row.completedAt ?? undefined,
+  };
+}
+
+/** 批量读取一组运行的节点态，按 workflowRunId 分组（一次查询，避免 N+1） */
+function groupNodeRunsByRunId(
+  db: WorkflowDatabase,
+  runIds: readonly string[],
+): Map<string, WorkflowNodeRun[]> {
+  if (runIds.length === 0) return new Map()
+  const grouped = new Map<string, WorkflowNodeRun[]>()
+  const rows = db.select().from(workflowNodeRuns)
+    .where(inArray(workflowNodeRuns.workflowRunId, [...runIds]))
+    .all()
+  for (const row of rows) {
+    const list = grouped.get(row.workflowRunId) ?? []
+    list.push(toNodeRunView(row))
+    grouped.set(row.workflowRunId, list)
+  }
+  return grouped
+}
+
+/** 获取工作流运行记录（每个 run 携带 nodeRuns 节点态聚合，AEX-P0-015） */
 export async function getWorkflowRuns(workflowId: string) {
   const db = getDb();
   const rows = db.select().from(workflowRuns)
     .where(eq(workflowRuns.workflowId, workflowId))
     .orderBy(desc(workflowRuns.startedAt))
     .all();
+  const nodeRunsByRunId = groupNodeRunsByRunId(db, rows.map(r => r.id));
   return rows.map(r => ({
     id: r.id,
     workflowId: r.workflowId,
     status: r.status,
     currentNodeId: r.currentNodeId,
     results: parseJson<Record<string, unknown>>(r.results, {}),
+    nodeRuns: nodeRunsByRunId.get(r.id) ?? [],
     error: r.error,
     startedAt: r.startedAt,
     completedAt: r.completedAt,

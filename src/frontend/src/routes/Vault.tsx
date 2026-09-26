@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
+﻿import { useState, useEffect, useRef } from 'react';
 import { motion } from 'framer-motion';
 import { PageHeader } from '../components/PageHeader';
 import { confirm as confirmDialog } from '../components/ui/confirm-dialog';
@@ -349,7 +349,7 @@ export function Vault() {
 
   return (
     <div className="min-h-screen" style={{ background: 'var(--bg-base)', backgroundImage: 'var(--bg-gradient)' }}>
-      <div style={{ maxWidth: '1100px', margin: '0 auto', padding: '0 24px' }}>
+      <div style={{ maxWidth: 'var(--content-standard)', margin: '0 auto', padding: '0 24px' }}>
         <PageHeader title="密码库" description="本地加密存储密码（AES-256-GCM + PBKDF2 600k 迭代）" icon={<KeyRound size={22} />} color="var(--color-warning)" />
 
         {!unlocked ? (

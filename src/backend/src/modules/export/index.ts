@@ -24,7 +24,7 @@ export function registerExportRoutes(app: FastifyInstance, config: BackendConfig
       },
     },
   }, async (request, reply) => {
-    const body = request.body as { format: string; data: any[]; filename?: string };
+    const body = request.body as { format: string; data: unknown[]; filename?: string };
     let content = '';
     // P0-7: filename 路径穿越防护 — 只允许纯 basename，不含路径分隔符或 ..
     const rawFilename = body.filename || `export-${Date.now()}`;
@@ -38,20 +38,24 @@ export function registerExportRoutes(app: FastifyInstance, config: BackendConfig
       content = JSON.stringify(body.data, null, 2);
     } else if (body.format === 'csv') {
       if (body.data.length > 0) {
-        const headers = Object.keys(body.data[0]);
+        const first = body.data[0] as Record<string, unknown>;
+        const headers = Object.keys(first);
         content = headers.join(',') + '\n';
-        content += body.data.map(row =>
-          headers.map(h => {
-            const val = row[h]?.toString() || '';
+        content += body.data.map(row => {
+          const r = row as Record<string, unknown>;
+          return headers.map(h => {
+            const val = r[h]?.toString() || '';
             return val.includes(',') ? `"${val}"` : val;
-          }).join(',')
-        ).join('\n');
+          }).join(',');
+        }).join('\n');
       }
     } else {
-      content = body.data.map((item: any) => {
-        const title = item.title || item.name || 'Item';
-        const url = item.url || '';
-        const desc = item.snippet || item.description || '';
+      content = body.data.map((item) => {
+        const it = item as Record<string, unknown>;
+        const str = (v: unknown): string => (typeof v === 'string' ? v : '');
+        const title = str(it.title) || str(it.name) || 'Item';
+        const url = str(it.url);
+        const desc = str(it.snippet) || str(it.description);
         return `## ${title}\n${desc ? desc + '\n' : ''}${url ? `[${url}](${url})\n` : ''}`;
       }).join('\n---\n');
     }

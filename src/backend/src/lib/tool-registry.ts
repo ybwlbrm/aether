@@ -13,13 +13,34 @@ import { testTools } from './test-runner.js';
 import { codeReviewTools } from './code-review.js';
 import { todoTools } from './todo-tools.js';
 
+/** 内置工具条目（OpenAI function-calling 格式） */
+export interface BuiltinToolEntry {
+  type: string;
+  function: {
+    name: string;
+    description?: string;
+    /** JSON Schema —— 结构由各工具定义给出，本地不约束故为 unknown */
+    parameters?: unknown;
+  };
+}
+
+/** 边界守卫：非数组普通对象 */
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/** 边界收口：JSON Schema 必须是普通对象，否则回退到空 object schema */
+function toInputSchema(parameters: unknown): Record<string, unknown> {
+  return isRecord(parameters) ? parameters : { type: 'object', properties: {} };
+}
+
 /** 从 OpenAI function calling 格式提取 ToolDefinition */
-function extractDef(tool: any): ToolDefinition {
-  const fn = tool.function || tool;
+function extractDef(tool: BuiltinToolEntry): ToolDefinition {
+  const fn = tool.function;
   return {
     name: fn.name,
     description: fn.description || '',
-    inputSchema: fn.parameters || { type: 'object', properties: {} },
+    inputSchema: toInputSchema(fn.parameters),
     enabled: true,
     isConcurrencySafe: false,
     timeoutMs: 60000,
@@ -39,7 +60,7 @@ function guessCategory(name: string): ToolDefinition['category'] {
 }
 
 /** 全部内置工具（OpenAI function calling 格式） */
-export const allBuiltinTools: any[] = [
+export const allBuiltinTools: BuiltinToolEntry[] = [
   ...fileTools,
   ...commandTools,
   ...searchTools,
@@ -55,7 +76,15 @@ export const allBuiltinTools: any[] = [
  */
 export function buildAllTools(mcpTools: Array<{ name: string; description?: string; inputSchema?: unknown }>): Array<{ type: 'function'; function: { name: string; description: string; parameters: unknown } }> {
   return [
-    ...allBuiltinTools,
+    // 归一化：BuiltinToolEntry.type 放宽为 string，此处收敛回 OpenAI function 形态
+    ...allBuiltinTools.map(entry => ({
+      type: 'function' as const,
+      function: {
+        name: entry.function.name,
+        description: entry.function.description || '',
+        parameters: entry.function.parameters ?? { type: 'object', properties: {} },
+      },
+    })),
     ...mcpTools.map(t => ({
       type: 'function' as const,
       function: {

@@ -62,7 +62,7 @@ export async function pdfToText(buf: Buffer): Promise<string> {
   for (let i = 1; i <= doc.numPages; i++) {
     const page = await doc.getPage(i);
     const content = await page.getTextContent();
-    full += content.items.map((it: any) => it.str || '').join(' ') + '\n';
+    full += content.items.map((it: { str?: string; type?: string }) => String(it.str ?? '')).join(' ') + '\n';
   }
   return full.trim();
 }
@@ -76,7 +76,7 @@ export async function pdfToImage(buf: Buffer, config: BackendConfig): Promise<{ 
   const viewport = page.getViewport({ scale: 1.5 });
   const canvas = createCanvas(viewport.width, viewport.height);
   const ctx = canvas.getContext('2d');
-  await page.render({ canvas, canvasContext: ctx, viewport } as any).promise;
+  await page.render({ canvas, canvasContext: ctx, viewport } as Parameters<typeof page.render>[0]).promise;
   const png = canvas.toBuffer('image/png');
   const dir = exportDir(config);
   const outName = `${randomUUID()}.png`;
@@ -95,7 +95,7 @@ export async function pdfToDocx(buf: Buffer, config: BackendConfig): Promise<{ o
   for (let i = 1; i <= doc.numPages; i++) {
     const page = await doc.getPage(i);
     const content = await page.getTextContent();
-    const text = content.items.map((it: any) => it.str || '').join(' ');
+    const text = content.items.map((it: { str?: string; type?: string }) => String(it.str ?? '')).join(' ');
     children.push(new Paragraph({
       text: `第 ${i} 页`,
       heading: HeadingLevel.HEADING_1,

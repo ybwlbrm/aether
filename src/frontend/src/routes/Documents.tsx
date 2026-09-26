@@ -1,4 +1,4 @@
-import { useEffect, useState, useRef } from 'react';
+﻿import { useEffect, useState, useRef } from 'react';
 import { motion } from 'framer-motion';
 import { PageHeader } from '../components/PageHeader';
 import { api } from '../api/client';
@@ -81,7 +81,7 @@ export function Documents() {
   return (
     <>
     <div className="min-h-screen" style={{ background: 'var(--bg-base)', backgroundImage: 'var(--bg-gradient)' }}>
-    <div style={{ maxWidth: '1100px', margin: '0 auto', padding: '0 24px' }}>
+    <div style={{ maxWidth: 'var(--content-standard)', margin: '0 auto', padding: '0 24px' }}>
       <PageHeader title="Document Lab" description="AI 生成 PPT 和文档" icon={<FileText size={22} />} color="var(--color-success)"
         action={<button className="btn btn-primary" onClick={() => setShowForm(!showForm)}><Plus size={18} /> 新建文档</button>}
       />
@@ -161,7 +161,7 @@ export function Documents() {
         </div>
       )}
 
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-[repeat(auto-fill,minmax(280px,1fr))] gap-4">
         {docs.map((doc, i) => (
           <motion.div
             key={doc.id}

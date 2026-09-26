@@ -7,8 +7,9 @@ import initSqlJs, { type Database as SqlJsDatabase } from 'sql.js'
 import { drizzle } from 'drizzle-orm/sql-js'
 import { eq } from 'drizzle-orm'
 import * as schema from '../../db/schema/index.js'
-import { runs, workflows, workflowRuns } from '../../db/schema/index.js'
+import { runs, workflows, workflowRuns, workflowNodeRuns } from '../../db/schema/index.js'
 import { runMigrations } from '../../db/migrate.js'
+import { setDbForTest } from '../../db/client.js'
 import type { getDb } from '../../db/client.js'
 import { RunLifecycleManager } from '../../core/runtime/index.js'
 import { makeTestConfig } from '../../tests/helpers/mock-provider.sse.js'
@@ -18,7 +19,7 @@ import {
   type ExecuteWorkflowOptions,
   type ExecuteWorkflowResult,
 } from './execution-engine.js'
-import { createWorkflowRunInternal } from './store.js'
+import { createWorkflowRunInternal, getWorkflowRuns, repairOrphanWorkflowRuns } from './store.js'
 import type { WorkflowNode } from './types.js'
 
 type WorkflowDatabase = ReturnType<typeof getDb>
@@ -297,6 +298,148 @@ describe('workflow executeWorkflow — 真实 SQLite 终态一致性', () => {
       }))
 
       assert.equal(database.db.select().from(runs).all().length, 0)
+    } finally {
+      database.cleanup()
+    }
+  })
+})
+
+describe('workflow node_runs — 级联删除与查询聚合（AEX-P0-015）', () => {
+  it('workflow_runs 删除时 node_runs 级联清除', async () => {
+    // Given: 一次成功执行留下两条节点行
+    const database = await createTestDatabase()
+    try {
+      seedWorkflow(database.db, 'workflow-cascade')
+      const result = await runWorkflow({
+        database,
+        workflowId: 'workflow-cascade',
+        nodes: [node('a'), node('b')],
+        executor: async (current) => ({ output: `out-${current.id}` }),
+      })
+      assert.equal(
+        database.db.select().from(workflowNodeRuns)
+          .where(eq(workflowNodeRuns.workflowRunId, result.runId)).all().length,
+        2,
+        '前置：应有两行节点记录',
+      )
+
+      // When: 删除父运行记录
+      database.db.delete(workflowRuns).where(eq(workflowRuns.id, result.runId)).run()
+
+      // Then: FK ON DELETE CASCADE 清空节点行
+      assert.equal(
+        database.db.select().from(workflowNodeRuns)
+          .where(eq(workflowNodeRuns.workflowRunId, result.runId)).all().length,
+        0,
+        'node_runs 应随 workflow_runs 级联删除',
+      )
+    } finally {
+      database.cleanup()
+    }
+  })
+
+  it('workflows 删除时（deleteWorkflow）node_runs 一并清除', async () => {
+    // Given
+    const database = await createTestDatabase()
+    setDbForTest(database.db)
+    try {
+      seedWorkflow(database.db, 'workflow-delete-cascade')
+      const result = await runWorkflow({
+        database,
+        workflowId: 'workflow-delete-cascade',
+        nodes: [node('a')],
+        executor: async () => ({ output: 'out-a' }),
+      })
+      assert.equal(database.db.select().from(workflowNodeRuns).all().length, 1)
+
+      // When: deleteWorkflow 走 store（内部使用 getDb() 全局）
+      const { deleteWorkflow } = await import('./store.js')
+      const deleted = await deleteWorkflow('workflow-delete-cascade', database.config)
+
+      // Then
+      assert.equal(deleted, true)
+      assert.equal(database.db.select().from(workflowNodeRuns).all().length, 0)
+      assert.equal(
+        database.db.select().from(workflowRuns)
+          .where(eq(workflowRuns.id, result.runId)).all().length,
+        0,
+      )
+    } finally {
+      setDbForTest(null)
+      database.cleanup()
+    }
+  })
+
+  it('getWorkflowRuns 返回的每个 run 携带 nodeRuns 聚合', async () => {
+    // Given
+    const database = await createTestDatabase()
+    setDbForTest(database.db)
+    try {
+      seedWorkflow(database.db, 'workflow-aggregate')
+      await runWorkflow({
+        database,
+        workflowId: 'workflow-aggregate',
+        nodes: [node('a'), node('b')],
+        executor: async (current) => {
+          if (current.id === 'b') {
+            return { output: '工具失败', error: '工具失败', code: 'TOOL_ERROR' }
+          }
+          return { output: 'out-a' }
+        },
+      })
+
+      // When
+      const runsList = await getWorkflowRuns('workflow-aggregate')
+
+      // Then
+      assert.equal(runsList.length, 1)
+      const nodeRuns = runsList[0]?.nodeRuns ?? []
+      assert.equal(nodeRuns.length, 2, '两个节点都应有独立行')
+      const byNode = new Map(nodeRuns.map((row) => [row.nodeId, row]))
+      assert.equal(byNode.get('a')?.status, 'completed')
+      assert.equal(byNode.get('a')?.output, 'out-a')
+      assert.equal(byNode.get('a')?.attempt, 1)
+      assert.equal(byNode.get('b')?.status, 'failed')
+      assert.equal(byNode.get('b')?.error, '工具失败')
+      assert.equal(byNode.get('b')?.retryCount, 0)
+    } finally {
+      setDbForTest(null)
+      database.cleanup()
+    }
+  })
+
+  it('orphan repair 同时收口停在 running 的节点行', async () => {
+    // Given: 父 run 缺失（模拟进程被强杀），节点行停在 running
+    const database = await createTestDatabase()
+    try {
+      seedWorkflow(database.db, 'workflow-orphan-node')
+      const now = new Date().toISOString()
+      database.db.insert(workflowRuns).values({
+        id: 'orphan-run',
+        workflowId: 'workflow-orphan-node',
+        status: 'running',
+        results: '{}',
+        startedAt: now,
+      }).run()
+      database.db.insert(workflowNodeRuns).values({
+        id: 'orphan-run:a',
+        workflowRunId: 'orphan-run',
+        nodeId: 'a',
+        status: 'running',
+        attempt: 1,
+        retryCount: 0,
+        startedAt: now,
+      }).run()
+
+      // When
+      const repaired = repairOrphanWorkflowRuns(database.db, database.config)
+
+      // Then
+      assert.equal(repaired, 1)
+      const row = database.db.select().from(workflowNodeRuns)
+        .where(eq(workflowNodeRuns.workflowRunId, 'orphan-run')).get()
+      assert.equal(row?.status, 'failed', '节点行不应永远停在 running')
+      assert.match(String(row?.error), /orphan repair/)
     } finally {
       database.cleanup()
     }

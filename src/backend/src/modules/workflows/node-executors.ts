@@ -10,16 +10,25 @@ import { getSettings } from '../../lib/dal.js';
 import { executeCommand } from '../../lib/command.js';
 import { isSafeFetchUrl } from '../../lib/safe-fetch.js';
 import { evaluateCondition } from '../../lib/condition.js';
+import { classifyCommandOutput, classifyToolOutput, nodeFailure } from './node-error.js';
 import { resolve } from 'node:path';
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 
-function nodeFailure(output: string): NodeExecutionResult {
-  return { output, error: output }
-}
-
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+/**
+ * AEX-P0-017：lib 层工具以「错误: xxx」字符串返回失败，executor 必须把它
+ * 还原为结构化失败（error + code），否则引擎只看 error 字段会判为 completed。
+ */
+function toolResult(output: string): NodeExecutionResult {
+  return nodeFailure(output, classifyToolOutput(output) ?? undefined)
+}
+
+function commandResult(output: string): NodeExecutionResult {
+  return nodeFailure(output, classifyCommandOutput(output) ?? undefined)
 }
 
 function recordItems(value: unknown): Record<string, unknown>[] {
@@ -82,7 +91,7 @@ export async function executeNode(
       // P0-7 修复：executeFileTool 是 async 函数，需 await —
       // 原代码未 await，output 是 Promise 对象而非文件内容，破坏下游节点引用
       const output = await executeFileTool(name, resolvedArgs, allowedDirs, defaultDir, settings.permissionLevel);
-      return { output }
+      return toolResult(output);
     }
     case 'agent': {
       // Agent 节点：调用 AI（chat/completions）
@@ -111,9 +120,16 @@ export async function executeNode(
         const text = response.content.trim();
         return { output: text || '(空回复)' };
       } catch (e: unknown) {
-        const status = e instanceof ModelError && e.statusCode !== undefined ? ` (${e.statusCode})` : '';
+        // AEX-P0-017：保留 code / statusCode / retryable 结构化字段，
+        // 不再只把它们拼进中文串（引擎与前端都需要机器可读的失败原因）。
+        const modelError = e instanceof ModelError ? e : undefined;
+        const status = modelError?.statusCode !== undefined ? ` (${modelError.statusCode})` : '';
         const message = e instanceof Error ? e.message : String(e);
-        return nodeFailure(`AI 调用失败${status}: ${message.slice(0, 300)}`)
+        return nodeFailure(`AI 调用失败${status}: ${message.slice(0, 300)}`, {
+          code: modelError?.code ?? 'MODEL_ERROR',
+          retryable: modelError?.retryable ?? false,
+          ...(modelError?.statusCode === undefined ? {} : { statusCode: modelError.statusCode }),
+        })
       }
     }
     case 'media': {
@@ -149,7 +165,10 @@ export async function executeNode(
         });
         if (!res.ok) {
           const errText = await res.text().catch(() => '');
-          return nodeFailure(`${mediaType} 生成失败 (${res.status}): ${errText.slice(0, 200)}`)
+          return nodeFailure(`${mediaType} 生成失败 (${res.status}): ${errText.slice(0, 200)}`, {
+            code: 'MEDIA_ERROR',
+            statusCode: res.status,
+          })
         }
         const data: unknown = await res.json()
         const imageUrl = mediaUrlFromResponse(data)
@@ -188,8 +207,13 @@ export async function executeNode(
           });
           text = response.content.trim();
         } catch (aiErr: unknown) {
-          const status = aiErr instanceof ModelError && aiErr.statusCode !== undefined ? ` (${aiErr.statusCode})` : '';
-          return nodeFailure(`文档生成失败${status}`)
+          const modelError = aiErr instanceof ModelError ? aiErr : undefined;
+          const status = modelError?.statusCode !== undefined ? ` (${modelError.statusCode})` : '';
+          return nodeFailure(`文档生成失败${status}`, {
+            code: modelError?.code ?? 'DOCUMENT_ERROR',
+            retryable: modelError?.retryable ?? false,
+            ...(modelError?.statusCode === undefined ? {} : { statusCode: modelError.statusCode }),
+          })
         }
         // 解析 AI 输出并创建实际文件
         const docDir = resolve(config.dataDir, 'documents');
@@ -262,7 +286,7 @@ export async function executeNode(
         const allowedDirs = settings.allowedDirs || [];
         const defaultDir = settings.defaultDir || allowedDirs[0] || process.cwd();
         const output = await executeCommand(cmd, defaultDir, 30000, allowedDirs, permLevel, defaultDir, signal);
-        return { output }
+        return commandResult(output);
       } catch (e: unknown) {
         return nodeFailure(`系统命令执行异常: ${e instanceof Error ? e.message : String(e)}`)
       }

@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback } from 'react';
+﻿import { useEffect, useState, useCallback } from 'react';
 import { motion } from 'framer-motion';
 import { Palette, Plus, Search, RefreshCw, AlertCircle, CheckCircle2, Trash2 } from 'lucide-react';
 import { PageHeader } from '../components/PageHeader';
@@ -150,7 +150,7 @@ export function Media() {
 
   return (
     <div className="min-h-screen" style={{ background: 'var(--bg-base)', backgroundImage: 'var(--bg-gradient)' }}>
-      <div style={{ maxWidth: '1100px', margin: '0 auto', padding: '0 24px' }}>
+      <div style={{ maxWidth: 'var(--content-standard)', margin: '0 auto', padding: '0 24px' }}>
         <PageHeader
           title="AI Studio"
           description="图片、视频 AI 生成"

@@ -33,6 +33,16 @@ const POLL_MS = 1000;
 /** Keep-alive comment every N polls (30s) */
 const HEARTBEAT_EVERY = 30;
 
+// P1-019：run 终态事件集合 —— 流端据此推送终态后关闭 SSE（§42 终态事件是唯一终态权威）。
+// 导出供测试锁定：新增终态类型时必须同步加入，否则流不会关闭。
+export const RUN_TERMINAL_TYPES: ReadonlySet<string> = new Set([
+  'run.completed',
+  'run.failed',
+  'run.cancelled',
+  'run.interrupted',
+  'run.budget_exceeded',
+]);
+
 function toSeq(raw: string | undefined, fallback: number): number {
   if (raw === undefined || raw === '') return fallback;
   const n = Number(raw);
@@ -145,6 +155,8 @@ export function registerRunStreamRoutes(app: FastifyInstance, _config: BackendCo
     // 轮询新事件 + 心跳
     const replyRaw = reply.raw;
     let pollCount = 0;
+    // P1-019：run 终态检测 —— 推送完终态事件后关闭 SSE（避免定时器/连接泄漏，
+    // 客户端无需等到断连才知道 run 结束；终态事件是唯一终态权威，见 §42）
     const timer = setInterval(() => {
       // 客户端断开 → 清理
       const socket = (replyRaw as unknown as { socket?: { destroyed?: boolean } }).socket;
@@ -155,14 +167,22 @@ export function registerRunStreamRoutes(app: FastifyInstance, _config: BackendCo
 
       try {
         const fresh = readEvents(db, runId, cursor);
+        let sawTerminal = false;
         for (const row of fresh) {
           try {
             const event = JSON.parse(row.payload) as AgentEvent & { type: string };
             replyRaw.write(formatSseEvent(event));
             cursor = row.seq;
+            if (RUN_TERMINAL_TYPES.has(event.type)) sawTerminal = true;
           } catch {
             // 跳过坏 payload
           }
+        }
+        // 终态事件已全部推送 → 正常关闭流（客户端收到终态即可结算，无需挂连接）
+        if (sawTerminal) {
+          clearInterval(timer);
+          try { replyRaw.end(); } catch { /* 客户端可能已断开 */ }
+          return;
         }
       } catch (err) {
         console.warn('[RunStream] poll failed:', err instanceof Error ? err.message : String(err));

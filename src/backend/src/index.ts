@@ -1,4 +1,4 @@
-import { buildApp } from './app.js';
+﻿import { buildApp } from './app.js';
 import { loadBackendConfig } from './config/index.js';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
@@ -49,7 +49,7 @@ async function main() {
   // 尝试路径数组
   const possiblePaths = [
     // Electron 打包
-    ...((process as any).resourcesPath ? [resolve((process as any).resourcesPath, 'frontend')] : []),
+    ...((process as { resourcesPath?: string }).resourcesPath ? [resolve((process as { resourcesPath: string }).resourcesPath, 'frontend')] : []),
     // 开发模式
     resolve(__dirname, '../../frontend/dist'),
     // 构建模式 (bundle 在 build/ 目录下)

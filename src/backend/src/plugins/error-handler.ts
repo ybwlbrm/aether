@@ -1,5 +1,6 @@
 import type { FastifyInstance, FastifyError } from 'fastify';
 import { AppError } from '@pacc/shared';
+import { logger } from '../lib/logger.js';
 
 export function registerErrorHandler(app: FastifyInstance): void {
   app.setErrorHandler((error: FastifyError | AppError | Error, _request, reply) => {
@@ -39,7 +40,17 @@ export function registerErrorHandler(app: FastifyInstance): void {
     // SEC-003: 日志脱敏 —— 只记录错误 message（不打印完整 error 对象/stack，
     // 避免把请求体、密钥或内部路径写入日志）
     const logMsg = error instanceof Error ? error.message : String(error);
-    console.error(`未处理的错误: ${logMsg}${process.env.NODE_ENV !== 'production' ? '\n' + (error instanceof Error && error.stack ? error.stack : '') : ''}`);
+    const isProd = process.env.NODE_ENV === 'production';
+    logger.error(
+      {
+        event: 'http.unhandled_error',
+        // AEX-P2-005: 结构化字段。生产环境不带 stack（可能含内部路径），
+        // 非生产环境补 stack 便于本地排障。
+        message: logMsg,
+        stack: isProd ? undefined : error instanceof Error ? error.stack : undefined,
+      },
+      '未处理的错误',
+    );
     return reply.status(500).send({
       error: {
         code: 'INTERNAL_ERROR',

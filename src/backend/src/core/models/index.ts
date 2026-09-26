@@ -39,6 +39,7 @@ export {
 // Model Runtime Factory (Phase 4 — legacy provider config → core ModelRuntime)
 export {
   type LegacyProviderConfig,
+  type ModelRuntimeDeps,
   buildModelRuntime,
   registerProviderModels,
   buildAndRegister,
@@ -64,6 +65,7 @@ export {
 export {
   type RetryPolicy,
   type RetryPolicyOptions,
+  type RetryDecision,
   type RetryablePredicate,
   createRetryPolicy,
   defaultRetryable,

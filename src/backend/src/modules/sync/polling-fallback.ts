@@ -11,6 +11,7 @@ import {
 import { PROCESSABLE_REMOTE_COMMAND_STATUSES } from './remote-command-status.js';
 // §15.1 收口：Mobile Stop 真取消 —— 检测 /cancel 命令后触发 RunCancellationRegistry 取消
 import { runCancellationRegistry } from '../../lib/run-cancellation-registry.js';
+import { logger } from '../../lib/logger.js';
 
 // ============================================================
 // 轮询兜底：Realtime 断开/丢失事件时，仍能处理手机端命令
@@ -61,7 +62,7 @@ export function startPollingFallback(options: PollingFallbackOptions): PollingFa
           .order('created_at', { ascending: true })
           .limit(20);
         if (queryError) {
-          console.warn('[Sync] 轮询查询失败:', queryError.message);
+          logger.warn({ event: 'sync.polling_query_failed', error: queryError.message }, '[Sync] 轮询查询失败:');
           return;
         }
         if (data && data.length > 0) {
@@ -69,7 +70,7 @@ export function startPollingFallback(options: PollingFallbackOptions): PollingFa
             if (typeof row !== 'object' || row === null) continue;
             const cmd = parseRemoteCommandRow(row);
             if (!cmd) {
-              console.warn('[Sync] 轮询收到无法解析的远程命令，已忽略');
+              logger.warn({ event: 'sync.polling_command_unparsable' }, '[Sync] 轮询收到无法解析的远程命令，已忽略');
               continue;
             }
             if (processingCommandIds.has(cmd.id)) continue;
@@ -85,27 +86,47 @@ export function startPollingFallback(options: PollingFallbackOptions): PollingFa
                   (conversationId) => runCancellationRegistry.runIdsForConversation(conversationId),
                 );
                 if (!runId) {
-                  console.warn(`[Sync] 收到取消命令但未找到唯一活动 Run (command=${cmd.id}, client_command_id=${cmd.client_command_id ?? '无'})`);
+                  logger.warn(
+                    { event: 'sync.polling_cancel_run_missing', commandId: cmd.id, clientCommandId: cmd.client_command_id ?? '无' },
+                    '[Sync] 收到取消命令但未找到唯一活动 Run',
+                  );
                 } else if (!runCancellationRegistry.has(runId)) {
-                  console.warn(`[Sync] 收到取消命令但 Run ${runId} 未注册（可能已结束）`);
+                  logger.warn(
+                    { event: 'sync.polling_cancel_run_unregistered', runId },
+                    '[Sync] 收到取消命令但 Run 未注册（可能已结束）',
+                  );
                 } else {
                   const aborted = runCancellationRegistry.cancel(runId);
                   if (aborted) {
-                    console.log(`[Sync] 收到 Mobile 取消命令 → 取消 Run ${runId}`);
+                    logger.info(
+                      { event: 'sync.polling_run_cancelled', runId },
+                      `[Sync] 收到 Mobile 取消命令 → 取消 Run ${runId}`,
+                    );
                   } else {
-                    console.error(`[Sync] 收到 Mobile 取消命令但 Run ${runId} 取消失败 (command=${cmd.id})`);
+                    logger.error(
+                      { event: 'sync.polling_cancel_run_failed', runId, commandId: cmd.id },
+                      '[Sync] 收到 Mobile 取消命令但 Run 取消失败',
+                    );
                   }
                 }
                 continue;
               }
               if (cmd.status !== 'pending') continue;
-              console.log('[Sync] 轮询兜底处理命令:', cmd.content.slice(0, 80));
+              logger.info(
+                { event: 'sync.polling_command_processing', commandId: cmd.id, contentPreview: cmd.content.slice(0, 80) },
+                '[Sync] 轮询兜底处理命令:',
+              );
               await processRemoteCommand(sb, cfg, cmd, backendConfig);
             } catch (cmdErr) {
               // 单条命令失败不阻塞后续命令，记录错误并继续
-              console.error(
-                `[Sync] 轮询处理单条命令失败 (command=${cmd.id}, cancellation=${isCancellationCommand(cmd)}):`,
-                cmdErr instanceof Error ? cmdErr.message : cmdErr,
+              logger.error(
+                {
+                  event: 'sync.polling_command_failed',
+                  commandId: cmd.id,
+                  isCancellation: isCancellationCommand(cmd),
+                  error: cmdErr instanceof Error ? cmdErr.message : String(cmdErr),
+                },
+                '[Sync] 轮询处理单条命令失败',
               )
             } finally {
               processingCommandIds.delete(cmd.id);
@@ -114,11 +135,17 @@ export function startPollingFallback(options: PollingFallbackOptions): PollingFa
         }
       } catch (e) {
         // 网络抖动或其他异常时静默，下一轮再试
-        console.warn('[Sync] 轮询兜底失败（将重试）:', e instanceof Error ? e.message : e);
+        logger.warn(
+          { event: 'sync.polling_cycle_failed', error: e instanceof Error ? e.message : String(e) },
+          '[Sync] 轮询兜底失败（将重试）:',
+        );
       }
     })().catch((e) => {
       // 双重保险：捕获 IIFE 返回 promise 的任何未处理拒绝
-      console.error('[Sync] 轮询回调未捕获拒绝:', e instanceof Error ? e.message : e);
+      logger.error(
+        { event: 'sync.polling_callback_rejection', error: e instanceof Error ? e.message : String(e) },
+        '[Sync] 轮询回调未捕获拒绝:',
+      );
     });
   }, pollIntervalMs);
 

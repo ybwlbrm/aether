@@ -7,8 +7,17 @@
  * 语义：
  * - 429 → retry（尊重 Retry-After，缺省指数退避 + jitter）
  * - 5xx → retry（指数退避 + jitter）
+ * - STREAM_CLOSED → retry（流截断/连接重置，P0-009 由 provider 层产出）
  * - 其他 → 不重试
  * - abortable sleep：AbortSignal 中止时立即停止等待（Run Cancel 生效）
+ *
+ * P0-014 重试系统边界：本文件是 **Model Runtime 的重试策略**（对话/补全/工具
+ * 调模型）。`src/backend/src/lib/fetch-retry.ts` 是 **通用 HTTP 重试**，目前唯一
+ * 生产调用点是 workflows 的 media 节点（OpenAI 专有 /images/generations、/videos
+ * 端点，ProviderAdapter 不实现）。两者**刻意保持分离**：故障域不同（模型执行 vs
+ * 任意 HTTP）、熔断键不同（providerId vs host）、生命周期不同（provider 级 vs
+ * 模块级 Map）。共享的公共原语只有下面导出的 `RetryDecision` 形状与
+ * `extractRetryAfterMs` 语义；不做大规模合并（合并会把两个故障域耦合在一起）。
  */
 
 export interface RetryPolicyOptions {
@@ -17,13 +26,25 @@ export interface RetryPolicyOptions {
   /** 基础退避毫秒（默认 1000） */
   baseDelayMs?: number;
   /** 最大退避毫秒（默认 10000） */
-  maxDelayMs?: number;
+  maxDelayMs?: number
   /** jitter 比例 0-1（默认 0.3，乘性抖动） */
-  jitter?: number;
+  jitter?: number
 }
 
-/** 判断是否可重试的判定函数（默认：429/5xx/网络错误） */
+/** 判断是否可重试的判定函数（默认：429/5xx/网络错误/流中断） */
 export type RetryablePredicate = (err: unknown) => boolean;
+
+/**
+ * 一次重试决策（是否重试 + 等多久）—— Model 层与通用 HTTP 层共享的最小原语。
+ * 两者策略独立，但决策形状一致：调用方一次拿到判定与退避时长，
+ * 避免 "shouldRetry 与 delayMs 分别调用导致 attempt 偏移"（§14 曾经的 bug）。
+ */
+export interface RetryDecision {
+  /** 是否允许再试一次 */
+  readonly retry: boolean
+  /** 本次重试前的等待毫秒（retry=false 时无意义） */
+  readonly delayMs: number
+}
 
 export interface RetryPolicy {
   /** 最大重试次数（默认 5） */
@@ -34,6 +55,8 @@ export interface RetryPolicy {
   shouldRetry(attempt: number, err: unknown): boolean
   /** 计算本次重试前的等待时间（含 jitter），毫秒 */
   delayMs(attempt: number, retryAfterMs?: number): number
+  /** 一次拿到"重试判定 + 退避时长"（推荐用法：避免两次调用产生 attempt 偏移） */
+  decide(attempt: number, err: unknown, retryAfterMs?: number): RetryDecision
   /** 可中止的等待 */
   sleep(ms: number, signal?: AbortSignal): Promise<void>
 }
@@ -82,11 +105,6 @@ export function createRetryPolicy(opts: RetryPolicyOptions = {}): RetryPolicy {
   const maxDelayMs = opts.maxDelayMs ?? 10_000;
   const jitter = opts.jitter ?? 0.3;
 
-  const shouldRetry: RetryPolicy['shouldRetry'] = (attempt, err) => {
-    if (attempt >= maxRetries) return false;
-    return defaultRetryable(err);
-  };
-
   const delayMs: RetryPolicy['delayMs'] = (attempt, retryAfterMs) => {
     if (retryAfterMs !== undefined && Number.isFinite(retryAfterMs) && retryAfterMs >= 0) {
       // Retry-After 优先于指数退避；0 表示"立即可重试"（仅对上限封顶）
@@ -97,6 +115,13 @@ export function createRetryPolicy(opts: RetryPolicyOptions = {}): RetryPolicy {
     const jittered = exp * (1 - jitter + Math.random() * 2 * jitter);
     return Math.min(Math.max(Math.round(jittered), 10), maxDelayMs);
   };
+
+  const decide: RetryPolicy['decide'] = (attempt, err, retryAfterMs) => ({
+    retry: attempt < maxRetries && defaultRetryable(err),
+    delayMs: delayMs(attempt, retryAfterMs),
+  });
+
+  const shouldRetry: RetryPolicy['shouldRetry'] = (attempt, err) => decide(attempt, err).retry;
 
   const sleep: RetryPolicy['sleep'] = (ms, signal) =>
     new Promise<void>((resolve, reject) => {
@@ -123,6 +148,7 @@ export function createRetryPolicy(opts: RetryPolicyOptions = {}): RetryPolicy {
     maxAttempts: maxRetries + 1,
     shouldRetry,
     delayMs,
+    decide,
     sleep,
   }
 }

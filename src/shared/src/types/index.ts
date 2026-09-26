@@ -39,6 +39,36 @@ export interface Message {
   createdAt: string;
 }
 
+/**
+ * Canonical Run 状态集合（AEX-P0-002：全局唯一权威定义）。
+ * backend 状态机、DB enum、前端状态标签必须引用本集合，禁止各自重复定义。
+ */
+export const RUN_STATUSES = [
+  'created',
+  'running',
+  'waiting',
+  'retry_waiting',
+  'retrying',
+  'verifying',
+  'completed',
+  'failed',
+  'cancelled',
+  'interrupted',
+  'budget_exceeded',
+] as const;
+
+/** Run 状态类型（由 RUN_STATUSES 推导，禁止手写字符串联合） */
+export type RunStatus = (typeof RUN_STATUSES)[number];
+
+/** Run 终态（吸收态）：进入后不可再迁出到其他状态 */
+export const RUN_TERMINAL_STATUSES = [
+  'completed',
+  'failed',
+  'cancelled',
+  'interrupted',
+  'budget_exceeded',
+] as const satisfies readonly RunStatus[];
+
 /** 工具调用 */
 export interface ToolCall {
   id: string;
@@ -120,6 +150,18 @@ export interface WorkflowEdge {
   target: string;
 }
 
+/** 工作流节点运行态（AEX-P0-015）—— workflow_node_runs 表的对外投影 */
+export interface WorkflowNodeRun {
+  nodeId: string;
+  status: 'pending' | 'running' | 'completed' | 'failed' | 'cancelled';
+  attempt: number;
+  retryCount: number;
+  output?: string;
+  error?: string;
+  startedAt?: string;
+  completedAt?: string;
+}
+
 /** 工作流运行 */
 export interface WorkflowRun {
   id: string;
@@ -127,6 +169,8 @@ export interface WorkflowRun {
   status: 'pending' | 'running' | 'completed' | 'failed' | 'cancelled';
   currentNodeId?: string;
   results: Record<string, unknown>;
+  /** 节点级执行态聚合（每节点一行） */
+  nodeRuns?: WorkflowNodeRun[];
   error?: string;
   startedAt: string;
   completedAt?: string;

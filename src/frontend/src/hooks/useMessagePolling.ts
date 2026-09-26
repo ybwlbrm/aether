@@ -143,18 +143,26 @@ export function useMessagePolling(options: UseMessagePollingOptions): UseMessage
 
       // Merge messages: server messages replace local optimistic ones
       onMessagesUpdate(prev => {
-        const parseMsg = (m: any): Message => {
+        const parseMsg = (m: Record<string, unknown>): Message => {
           let reasoning: string | undefined;
           if (m.toolResults) {
-            try { const tr = JSON.parse(m.toolResults); if (tr.reasoning) reasoning = tr.reasoning; } catch {}
+            try {
+              const tr = JSON.parse(m.toolResults as string) as Record<string, unknown>;
+              if (typeof tr.reasoning === 'string' && tr.reasoning !== '') reasoning = tr.reasoning;
+            } catch {
+              // Intentional fallback: 服务端 toolResults 可能不是合法 JSON（旧数据/部分字段），
+              // 解析失败时保留默认 reasoning（undefined），不得让单条消息拖垮整个轮询合并。
+            }
           }
+          const str = (v: unknown): string => (typeof v === 'string' ? v : '');
+          const role = (v: unknown): Message['role'] => (v === 'user' || v === 'assistant' || v === 'tool' ? v : 'user');
           return {
-            id: m.id,
-            role: m.role,
-            content: m.content,
-            createdAt: m.createdAt,
+            id: str(m.id),
+            role: role(m.role),
+            content: str(m.content),
+            createdAt: str(m.createdAt),
             reasoning,
-            toolCalls: m.toolCalls || null,
+            toolCalls: typeof m.toolCalls === 'string' ? m.toolCalls : null,
           };
         };
 

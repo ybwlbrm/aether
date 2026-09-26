@@ -1,9 +1,15 @@
 import { describe, it, beforeEach, expect } from 'vitest';
-import { NotificationCenter, buildTerminalDedupeKey } from './notification-center';
+import {
+  NotificationCenter,
+  buildTerminalDedupeKey,
+  notificationCenter,
+  sendNotification,
+  requestNotificationPermission,
+} from './notification-center';
 
 /** 可注入依赖的 mock 环境 */
 function makeDeps(overrides: { hidden?: boolean; granted?: boolean; bridge?: boolean; storage?: boolean } = {}) {
-  const calls: Array<{ title: string; body: string }> = [];
+  const calls: Array<{ title: string; body: string; icon?: string }> = [];
   const storageMap = new Map<string, string>();
   const storage = overrides.storage !== false
     ? {
@@ -16,7 +22,7 @@ function makeDeps(overrides: { hidden?: boolean; granted?: boolean; bridge?: boo
   const NCtor = function MockNotification(this: any, title: string, opts: any) {
     this.title = title;
     this.opts = opts;
-    calls.push({ title, body: opts?.body ?? '' });
+    calls.push({ title, body: opts?.body ?? '', icon: opts?.icon });
     this.close = () => {};
   } as any;
   NCtor.permission = overrides.granted !== false ? 'granted' : 'denied';
@@ -157,5 +163,30 @@ describe('notification-center — 通知幂等与终态语义（任务书第十�
     expect(buildTerminalDedupeKey('run', 'r1', 'completed')).toBe('run:r1:completed');
     expect(buildTerminalDedupeKey('workflow', 'wf1', 'failed')).toBe('workflow:wf1:failed');
     expect(buildTerminalDedupeKey('media', 'gen-1', 'interrupted')).toBe('media:gen-1:interrupted');
+  });
+});
+
+describe('notification-center — 能力对齐旧 notifications.ts（通知收敛 P2-011）', () => {
+  // 旧 notifications.ts 的 NotificationOptions 含 icon；notification-center 的
+  // LegacyNotificationOptions 也声明了 icon，但此前构建 AppNotification 时丢弃、
+  // 且 notify() 未传给浏览器 Notification —— 迁移期任何带 icon 的旧调用点都会丢图标。
+  it('测试 11: icon 从 AppNotification 贯通到浏览器通知', () => {
+    const { center, calls } = makeDeps({ bridge: false });
+    const n = makeNotification({ dedupeKey: 'run:r11:completed' });
+    n.icon = 'data:image/png;base64,AAAA';
+    center.notify(n);
+    expect(calls.length).toBe(1);
+    expect(calls[0].icon).toBe('data:image/png;base64,AAAA');
+  });
+
+  it('测试 12: 兼容导出 sendNotification 带 dedupeKey 时走幂等路径并透传 icon', () => {
+    const key = buildTerminalDedupeKey('run', 'legacy-1', 'completed');
+    expect(notificationCenter.hasNotified(key)).toBe(false);
+    sendNotification('AI 回复完成', { dedupeKey: key, always: true, icon: 'data:image/png;base64,BBBB' });
+    expect(notificationCenter.hasNotified(key)).toBe(true);
+  });
+
+  it('测试 13: 兼容导出 requestNotificationPermission（Layout 迁移目标）委托统一中心且不抛错', async () => {
+    await expect(requestNotificationPermission()).resolves.toBeTypeOf('boolean');
   });
 });

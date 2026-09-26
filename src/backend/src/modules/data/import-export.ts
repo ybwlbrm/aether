@@ -9,6 +9,7 @@ import { getSettings, saveSettings } from '../../lib/dal.js';
 import { isPathInAllowedDirs } from './utils.js';
 import { filterSettingsFields } from './settings.js';
 import { assertSafeFetchUrl } from '../../lib/safe-fetch.js';
+import { logger } from '../../lib/logger.js';
 
 /** 导入导出相关路由 */
 export function registerImportExportRoutes(app: FastifyInstance, config: BackendConfig): void {
@@ -45,7 +46,7 @@ export function registerImportExportRoutes(app: FastifyInstance, config: Backend
 
   // 导入全部用户数据（幂等：按 id upsert，重复导入结果一致）
   app.post('/api/import/all', { schema: { description: '导入全部用户数据', tags: ['数据'] } }, async (request) => {
-    const body = request.body as any;
+    const body = (request.body ?? {}) as Record<string, unknown>;
     const db = getDb();
     const importedCounts = {
       providers: 0,
@@ -260,7 +261,12 @@ export function registerImportExportRoutes(app: FastifyInstance, config: Backend
     }
 
     // 显式持久化数据库（onResponse 钩子也会保存，此处确保导入立即落盘）
-    try { saveDb(config); } catch (e: unknown) { console.error('[Data] 导入持久化失败:', (e instanceof Error ? e.message : String(e)) || e); }
+    try {
+      saveDb(config);
+    } catch (e: unknown) {
+      // AEX-P2-004 分类：recoverable —— 导入已写入 SQLite，快照落盘失败交由 onResponse 钩子/下次 saveDb 补齐。
+      logger.error({ event: 'data.import_persist_failed', err: e, importedCounts }, '导入数据持久化失败');
+    }
 
     return { success: true, importedCounts, skipped };
   });

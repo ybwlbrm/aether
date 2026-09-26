@@ -11,6 +11,8 @@ import assert from 'node:assert/strict';
 // Import types from source for compile-time checking
 import type { Checkpoint } from './checkpoint.js';
 import type { RunStatus } from './run.js';
+// Canonical 状态集合（AEX-P0-002）
+import { RUN_STATUSES } from '@pacc/shared';
 // Import runtime values from built dist
 const { serializeCheckpoint, deserializeCheckpoint, createCheckpoint } = await import('./index.js');
 const { RuntimeError } = await import('../errors/index.js');
@@ -34,16 +36,9 @@ describe('core/runtime/checkpoint', () => {
     });
 
     it('preserves all RunStatus values', () => {
-      const statuses: RunStatus[] = [
-        'created',
-        'running',
-        'waiting',
-        'completed',
-        'failed',
-        'cancelled',
-        'interrupted',
-      ];
-
+      // AEX-P0-002：checkpoint 校验必须覆盖 canonical 11 态（此前只认 7 态，
+      // retry_waiting/retrying/verifying/budget_exceeded 会被误判为非法）
+      const statuses: readonly RunStatus[] = RUN_STATUSES;
       for (const status of statuses) {
         const original: Checkpoint = {
           runId: 'run-1',

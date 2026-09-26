@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { after, before, describe, it, mock } from 'node:test'
 import assert from 'node:assert/strict'
+import { logger } from '../../lib/logger.js'
 import { createClient, type SupabaseClient } from '@supabase/supabase-js'
 import type { BackendConfig } from '../../config/index.js'
 import { runMigrations } from '../../db/migrate.js'
@@ -81,7 +82,13 @@ function terminalMetadata(payload: JsonRecord): JsonRecord | null {
 }
 
 function errorLogText(log: ReturnType<typeof mock.method>): string {
-  return log.mock.calls.map((call) => call.arguments.map(String).join(' ')).join('\n')
+  return log.mock.calls
+    .map((call) =>
+      call.arguments
+        .map((arg) => (typeof arg === 'object' && arg !== null ? JSON.stringify(arg) : String(arg)))
+        .join(' '),
+    )
+    .join('\n')
 }
 
 before(async () => {
@@ -102,7 +109,7 @@ describe('Remote Command 终态协调', () => {
     // Given
     const fake = createFakeSupabase('completed', 1)
     const lifecycle = startRun('run-update-error')
-    const errorLog = mock.method(console, 'error', () => undefined)
+    const errorLog = mock.method(logger, 'error', () => undefined)
 
     // When
     let finalized: Awaited<ReturnType<typeof finalizeRemoteCommand>> | null = null
@@ -137,7 +144,7 @@ describe('Remote Command 终态协调', () => {
     // Given
     const fake = createFakeSupabase('failed', 0)
     const lifecycle = startRun('run-transition-failure')
-    const errorLog = mock.method(console, 'error', () => undefined)
+    const errorLog = mock.method(logger, 'error', () => undefined)
 
     // When
     let finalized: Awaited<ReturnType<typeof finalizeRemoteCommand>> | null = null
@@ -172,7 +179,7 @@ describe('Remote Command 终态协调', () => {
     // Given
     const fake = createFakeSupabase('cancelled', 1)
     const lifecycle = startRun('run-cancelled-error')
-    const errorLog = mock.method(console, 'error', () => undefined)
+    const errorLog = mock.method(logger, 'error', () => undefined)
 
     // When
     let finalized: Awaited<ReturnType<typeof finalizeRemoteCommand>> | null = null

@@ -2,7 +2,7 @@ import { useEffect, useState, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Settings as SettingsIcon, Palette, Save, Image, Trash2, Plus, FolderOpen, FileText, Star, Check, Cloud, Upload, Download, RefreshCw, Link2, Unlink, Wrench, Search, BookOpen, Workflow, FolderKanban, Database, KeyRound, Globe, Activity, Shield, Compass } from 'lucide-react';
 import { useSafeTimeout } from '../hooks/useSafeTimeout';
-import { api, authHeaders } from '../api/client';
+import { api } from '../api/client';
 import { PageHeader } from '../components/PageHeader';
 import { confirm as confirmDialog } from '../components/ui/confirm-dialog';
 import { Tabs, TabList, TabTrigger } from '../components/ui/tabs';
@@ -150,22 +150,46 @@ function SyncSettings() {
     return channel;
   };
 
+  // AEX-P1-017：原先这段"回退本地恢复"逻辑在 .then 与 .catch 两个分支里各抄了一份
+  // （14 行完全重复），抽成单一来源；后端不可用与"后端无配置"共用它。
+  const restoreSyncFromLocal = () => {
+    try {
+      const saved = localStorage.getItem('syncConnection');
+      if (!saved) return;
+      const c = JSON.parse(saved);
+      setSupabaseUrl(c.supabaseUrl || '');
+      const localKey = resolveSupabaseKey();
+      if (c.connected && localKey) {
+        setSupabaseKey(localKey);
+        setKeyResolved(true);
+        setConnected(true);
+      } else if (c.connected && !localKey) {
+        // 本地标记为 connected 但 Key 缺失
+        setKeyResolved(false);
+        setConnected(false);
+        setSyncMsg('⚠️ 本地配置缺少 Key，请重新输入');
+      }
+    } catch (_e: unknown) { /* ignore - intentional */ }
+  };
+
   useEffect(() => {
     // 优先从后端恢复已保存的同步配置（重启后 Key 不丢失的核心修复）
-    fetch('/api/sync/config', {
-      headers: { 'X-Requested-With': 'XMLHttpRequest', ...authHeaders() },
-    }).then(r => r.json()).then((res: any) => {
+    // AEX-P1-017：经 api.result.syncConfig() 统一契约 —— 原先裸 fetch + .then 链把
+    // 非 2xx 响应也当成功 JSON 解析，且加载失败与"未配置"呈现完全相同的界面。
+    void (async () => {
+      const res = await api.result.syncConfig();
       // P0-8 修复：后端不再回传明文 supabaseKey（凭证），只返回 hasKey。
       // URL 从后端恢复，Key 从本地 sessionStorage/localStorage 兜底。
       // FE-11 修复：仅在 URL 和 Key 均成功解析后才置 connected=true
-      if (res?.configured && res?.supabaseUrl && res?.hasKey) {
-        setSupabaseUrl(res.supabaseUrl);
+      if (res.ok && res.data.configured && res.data.supabaseUrl && res.data.hasKey) {
+        const { supabaseUrl: url } = res.data;
+        setSupabaseUrl(url);
         const localKey = resolveSupabaseKey();
         if (localKey) {
           setSupabaseKey(localKey);
           setKeyResolved(true);
           // 同时写入 localStorage，保证 Layout 轮询监听可用
-          try { localStorage.setItem('syncConnection', JSON.stringify({ supabaseUrl: res.supabaseUrl, connected: true })); } catch { /* ignore */ }
+          try { localStorage.setItem('syncConnection', JSON.stringify({ supabaseUrl: url, connected: true })); } catch { /* ignore */ }
           setConnected(true);
           setSyncMsg('✅ 已恢复同步配置');
         } else {
@@ -176,45 +200,9 @@ function SyncSettings() {
         }
         return;
       }
-      // 后端没有配置时，回退到本地恢复
-      try {
-        const saved = localStorage.getItem('syncConnection');
-        if (saved) {
-          const c = JSON.parse(saved);
-          setSupabaseUrl(c.supabaseUrl || '');
-          const localKey = resolveSupabaseKey();
-          if (c.connected && localKey) {
-            setSupabaseKey(localKey);
-            setKeyResolved(true);
-            setConnected(true);
-          } else if (c.connected && !localKey) {
-            // 本地标记为 connected 但 Key 缺失
-            setKeyResolved(false);
-            setConnected(false);
-            setSyncMsg('⚠️ 本地配置缺少 Key，请重新输入');
-          }
-        }
-      } catch (_e: unknown) { /* ignore - intentional */ }
-    }).catch(() => {
-      // 后端不可用，回退本地恢复
-      try {
-        const saved = localStorage.getItem('syncConnection');
-        if (saved) {
-          const c = JSON.parse(saved);
-          setSupabaseUrl(c.supabaseUrl || '');
-          const localKey = resolveSupabaseKey();
-          if (c.connected && localKey) {
-            setSupabaseKey(localKey);
-            setKeyResolved(true);
-            setConnected(true);
-          } else if (c.connected && !localKey) {
-            setKeyResolved(false);
-            setConnected(false);
-            setSyncMsg('⚠️ 本地配置缺少 Key，请重新输入');
-          }
-        }
-      } catch (_e: unknown) { /* ignore - intentional */ }
-    });
+      if (!res.ok) setSyncMsg('⚠️ 同步配置加载失败，已回退本地配置：' + res.error.message);
+      restoreSyncFromLocal();
+    })();
   }, []);
 
   // 获取有效的 Supabase key（state 优先，兜底 localStorage → sessionStorage）
@@ -262,14 +250,9 @@ function SyncSettings() {
 
   // 断开时也通知后端
   const handleDisconnect = async () => {
-    // 通知后端断开
-    try {
-      await fetch('/api/sync/disconnect', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest', ...authHeaders() },
-        body: JSON.stringify({}),
-      });
-    } catch { /* ignore */ }
+    // AEX-P1-017：经 api.result.disconnectSync()（无响应体端点用 requestResultVoid）。
+    // 断开是本地优先操作，后端通知失败不阻断，但需如实告知用户云端仍处连接态。
+    const res = await api.result.disconnectSync();
     // 取消 Realtime 订阅
     if (sbRef.current && realtimeChannelRef.current) {
       sbRef.current.removeChannel(realtimeChannelRef.current).catch(() => {});
@@ -281,7 +264,7 @@ function SyncSettings() {
     setKeyResolved(false); // FE-11: 断开时重置 Key 解析状态
     setSupabaseUrl('');
     setSupabaseKey('');
-    setSyncMsg('已断开连接');
+    setSyncMsg(res.ok ? '已断开连接' : '⚠️ 本地已断开，但通知后端失败：' + res.error.message);
     try { localStorage.removeItem('syncConnection'); } catch { /* ignore */ }
     try { localStorage.removeItem('aether_supabase_key'); } catch { /* ignore */ }
     try { sessionStorage.removeItem('aether_supabase_key'); } catch { /* ignore */ }

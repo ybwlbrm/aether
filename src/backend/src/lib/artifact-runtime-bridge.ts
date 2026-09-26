@@ -20,6 +20,7 @@ import type {
   CreateArtifactInput,
   ArtifactRecord,
 } from '../core/artifacts/index.js';
+import { logger } from './logger.js';
 
 /**
  * Register a file on disk as an artifact in the core store.
@@ -75,8 +76,10 @@ export async function registerExistingFiles(
       const size = statSync(entry.path).size;
       await registerFileArtifact(store, { ...entry, size });
       count += 1;
-    } catch {
-      // File missing or unreadable — skip silently
+    } catch (e: unknown) {
+      // AEX-P2-004 分类：intentional fallback —— statSync 对已删除/不可读文件抛错，
+      // 产物注册是「尽力而为」的旁路，跳过该文件不阻断其余注册。
+      logger.debug({ event: 'artifact.entry_skipped', err: e, path: entry.path }, '产物文件缺失或不可读，跳过注册');
     }
   }
   return count;

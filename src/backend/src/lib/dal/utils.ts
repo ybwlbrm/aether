@@ -1,8 +1,9 @@
-import fs from 'node:fs';
+﻿import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
+import { logger } from '../logger.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -24,13 +25,13 @@ export async function atomicRead<T>(filePath: string, defaultValue: T): Promise<
     const raw = await fsp.readFile(filePath, 'utf-8');
     return JSON.parse(raw) as T;
   } catch (err: unknown) {
-    if (err instanceof Error && 'code' in err && (err as any).code === 'ENOENT') {
+    if (err instanceof Error && 'code' in err && (err as { code?: unknown }).code === 'ENOENT') {
       // File doesn't exist — create with default
       await atomicWrite(filePath, defaultValue);
       return defaultValue;
     }
     // JSON parse error — file corrupted, reset to default
-    console.warn(`[DAL] Corrupted file ${filePath}, resetting to default`);
+    logger.warn({ event: 'dal.file_corrupted', file: filePath, err }, 'DAL 文件损坏，重置为默认值');
     await atomicWrite(filePath, defaultValue);
     return defaultValue;
   }

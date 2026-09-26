@@ -318,8 +318,8 @@ export async function executeToolLoop(
         default: break;
       }
     },
-    // 完成判定：缺省有文本即完成（与 Normal 一致）；上层可通过 isTaskComplete 覆盖 Loop 语义
-    isTaskComplete: (resp) => resp.content.trim() !== '',
+    // 完成判定（AEX-P0-001）：不注入 isTaskComplete —— Loop 模式由
+    // evaluateTaskCompletion 依证据判定，"有文本"不等于任务完成
   };
 
   // inbox 指令（steer/followup）：运行中用户补充的指令 → 注入为初始消息尾部（Loop 启动前读取一次）

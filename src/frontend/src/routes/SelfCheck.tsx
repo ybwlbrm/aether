@@ -1,18 +1,62 @@
-import { useEffect, useState } from 'react';
+﻿import { useEffect, useState } from 'react';
 import { PageHeader } from '../components/PageHeader';
 import { api } from '../api/client';
 import { Shield, CheckCircle2, XCircle, AlertTriangle, RefreshCw } from 'lucide-react';
 
+interface SelfCheckItem {
+  status: 'ok' | 'warn' | 'error';
+  name: string;
+  detail: string;
+}
+
+interface SelfCheckResult {
+  summary?: { ok: number; warn: number; error: number; passed?: boolean };
+  checks?: SelfCheckItem[];
+  timestamp?: string;
+}
+
+function parseSelfCheck(value: unknown): SelfCheckResult | null {
+  if (!value || typeof value !== 'object') return null;
+  const obj = value as Record<string, unknown>;
+  const summary = obj.summary as Record<string, unknown> | undefined;
+  const checks = Array.isArray(obj.checks) ? obj.checks : undefined;
+  return {
+    summary: summary
+      ? {
+          ok: typeof summary.ok === 'number' ? summary.ok : 0,
+          warn: typeof summary.warn === 'number' ? summary.warn : 0,
+          error: typeof summary.error === 'number' ? summary.error : 0,
+          passed: typeof summary.passed === 'boolean' ? summary.passed : undefined,
+        }
+      : undefined,
+    checks: checks?.map((c) => {
+      const item = c as Record<string, unknown>;
+      return {
+        status: item.status === 'warn' || item.status === 'error' ? item.status : 'ok',
+        name: typeof item.name === 'string' ? item.name : '未知检查项',
+        detail: typeof item.detail === 'string' ? item.detail : '',
+      };
+    }),
+    timestamp: typeof obj.timestamp === 'string' ? obj.timestamp : undefined,
+  };
+}
+
 export function SelfCheck() {
-  const [result, setResult] = useState<any>(null);
+  const [result, setResult] = useState<SelfCheckResult | null>(null);
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   const run = async () => {
     setLoading(true);
+    setError(null);
     try {
       const res = await api.runSelfCheck();
-      setResult(res);
-    } catch (_e: unknown) { console.warn("[SilentCatch]", _e); }
+      setResult(parseSelfCheck(res));
+    } catch (e: unknown) {
+      // Recoverable: 自检失败不阻塞页面，展示可重试错误态（与"空结果"区分）。
+      setResult(null);
+      setError(e instanceof Error ? e.message : String(e));
+    }
     setLoading(false);
   };
   useEffect(() => { run(); }, []);
@@ -28,7 +72,7 @@ export function SelfCheck() {
 
   return (
     <div className="min-h-screen" style={{ background: 'var(--bg-base)', backgroundImage: 'var(--bg-gradient)' }}>
-      <div style={{ maxWidth: '1100px', margin: '0 auto', padding: '0 24px' }}>
+      <div style={{ maxWidth: 'var(--content-standard)', margin: '0 auto', padding: '0 24px' }}>
         <PageHeader title="AI 自检系统" description="检查项目完整性、数据一致性、依赖状态" icon={<Shield size={22} />} color="#10b981"
           action={<button className="btn btn-primary" onClick={run} disabled={loading}>
             <RefreshCw size={18} className={loading ? 'animate-spin' : ''} /> {loading ? '检查中...' : '重新检查'}
@@ -42,30 +86,41 @@ export function SelfCheck() {
           </div>
         )}
 
-        {result && (
+        {error && !loading && (
+          <div className="glass-card" style={{ padding: 24, marginBottom: 16, textAlign: 'center' }}>
+            <div style={{ fontSize: 36, marginBottom: 12 }}>⚠️</div>
+            <div className="empty-state-title">自检失败</div>
+            <div style={{ fontSize: 13, color: 'var(--text-tertiary)', margin: '6px 0 14px', overflowWrap: 'anywhere' }}>{error}</div>
+            <button className="btn btn-primary" onClick={run}>重试</button>
+          </div>
+        )}
+
+        {result && !loading && (
           <>
             {/* 总览卡片 */}
             <div className="glass-card" style={{ padding: 24, marginBottom: 16, textAlign: 'center' }}>
               <div style={{ fontSize: 48, marginBottom: 8 }}>
                 {result.summary?.passed ? <CheckCircle2 size={48} style={{ color: 'var(--color-success)', margin: '0 auto' }} /> :
-                  result.summary?.error > 0 ? <XCircle size={48} style={{ color: '#ef4444', margin: '0 auto' }} /> :
+                  (result.summary?.error ?? 0) > 0 ? <XCircle size={48} style={{ color: '#ef4444', margin: '0 auto' }} /> :
                   <AlertTriangle size={48} style={{ color: '#f59e0b', margin: '0 auto' }} />}
               </div>
               <div style={{ fontSize: 20, fontWeight: 700, marginBottom: 8 }}>
-                {result.summary?.passed ? '✅ 一切正常' : result.summary?.error > 0 ? '❌ 发现错误' : '⚠️ 存在警告'}
+                {result.summary?.passed ? '✅ 一切正常' : (result.summary?.error ?? 0) > 0 ? '❌ 发现错误' : '⚠️ 存在警告'}
               </div>
               <div style={{ fontSize: 13, color: 'var(--text-tertiary)' }}>
                 {result.summary?.ok} 项通过 · {result.summary?.warn} 项警告 · {result.summary?.error} 项错误
               </div>
-              <div style={{ fontSize: 11, color: 'var(--text-tertiary)', marginTop: 4 }}>
-                检查时间: {new Date(result.timestamp).toLocaleString()}
-              </div>
+              {result.timestamp ? (
+                <div style={{ fontSize: 11, color: 'var(--text-tertiary)', marginTop: 4 }}>
+                  检查时间: {new Date(result.timestamp).toLocaleString()}
+                </div>
+              ) : null}
             </div>
 
             {/* 检查项列表 */}
             <div className="space-y-2">
-              {result.checks?.map((check: any, i: number) => (
-                <div key={i} className="glass-card" style={{
+              {(result.checks ?? []).map((check, i) => (
+                <div key={`${check.name}-${i}`} className="glass-card" style={{
                   padding: '14px 18px',
                   display: 'flex',
                   alignItems: 'center',
@@ -95,11 +150,11 @@ export function SelfCheck() {
           </>
         )}
 
-        {!loading && !result && (
+        {!loading && !result && !error && (
           <div className="glass-card flex items-center justify-center py-12" style={{ color: 'var(--text-tertiary)' }}>
             <div className="text-center">
               <Shield size={40} style={{ opacity: 0.3, margin: '0 auto 8px' }} />
-              <div>检查失败，请重试</div>
+              <div>暂无自检数据</div>
             </div>
           </div>
         )}

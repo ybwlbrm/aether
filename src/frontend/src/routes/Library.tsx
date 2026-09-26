@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+﻿import { useEffect, useState } from 'react';
 import { motion } from 'framer-motion';
 import { api } from '../api/client';
 import { Database, Image, Film, FileText, Trash2, Eye, Edit3, X, CheckSquare, Square } from 'lucide-react';
@@ -97,16 +97,16 @@ export function Library() {
 
   return (
     <div className="min-h-screen" style={{ background: 'var(--bg-base)', backgroundImage: 'var(--bg-gradient)' }}>
-    <div style={{ maxWidth: '1100px', margin: '0 auto', padding: '0 24px' }}>
+    <div style={{ maxWidth: 'var(--content-standard)', margin: '0 auto', padding: '0 24px' }}>
       <PageHeader title="Library" description="Generated media, documents, and more" icon={<Database size={22} />} color="#60a5fa" />
 
-      <div className="grid grid-cols-3 gap-6" style={{ marginBottom: '32px' }}>
+      <div className="grid grid-cols-[repeat(auto-fill,minmax(260px,1fr))] gap-6" style={{ marginBottom: '32px' }}>
         {[
           { icon: <Image size={24} />, label: 'Images', count: media.filter(m => m.type === 'image').length, color: '#a78bfa' },
           { icon: <Film size={24} />, label: 'Videos', count: media.filter(m => m.type === 'video').length, color: 'var(--color-warning)' },
           { icon: <FileText size={24} />, label: 'Documents', count: documents.length, color: 'var(--color-success)' },
         ].map((cat, i) => (
-          <div key={cat.label} style={{ height: 'var(--card-height)', padding: '20px', borderRadius: 'var(--card-radius)', background: 'var(--card-bg)', backdropFilter: 'blur(var(--glass-blur-radius)) saturate(var(--glass-saturate))', WebkitBackdropFilter: 'blur(var(--glass-blur-radius)) saturate(var(--glass-saturate))', border: '1px solid var(--card-border)', boxShadow: 'var(--card-shadow)' }}
+          <div key={cat.label} style={{ height: 'var(--card-height)', padding: '20px', borderRadius: 'var(--card-radius)', background: 'var(--bg-surface)', border: '1px solid var(--card-border)', boxShadow: 'var(--shadow-sm)' }}
             className="flex items-center gap-4">
             <div className="flex items-center justify-center flex-shrink-0" style={{ width: 40, height: 40, borderRadius: 8, background: `${cat.color}18` }}>
               <span style={{ color: cat.color }}>{cat.icon}</span>
@@ -148,7 +148,7 @@ export function Library() {
         </div>
         {loading ? (
           // P1-13: Loading Skeleton
-          <div className="grid grid-cols-3 gap-4">
+          <div className="grid grid-cols-[repeat(auto-fill,minmax(200px,1fr))] gap-4">
             {Array.from({ length: 6 }).map((_, i) => (
               <div key={i} style={{ height: 'var(--card-height)', borderRadius: 12, background: 'rgba(255,255,255,0.04)' }} className="animate-pulse" />
             ))}
@@ -166,23 +166,21 @@ export function Library() {
             <div className="empty-state-title">No items in library yet</div>
           </div>
         ) : (
-          <div className="grid grid-cols-3 gap-4">
+          <div className="grid grid-cols-[repeat(auto-fill,minmax(200px,1fr))] gap-4">
             {allItems.map((item, i) => (
               <motion.div
                 key={item.id}
                 className="flex flex-col justify-between min-w-0"
                 style={{
                   height: 'var(--card-height)', padding: '16px', borderRadius: '12px',
-                  background: 'var(--card-bg)',
-                  backdropFilter: 'blur(var(--glass-blur-radius)) saturate(var(--glass-saturate))',
-                  WebkitBackdropFilter: 'blur(var(--glass-blur-radius)) saturate(var(--glass-saturate))',
+                  background: 'var(--bg-surface)',
                   border: '1px solid var(--card-border)',
-                  boxShadow: 'var(--card-shadow)',
+                  boxShadow: 'var(--shadow-sm)',
                   position: 'relative',
                 }}
                 initial={{ opacity: 0, y: 8 }}
                 animate={{ opacity: 1, y: 0 }}
-                transition={{ delay: i * 0.04, duration: 0.4 }}
+                transition={{ delay: Math.min(i * 0.04, 0.2), duration: 0.4 }}
                 whileHover={{ y: -2, transition: { duration: 0.2 } }}
               >
                 <div className="flex items-start gap-3 min-w-0">

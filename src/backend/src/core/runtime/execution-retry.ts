@@ -8,6 +8,31 @@ import { extractRetryAfterMs } from '../models/retry-policy.js'
 import { CancellationError, isCancellationError } from './cancellation.js'
 
 export type RetryType = 'automatic' | 'manual'
+
+/**
+ * AEX-P0-006：工具副作用分级 —— 决定失败后能否自动重试。
+ * - read_only：纯读，重复执行无副作用
+ * - idempotent：重复执行结果一致（如覆盖写同一路径）
+ * - non_idempotent：重复执行会产生额外副作用（发信/扣款/写流水），只能人工重试
+ * - unknown：未分类，缺省按最保守处理
+ */
+export const TOOL_SIDE_EFFECT_CLASSES = [
+  'read_only',
+  'idempotent',
+  'non_idempotent',
+  'unknown',
+] as const
+
+export type ToolSideEffectClass = (typeof TOOL_SIDE_EFFECT_CLASSES)[number]
+
+/** 缺省副作用分级：未声明即视为不可自动重试 */
+export const DEFAULT_TOOL_SIDE_EFFECT_CLASS: ToolSideEffectClass = 'unknown'
+
+/** 仅 read_only / idempotent 允许自动重试；non_idempotent 与 unknown 只能人工介入 */
+export function isToolAutoRetryAllowed(sideEffectClass: ToolSideEffectClass): boolean {
+  return sideEffectClass === 'read_only' || sideEffectClass === 'idempotent'
+}
+
 export type RetryLayer = 'provider' | 'task' | 'tool'
 export type RetryEventType =
   | 'attempt.started'
@@ -67,12 +92,18 @@ export interface ToolRecoveryOptions extends ExecutionRetryOptions {
 
 export interface ToolRecoveryRunOptions extends RetryRunOptions {
   readonly arguments?: string
+  /**
+   * AEX-P0-006：工具副作用分级。未声明时缺省 `unknown`（不自动重试）。
+   * 只有 `read_only` / `idempotent` 允许自动重试。
+   */
+  readonly sideEffectClass?: ToolSideEffectClass
 }
 
 export class RetryCheckpoint {
   readonly #completedToolIds = new Set<string>()
   readonly #completedToolResults = new Map<string, string>()
   readonly #toolFingerprints = new Map<string, string>()
+  readonly #toolSideEffectClasses = new Map<string, ToolSideEffectClass>()
 
   constructor(
     completedToolIds?: ReadonlySet<string>,
@@ -97,6 +128,17 @@ export class RetryCheckpoint {
     this.#completedToolIds.clear()
     this.#completedToolResults.clear()
     this.#toolFingerprints.clear()
+    this.#toolSideEffectClasses.clear()
+  }
+
+  /** AEX-P0-006：登记工具副作用分级（幂等键与分级一起构成重放契约） */
+  markToolSideEffectClass(toolId: string, sideEffectClass: ToolSideEffectClass): void {
+    this.#toolSideEffectClasses.set(toolId, sideEffectClass)
+  }
+
+  /** 未登记的工具一律按 unknown 处理（不自动重试） */
+  getToolSideEffectClass(toolId: string): ToolSideEffectClass {
+    return this.#toolSideEffectClasses.get(toolId) ?? DEFAULT_TOOL_SIDE_EFFECT_CLASS
   }
 
   markToolCompleted(toolId: string, result: string, args?: string): void {
@@ -165,9 +207,16 @@ function lastErrorOf(error: unknown): unknown {
   return error instanceof RetryExhaustedError ? error.lastError : error
 }
 
+/**
+ * AEX-P0-005：任务级重试判定 —— 显式声明优先，缺省即失败。
+ *
+ * 此前未知错误 `return true` 会把任何异常拖进 8 次重试（含逻辑错误、参数错误、
+ * 断言失败），既浪费时间又会掩盖真实原因。重试耗尽（RetryExhaustedError）是终态
+ * 信号，必须原样向上抛而不是再套一层重试。
+ */
 function isTaskRetryable(error: unknown): boolean {
   if (isCancellationError(error)) return false
-  if (error instanceof RetryExhaustedError) return true
+  if (error instanceof RetryExhaustedError) return false
   if (error instanceof ModelError || error instanceof ToolError || error instanceof RuntimeError) {
     return error.retryable
   }
@@ -175,7 +224,7 @@ function isTaskRetryable(error: unknown): boolean {
   if (record?.retryable !== undefined && typeof record.retryable === 'boolean') {
     return record.retryable
   }
-  return true
+  return false
 }
 
 const NON_RETRYABLE_TOOL_CODES = new Set([
@@ -469,9 +518,16 @@ export class ToolRecoveryController {
   ): Promise<string> {
     const cached = this.checkpoint.getToolResult(toolId, runOptions.arguments)
     if (cached !== undefined) return cached
+    // AEX-P0-006：重试前先确认副作用允许自动重放，否则错误直接上抛交由调用方/人工处理
+    const sideEffectClass = runOptions.sideEffectClass ?? DEFAULT_TOOL_SIDE_EFFECT_CLASS
+    this.checkpoint.markToolSideEffectClass(toolId, sideEffectClass)
+    const callerPredicate = runOptions.shouldRetry ?? this.#config.shouldRetry
     const result = await runRetryLoop(this.#config, operation, {
       ...this.#config,
       ...runOptions,
+      shouldRetry: isToolAutoRetryAllowed(sideEffectClass)
+        ? callerPredicate
+        : () => false,
     })
     this.checkpoint.markToolCompleted(toolId, result, runOptions.arguments)
     return result

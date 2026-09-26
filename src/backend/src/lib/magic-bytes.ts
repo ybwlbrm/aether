@@ -129,7 +129,10 @@ export function detectMagicType(buf: Buffer): DetectedType {
     try {
       new TextDecoder('utf-8', { fatal: true }).decode(head);
       return 'text';
-    } catch { /* invalid UTF-8 → 二进制 */ }
+    } catch {
+      // AEX-P2-004 分类：intentional fallback —— fatal 解码抛错即代表不是 UTF-8 文本，
+      // 交给下方二进制判定分支；这是本函数的判定逻辑，不是错误。
+    }
   }
 
   return 'unknown';

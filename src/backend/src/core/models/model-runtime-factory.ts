@@ -14,6 +14,8 @@
 import { OpenAICompatibleAdapter } from './provider-adapter.js';
 import { ModelRegistry, type ModelSpec } from './model-registry.js';
 import type { ModelRuntime } from './model-runtime.js';
+import type { RetryPolicy } from './retry-policy.js';
+import type { CircuitBreaker } from './circuit-breaker.js';
 
 /** Shape of a legacy provider config — compatible with lib/provider.ts ResolvedProvider */
 export interface LegacyProviderConfig {
@@ -28,16 +30,39 @@ export interface LegacyProviderConfig {
 }
 
 /**
+ * P0-007：provider 级运行时依赖（透传给 OpenAICompatibleAdapter → Transport）。
+ *
+ * 熔断器/重试策略的生命周期必须是 **provider 级**，不是请求级：请求级实例的
+ * consecutiveFailures 永远到不了阈值 5，state 恒为 closed，CIRCUIT_OPEN 不可达。
+ * 调用方（lib/model-runtime-bridge.ts 的 ProviderRuntimeRegistry）负责持有并复用。
+ */
+export interface ModelRuntimeDeps {
+  /** provider 级熔断器（缺省由 Adapter/Transport 新建 —— 仅适合单请求/测试场景） */
+  circuitBreaker?: CircuitBreaker;
+  /** provider 级重试策略 */
+  retryPolicy?: RetryPolicy;
+}
+
+/**
  * Build an OpenAICompatibleAdapter (a ModelRuntime) from a legacy provider
  * config. Uses a real HTTP transport pointed at the provider's baseUrl, so
  * complete()/stream() hit `/chat/completions` exactly like the legacy path.
+ *
+ * P0-007：传入 `deps` 时把 provider 级 circuitBreaker / retryPolicy 透传给
+ * Adapter（进而透传到 createFetchTransport），使熔断状态能在同一 provider 的
+ * 多次请求之间累积。
  */
-export function buildModelRuntime(provider: LegacyProviderConfig): ModelRuntime {
+export function buildModelRuntime(
+  provider: LegacyProviderConfig,
+  deps: ModelRuntimeDeps = {},
+): ModelRuntime {
   return new OpenAICompatibleAdapter({
     providerId: provider.id,
     baseUrl: provider.baseUrl,
     apiKey: provider.apiKey,
     allowHttpTransport: true,
+    circuitBreaker: deps.circuitBreaker,
+    retryPolicy: deps.retryPolicy,
   });
 }
 
@@ -87,7 +112,8 @@ export function registerProviderModels(
 export function buildAndRegister(
   registry: ModelRegistry,
   provider: LegacyProviderConfig,
+  deps: ModelRuntimeDeps = {},
 ): ModelRuntime {
   registerProviderModels(registry, provider);
-  return buildModelRuntime(provider);
+  return buildModelRuntime(provider, deps);
 }

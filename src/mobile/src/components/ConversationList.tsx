@@ -6,10 +6,13 @@ import {
   getMessages,
   getSyncState,
   onSyncStateChange,
+  flushPendingQueue,
+  offlineQueue,
   type SyncState,
 } from '../api/supabase';
 import { type ChatMessage } from '../lib/message-store';
-import { User, Search, Trash2, MessageSquare, Plus, ChevronRight, PlayCircle, RefreshCw } from 'lucide-react';
+import { type QueuedCommand } from '../lib/offline-queue';
+import { User, Search, Trash2, MessageSquare, Plus, ChevronRight, PlayCircle, RefreshCw, AlertTriangle } from 'lucide-react';
 
 interface Conversation {
   id: string;
@@ -50,6 +53,16 @@ export default function ConversationList({ onSelect, onNewCommand, variant = 'ho
 
   const [activePreview, setActivePreview] = useState('');
   const [previews, setPreviews] = useState<Record<string, string>>({});
+
+  // AEX-P1-076：永久失败的离线命令必须可见（不得无声消失）
+  const [deadLetter, setDeadLetter] = useState<QueuedCommand[]>(() => offlineQueue.getDeadLetter());
+  const [showFailed, setShowFailed] = useState(false);
+  useEffect(() => offlineQueue.onChange((snapshot) => setDeadLetter(snapshot.deadLetter)), []);
+
+  const handleRetryAll = useCallback(async () => {
+    if (offlineQueue.retryAll() === 0) return;
+    await flushPendingQueue();
+  }, []);
 
   const load = useCallback(async () => {
     try {
@@ -200,6 +213,45 @@ export default function ConversationList({ onSelect, onNewCommand, variant = 'ho
           <div className="home-avatar" aria-label="用户"><User size={18} /></div>
         </div>
       </header>
+
+      {/* AEX-P1-076：N actions failed [View] [Retry all] */}
+      {deadLetter.length > 0 && (
+        <div className="queue-failed" role="status">
+          <div className="queue-failed-head">
+            <span className="queue-failed-label">
+              <AlertTriangle size={14} aria-hidden="true" />
+              {deadLetter.length} actions failed
+            </span>
+            <span className="queue-failed-actions">
+              <button className="queue-failed-btn" onClick={() => setShowFailed((v) => !v)}>
+                {showFailed ? 'Hide' : 'View'}
+              </button>
+              <button className="queue-failed-btn primary" onClick={handleRetryAll}>
+                Retry all
+              </button>
+            </span>
+          </div>
+          {showFailed && (
+            <ul className="queue-failed-list">
+              {deadLetter.map((cmd) => (
+                <li key={cmd.id} className="queue-failed-item">
+                  <span className="queue-failed-item-text">
+                    {cmd.content.trim() || cmd.id}
+                    <span className="queue-failed-item-meta">重试 {cmd.attempts ?? 0} 次</span>
+                  </span>
+                  <button
+                    className="queue-failed-clear"
+                    onClick={() => offlineQueue.remove(cmd.id)}
+                    aria-label="清除该失败命令"
+                  >
+                    清除
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      )}
 
       {isHome && phase === 'success' && (
         <>

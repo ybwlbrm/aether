@@ -19,6 +19,7 @@ import type {
   LspResult,
   SecurityScanResult,
 } from '../core/verification/verification-engine.js';
+import { logger } from './logger.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -179,8 +180,10 @@ export function createProductionVerificationExecutors(): VerificationExecutors {
             findings.push({ severity: 'high', category: 'security', file: f, line: ln, message: '疑似硬编码密码' });
           }
         });
-      } catch {
-        // 文件读取失败跳过（typecheck/lsp 已覆盖）
+      } catch (e: unknown) {
+        // AEX-P2-004 分类：intentional fallback —— 单文件读取失败时跳过该文件，
+        // 剩余文件仍产出 findings；typecheck/lsp 执行器是另一路独立覆盖。
+        logger.debug({ event: 'verification.pattern_scan_file_skipped', err: e, file: f }, '文件读取失败，跳过模式扫描');
       }
     }
     return { ok: findings.length === 0, findings, summary: findings.length > 0 ? `${findings.length} 个潜在安全问题` : '静态安全扫描通过' };

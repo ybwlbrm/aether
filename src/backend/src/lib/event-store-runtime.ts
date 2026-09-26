@@ -48,45 +48,31 @@ export function resetV2EventRuntime(): void {
   allocator = null;
 }
 
-/** Map legacy v1 eventType to the closest v2 discriminated type */
-export function mapEventTypeToV2(legacyType: string): AgentEvent['type'] {
-  const map: Record<string, AgentEvent['type']> = {
-    'task.started': 'task.started',
-    'task.plan': 'task.plan',
-    'task.progress': 'task.progress',
-    'task.ask-confirm': 'task.ask-confirm',
-    'task.completed': 'task.completed',
-    'task.cancelled': 'task.cancelled',
-    'task.failed': 'task.failed',
-    'agent.started': 'agent.started',
-    'agent.status': 'agent.status',
-    'agent.waiting': 'agent.waiting',
-    'agent.resumed': 'agent.resumed',
-    'agent.completed': 'agent.completed',
-    'agent.error': 'agent.error',
-    'agent.retry': 'agent.retry',
-    'agent.spawned': 'agent.spawned',
-    'agent.handoff': 'agent.handoff',
-    'agent.failed': 'agent.failed',
-    'agent.inbox.directive': 'agent.inbox.directive',
-    'agent.message.delta': 'agent.message.delta',
-    'agent.message.completed': 'agent.message.completed',
-    'agent.reasoning.delta': 'agent.reasoning.delta',
-    'agent.output.delta': 'agent.output.delta',
-    'agent.output.completed': 'agent.output.completed',
-    'tool.started': 'tool.started',
-    'tool.progress': 'tool.progress',
-    'tool.completed': 'tool.completed',
-    'tool.error': 'tool.error',
-    'tool.retry': 'tool.retry',
-    'token': 'token.usage',
-  };
-  return map[legacyType] ?? 'run.created';
+/**
+ * AEX-P0-016：未知 workflow 事件类型的显式失败。
+ * 调用方（modules/workflows/index.ts onEvent）整体包在 try/catch 里，
+ * 因此抛出即等价于「跳过这条事件的 v2 镜像」——legacy 路径与工作流执行不受影响。
+ */
+export class UnknownWorkflowEventTypeError extends Error {
+  readonly eventType: string;
+
+  constructor(eventType: string) {
+    super(`unknown workflow event type: ${eventType}`);
+    this.name = 'UnknownWorkflowEventTypeError';
+    this.eventType = eventType;
+  }
 }
 
-/** Map workflow lifecycle event types (§57) to the closest v2 discriminated type */
+/**
+ * Map workflow lifecycle event types (§57) to the closest v2 discriminated type.
+ *
+ * AEX-P0-016：未登记的类型抛 UnknownWorkflowEventTypeError，绝不伪造 run.created ——
+ * 伪造会把任意工作流内部事件读成「run 起点」，让 run 回放/增量消费得到假轨迹。
+ * 未知类型属于「新增事件未同步映射表」的集成缺口，必须在调用点可见（error 级），
+ * 而不是被静默降级掩盖。
+ */
 export function mapWorkflowEventType(type: string): AgentEvent['type'] {
-  const map: Record<string, AgentEvent['type']> = {
+  const map: Record<string, AgentEvent['type'] | undefined> = {
     'workflow.started': 'run.created',
     'workflow.node.started': 'task.started',
     'workflow.node.completed': 'task.completed',
@@ -94,7 +80,11 @@ export function mapWorkflowEventType(type: string): AgentEvent['type'] {
     'workflow.failed': 'run.failed',
     'workflow.cancelled': 'run.cancelled',
   };
-  return map[type] ?? 'run.created';
+  const mapped = map[type];
+  if (mapped === undefined) {
+    throw new UnknownWorkflowEventTypeError(type);
+  }
+  return mapped;
 }
 
 /**

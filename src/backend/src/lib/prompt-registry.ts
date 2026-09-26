@@ -20,6 +20,7 @@
 import type { SQLJsDatabase } from 'drizzle-orm/sql-js';
 import { eq } from 'drizzle-orm';
 import * as schema from '../db/schema/index.js';
+import { logger } from './logger.js';
 
 const customPrompts = new Map<string, string>();
 
@@ -52,7 +53,11 @@ export function setPrompt(agentId: string, prompt: string): void {
         .where(eq(schema.agentConfigs.id, row.id))
         .run();
     }
-  } catch { /* 持久化失败不阻塞（内存已生效） */ }
+  } catch (e: unknown) {
+    // AEX-P2-004 分类：recoverable —— 内存覆盖已生效（§27 的「先内存后持久化」契约），
+    // DB 未初始化/无 agent_configs 行/写入失败都不阻塞 Prompt 编辑。
+    logger.warn({ event: 'prompt.persist_failed', err: e, agentId, op: 'set' }, 'Prompt 持久化失败，仅内存生效');
+  }
 }
 
 /** 查看当前全部覆盖 */
@@ -79,7 +84,10 @@ export function clearPrompt(agentId: string): void {
         .where(eq(schema.agentConfigs.id, row.id))
         .run();
     }
-  } catch { /* 持久化失败不阻塞（内存已生效） */ }
+  } catch (e: unknown) {
+    // AEX-P2-004 分类：recoverable —— 内存覆盖已清除，DB 未初始化/写入失败不阻塞恢复默认。
+    logger.warn({ event: 'prompt.persist_failed', err: e, agentId, op: 'clear' }, 'Prompt 持久化清除失败，仅内存生效');
+  }
 }
 
 /**
@@ -96,7 +104,11 @@ export function loadPromptsFromDb(db: SQLJsDatabase<typeof schema>): number {
         loaded++;
       }
     }
-  } catch { /* 加载失败则保持空覆盖（回退默认） */ }
+  } catch (e: unknown) {
+    // AEX-P2-004 分类：intentional fallback —— 启动加载失败时保持空覆盖（回退内置默认 Prompt），
+    // 属可接受的降级，不阻断 bootstrap。
+    logger.warn({ event: 'prompt.load_from_db_failed', err: e, loaded }, '从 DB 加载自定义 Prompt 失败，回退默认 Prompt');
+  }
   return loaded;
 }
 
@@ -108,10 +120,14 @@ export function __clearMemoryPromptsForTest(): void {
 // 延迟获取 db（避免模块加载期循环依赖；未初始化时返回 undefined）
 function getDbSafe(): SQLJsDatabase<typeof schema> | null {
   try {
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    // 本模块处于 ESM 图中但刻意用 require() 延迟取 db，避免模块加载期循环依赖
+    // （db/client.js → … → lib/dal → … → 本模块）。此处为唯一豁免点。
     const { getDb } = require('../db/client.js') as { getDb: () => SQLJsDatabase<typeof schema> };
     return getDb();
-  } catch {
+  } catch (e: unknown) {
+    // AEX-P2-004 分类：intentional fallback —— db 未初始化时返回 null，
+    // 调用方据此跳过持久化而不是抛错。
+    logger.debug({ event: 'prompt.db_unavailable', err: e }, 'db 尚未初始化，跳过 Prompt 持久化');
     return null;
   }
 }

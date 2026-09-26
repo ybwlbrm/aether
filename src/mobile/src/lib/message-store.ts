@@ -89,6 +89,28 @@ export function replaceOptimistic(
 }
 
 /**
+ * 推进增量拉取游标（AEX-P1-077）。
+ *
+ * 重连 / 断线降级时用「游标之后的增量」代替全量 reload：游标 = 已合并消息中
+ * 最大的 created_at。乱序到达的迟到消息不得让游标回退（否则会重复拉取整段历史），
+ * 非法时间戳被忽略。返回 null 表示尚无可用游标 → 走一次全量。
+ */
+export function advanceMessageCursor(
+  cursor: string | null,
+  incoming: ChatMessage[],
+): string | null {
+  let latest = cursor;
+  for (const message of incoming) {
+    const at = new Date(message.created_at).getTime();
+    if (!Number.isFinite(at)) continue;
+    if (latest === null || at > new Date(latest).getTime()) {
+      latest = message.created_at;
+    }
+  }
+  return latest;
+}
+
+/**
  * 判断当前时间窗内是否已有 assistant 内容。
  * 该结果只用于消息归属/展示，不能作为 Chat phase 的完成依据；
  * phase 只能由 resolveChatCompletion 接收到的 remote command 终态结算。

@@ -1,5 +1,5 @@
 import { pendingPacks, PackedChunk, shouldFlushPack, isPackable, queuePack, getNextSeq, type EventBusState } from './types.js';
-import type { AgentEventType, AgentEventEnvelope } from '@pacc/shared';
+import type { AgentEventType, AgentEventEnvelope, EventStatus, ToolEventPayload } from '@pacc/shared';
 
 /** 冲刷某会话某类型的打包缓冲为一行（存储行 ≠ 会话事件；回放时解包）（P1-07: 实例状态） */
 export function flushPacks(sessionId: string, stopType?: AgentEventType, state?: EventBusState): void {
@@ -100,10 +100,10 @@ export function unpackRow(row: {
     timestamp: row.createdAt,
     seq: row.seq,
   };
-  if (row.status) env.status = row.status as any;
+  if (row.status) env.status = row.status as EventStatus;
   if (row.content != null) env.content = row.content;
   if (row.tool) {
-    try { env.tool = JSON.parse(row.tool) as any; } catch { /* 忽略坏 JSON */ }
+    try { env.tool = JSON.parse(row.tool) as ToolEventPayload; } catch { /* 忽略坏 JSON */ }
   }
   if (row.parentEventId) env.parentEventId = row.parentEventId;
   if (row.metadata) {

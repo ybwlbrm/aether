@@ -221,9 +221,9 @@ describe('runMigrations — v10/v11/v12 (Aether 2.0 Runtime tables)', () => {
       await runMigrationsReal(makeConfig(dbPath, dir));
 
       const db = openDb(dbPath);
-      // schema_version 最大值应为 17（W5 Run retry 字段迁移）
+      // schema_version 最大值应为 18（AEX-P0-015 workflow_node_runs 迁移）
       const ver = db.exec('SELECT MAX(version) FROM schema_version')
-      assert.equal(ver[0].values[0][0], 17, 'schema_version should be 17')
+      assert.equal(ver[0].values[0][0], 18, 'schema_version should be 18')
 
       // 三张新表存在
       const tables = db.exec("SELECT name FROM sqlite_master WHERE type='table' AND name IN ('runs','tasks','events')");
@@ -292,10 +292,10 @@ describe('runMigrations — v10/v11/v12 (Aether 2.0 Runtime tables)', () => {
       // 运行真实迁移
       await runMigrationsReal(makeConfig(dbPath, dir));
 
-      // 验证：schema_version 达到 17
+      // 验证：schema_version 达到 18
       const db2 = openDb(dbPath)
       const ver = db2.exec('SELECT MAX(version) FROM schema_version')
-      assert.equal(ver[0].values[0][0], 17, 'schema_version should be 17 after upgrade')
+      assert.equal(ver[0].values[0][0], 18, 'schema_version should be 18 after upgrade')
 
       // 预存数据完好
       const prov = db2.exec("SELECT id, name FROM providers WHERE id = 'prov-1'");
@@ -359,7 +359,7 @@ describe('runMigrations — v10/v11/v12 (Aether 2.0 Runtime tables)', () => {
 
       const db = openDb(dbPath);
       const ver = db.exec('SELECT MAX(version) FROM schema_version');
-      assert.equal(ver[0].values[0][0], 17, 'schema_version should still be 17 after second run')
+      assert.equal(ver[0].values[0][0], 18, 'schema_version should still be 18 after second run')
       db.close();
     } finally {
       rmSync(dir, { recursive: true, force: true });
@@ -483,6 +483,59 @@ describe('runMigrations — v10/v11/v12 (Aether 2.0 Runtime tables)', () => {
       assert.equal(run[0].values[0][5], createdAt)
       const task = migrated.exec("SELECT attempt FROM tasks WHERE id = 'old-task'")
       assert.equal(task[0].values[0][0], 1)
+      migrated.close()
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('v18: workflow_node_runs 建表 + FK ON DELETE CASCADE（AEX-P0-015）', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'pacc-migrate-v18-'))
+    const dbPath = join(dir, 'pacc.db')
+    try {
+      await runMigrationsReal(makeConfig(dbPath, dir))
+
+      const migrated = openDb(dbPath)
+      const columns = new Set(
+        migrated.exec('PRAGMA table_info(workflow_node_runs)')[0].values.map(
+          (row: unknown[]) => String(row[1]),
+        ),
+      )
+      for (const column of [
+        'id',
+        'workflow_run_id',
+        'node_id',
+        'status',
+        'attempt',
+        'retry_count',
+        'started_at',
+        'completed_at',
+        'error',
+        'output',
+      ]) {
+        assert.ok(columns.has(column), `workflow_node_runs should contain ${column}`)
+      }
+
+      // FK 行为：删父行时节点行级联清除
+      migrated.run('PRAGMA foreign_keys = ON')
+      const now = new Date().toISOString()
+      migrated.run(
+        "INSERT INTO workflows (id, name, description, nodes, edges, trigger, created_at, updated_at) VALUES ('wf', 'wf', '', '[]', '[]', 'manual', ?, ?)",
+        [now, now],
+      )
+      migrated.run(
+        "INSERT INTO workflow_runs (id, workflow_id, status, results, started_at) VALUES ('run-1', 'wf', 'running', '{}', ?)",
+        [now],
+      )
+      migrated.run(
+        "INSERT INTO workflow_node_runs (id, workflow_run_id, node_id, status, attempt, retry_count) VALUES ('run-1:a', 'run-1', 'a', 'completed', 2, 1)",
+      )
+      const before = migrated.exec('SELECT COUNT(*) FROM workflow_node_runs')[0].values[0][0]
+      assert.equal(before, 1)
+
+      migrated.run("DELETE FROM workflow_runs WHERE id = 'run-1'")
+      const after = migrated.exec('SELECT COUNT(*) FROM workflow_node_runs')[0].values[0][0]
+      assert.equal(after, 0, 'workflow_node_runs 应随 workflow_runs 级联删除')
       migrated.close()
     } finally {
       rmSync(dir, { recursive: true, force: true })

@@ -146,10 +146,12 @@ Aether 2.0 引入了**事件驱动、可恢复、可扩展的 Runtime 分层架�
 
 - ✅ **Run API**：`/api/runs` 生命周期端点 + `/api/runs/:runId/events?afterSeq=` 增量回放 + `/api/runs/:runId/stream` SSE 实时流（Last-Event-ID 断线恢复）
 - ✅ **Crash Recovery**：`POST /api/runs/recover` 自动把崩溃遗留的 running/waiting Run 标记为 interrupted
+- ✅ **Run API**：`/api/runs` 生命周期端点 + `/api/runs/:runId/events?afterSeq=` 增量回放 + `/api/runs/:runId/stream` SSE 实时流（Last-Event-ID 断线恢复）
 - ✅ **Event 收敛**：packed 行按**逻辑 seq** 回放（`afterSeq=150` 只返回 151+）；`__seq_claim` 幽灵行在所有读取路径过滤
 - ✅ **模型调用收敛**：业务层统一经 `ModelRuntime → ProviderAdapter → HTTP`；Workflow 节点同样接入
 - ✅ **API Key 安全**：AES-256-GCM 加密存储，运行时解密，绝不进入 Event / 日志 / 前端
 - ✅ **旧系统兼容**：legacy adapter 双向映射（activity_events ↔ events），平滑过渡
+- 📌 **事件事实源**：`events` 表为 canonical source of truth；`activity_events` 为过渡期 legacy 兼容投影（收敛方向见 `docs/SOURCE_OF_TRUTH.md`），关键状态迁移事件 await 确认写入、未知 legacy 事件不再映射为 `run.created`
 
 ---
 

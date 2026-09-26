@@ -47,7 +47,7 @@ describe("Chat shared UI integration", () => {
     expect(markup).toContain("新建对话")
   })
 
-  it("renders a thrown stream failure through ErrorState with a retry placeholder", () => {
+  it("renders a thrown stream failure through ErrorState with an actionable retry button", () => {
     const StreamFailureState = ChatModule.ChatStreamFailure
     expect(StreamFailureState).toBeTypeOf("function")
 
@@ -60,14 +60,16 @@ describe("Chat shared UI integration", () => {
             message: "network error: fetch failed",
             retryable: true,
           }}
+          onRetry={() => undefined}
         />
       </main>
     )
 
+    const action = markup.match(/<div data-slot="error-state-action">([\s\S]*?)<\/div>/)?.[1] ?? ""
     expect(markup).toContain('data-slot="error-state"')
     expect(markup).toContain("network error: fetch failed")
-    expect(markup).toContain("重试")
-    expect(markup).toContain("disabled")
+    expect(action).toContain("重试")
+    expect(action).not.toContain("disabled")
     expect(markup).not.toContain("data-slot=\"message-bubble\"")
   })
 })

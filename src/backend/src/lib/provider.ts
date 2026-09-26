@@ -10,6 +10,7 @@ import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { dirname } from 'node:path';
 import { decrypt } from './crypto.js';
+import { logger } from './logger.js';
 
 export interface ResolvedProvider {
   id: string;
@@ -117,9 +118,15 @@ export function getProviderByCapability(
     try {
       all.push(rowToProvider(row as never, encryptionKey));
     } catch (e: unknown) {
-      console.warn('[Provider] 跳过密钥损坏的 Provider（查询不受影响）:',
-        (row as unknown as { name?: string }).name ?? (row as unknown as { id?: string }).id ?? 'unknown',
-        e instanceof Error ? e.message : String(e));
+      // AEX-P2-004 分类：recoverable —— 单个 Provider 密钥损坏只让它退出候选集，
+      // 其余 Provider 正常参与能力选择（fail-open 到「少一个可选 Provider」而非全盘失败）。
+      logger.warn({
+        event: 'provider.key_corrupt_skipped',
+        err: e,
+        capability,
+        providerId: (row as unknown as { id?: string }).id ?? 'unknown',
+        providerName: (row as unknown as { name?: string }).name ?? 'unknown',
+      }, '跳过密钥损坏的 Provider');
     }
   }
   return selectProviderByCapability(all, capability, readDefaultProvidersSync());
@@ -138,9 +145,13 @@ export function getFirstAvailableProvider(encryptionKey: string): ResolvedProvid
     try {
       all.push(rowToProvider(row as never, encryptionKey));
     } catch (e: unknown) {
-      console.warn('[Provider] 跳过密钥损坏的 Provider（查询不受影响）:',
-        (row as unknown as { name?: string }).name ?? (row as unknown as { id?: string }).id ?? 'unknown',
-        e instanceof Error ? e.message : String(e));
+      // AEX-P2-004 分类：recoverable —— 同上，单个 Provider 损坏不影响其他 Provider 被选中。
+      logger.warn({
+        event: 'provider.key_corrupt_skipped',
+        err: e,
+        providerId: (row as unknown as { id?: string }).id ?? 'unknown',
+        providerName: (row as unknown as { name?: string }).name ?? 'unknown',
+      }, '跳过密钥损坏的 Provider');
     }
   }
   if (all.length === 0) return null;

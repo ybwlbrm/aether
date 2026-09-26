@@ -5,6 +5,7 @@ import { resolve, basename, relative } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { getSettings, saveSettings } from '../../lib/dal.js';
 import { assertMagicMatches } from '../../lib/magic-bytes.js';
+import { logger } from '../../lib/logger.js';
 
 // 目录模式允许的图片扩展名（小写，不含点）
 const IMAGE_EXTS = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'avif']);
@@ -177,7 +178,13 @@ export function registerBackgroundRoutes(app: FastifyInstance, config: BackendCo
       const filePath = resolve(bgDir, imgName);
       const rel = relative(bgDir, filePath);
       if (rel.startsWith('..') || rel.startsWith('/') || rel.startsWith('\\')) continue;
-      try { unlinkSync(filePath); } catch (_e: unknown) { /* ignore - intentional */ }
+      try {
+        unlinkSync(filePath);
+      } catch {
+        // AEX-P2-004 分类：ignored —— 旧背景图删除失败（文件被占用/已消失），
+        // settings.bgImages 仍会被清空，不阻断设置保存。
+        logger.debug({ event: 'backgrounds.file_delete_ignored', path: filePath }, '旧背景图删除失败，已忽略');
+      }
     }
     settings.bgImages = [];
     settings.bgInterval = 10;

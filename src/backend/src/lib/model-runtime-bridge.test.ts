@@ -9,6 +9,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runMigrations } from '../db/migrate.js';
 import { initDb, getDb } from '../db/client.js';
+import { eq } from 'drizzle-orm';
 import { makeTestConfig } from '../tests/helpers/mock-provider.sse.js';
 import type { BackendConfig } from '../config/index.js';
 import { providers } from '../db/schema/index.js';
@@ -16,6 +17,7 @@ import {
   buildRuntimeForProvider,
   buildRuntimeAndRegister,
   buildAllRuntimes,
+  resetProviderRuntimeRegistry,
 } from './model-runtime-bridge.js';
 import { ModelRegistry } from '../core/models/index.js';
 import { OpenAICompatibleAdapter } from '../core/models/index.js';
@@ -147,5 +149,80 @@ describe('lib/model-runtime-bridge', () => {
     const runtimes = buildAllRuntimes(getDb(), registry, 'wrong-key-bulk-0000000000000');
     assert.equal(runtimes.has('bad-creds-bulk'), false, '损坏 provider 应被跳过，不进入 runtime 集合');
     assert.ok(runtimes.size >= 1, '正常 provider 仍应构建');
+  });
+
+  // ── P0-007：provider 级熔断器生命周期 ──
+  // 旧实现每次调用都新建 runtime/adapter/transport/circuitBreaker，
+  // consecutiveFailures 永远到不了阈值 5 → CIRCUIT_OPEN 不可达（死代码）。
+
+  it('P0-007: 同一 providerId 两次构建返回同一 runtime 实例（引用相等）', () => {
+    resetProviderRuntimeRegistry();
+    seedProvider('reuse-provider', ['m1'], ['text']);
+    const first = buildRuntimeForProvider(getDb(), 'reuse-provider');
+    const second = buildRuntimeForProvider(getDb(), 'reuse-provider');
+
+    assert.ok(first && second);
+    assert.equal(first!.runtime, second!.runtime, '同一 provider 必须复用同一 runtime/transport');
+  });
+
+  it('P0-007: 同一 providerId 复用同一 circuitBreaker（连续失败跨请求累积）', () => {
+    resetProviderRuntimeRegistry();
+    seedProvider('breaker-provider', ['m1'], ['text']);
+    const first = buildRuntimeForProvider(getDb(), 'breaker-provider');
+    const second = buildRuntimeForProvider(getDb(), 'breaker-provider');
+
+    assert.ok(first && second);
+    assert.equal(first!.circuitBreaker, second!.circuitBreaker, '熔断器必须是 provider 级实例');
+    first!.circuitBreaker.recordFailure();
+    assert.equal(second!.circuitBreaker.consecutiveFailures, 1, '失败计数必须跨请求累积（否则永远不熔断）');
+  });
+
+  it('P0-007: buildAllRuntimes 与 buildRuntimeForProvider 共享同一 runtime 实例', () => {
+    resetProviderRuntimeRegistry();
+    seedProvider('shared-provider', ['m1'], ['text']);
+    const direct = buildRuntimeForProvider(getDb(), 'shared-provider');
+    const bulk = buildAllRuntimes(getDb(), new ModelRegistry());
+
+    assert.ok(direct);
+    assert.equal(bulk.get('shared-provider'), direct!.runtime, '两条构建路径必须落到同一 provider 级实例');
+  });
+
+  it('P0-007: 连接配置变更（API Key 轮换）→ 重建 runtime，不复用陈旧凭据', () => {
+    resetProviderRuntimeRegistry();
+    seedProvider('rotate-provider', ['m1'], ['text'], 'sk-old');
+    const before = buildRuntimeForProvider(getDb(), 'rotate-provider');
+    assert.ok(before);
+    assert.equal(before!.config.apiKey, 'sk-old');
+
+    getDb().update(providers).set({ apiKey: 'sk-new' }).where(eq(providers.id, 'rotate-provider')).run();
+    const after = buildRuntimeForProvider(getDb(), 'rotate-provider');
+
+    assert.ok(after);
+    assert.notEqual(after!.runtime, before!.runtime, '凭据变更后必须重建（否则继续用旧 Key）');
+    assert.equal(after!.config.apiKey, 'sk-new');
+  });
+
+  it('P0-007: 解密失败不写缓存 —— 凭据修正后仍可构建', () => {
+    resetProviderRuntimeRegistry();
+    const enc = encrypt('sk-recoverable', TEST_ENC_KEY);
+    seedProvider('recover-provider', ['m1'], ['text'], enc);
+
+    assert.throws(() => buildRuntimeForProvider(getDb(), 'recover-provider', 'wrong-key-000000000000000000'));
+
+    const recovered = buildRuntimeForProvider(getDb(), 'recover-provider', TEST_ENC_KEY);
+    assert.ok(recovered, '解密失败不得把 provider 永久钉死在失败状态');
+    assert.equal(recovered!.config.apiKey, 'sk-recoverable');
+  });
+
+  it('P0-007: resetProviderRuntimeRegistry 清空注册表（配置变更/测试隔离）', () => {
+    seedProvider('reset-provider', ['m1'], ['text']);
+    const before = buildRuntimeForProvider(getDb(), 'reset-provider');
+    assert.ok(before);
+
+    resetProviderRuntimeRegistry();
+    const after = buildRuntimeForProvider(getDb(), 'reset-provider');
+
+    assert.ok(after);
+    assert.notEqual(after!.runtime, before!.runtime, 'reset 后必须重新构建');
   });
 });

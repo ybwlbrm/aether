@@ -4,6 +4,7 @@ import { getSettings, saveSettings } from '../../lib/dal.js';
 import { resolve } from 'node:path';
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
+import { logger } from '../../lib/logger.js';
 
 // W4-3: 路径校验统一至 lib/path-guard.ts（转发，供调用方兼容）
 
@@ -66,7 +67,9 @@ export function registerSettingsRoutes(app: FastifyInstance, config: BackendConf
           filtered.bgImage = `/data/backgrounds/${name}`;
         }
       } catch (e: unknown) {
-        console.warn('[Data] 背景图迁移失败，保留原值:', e instanceof Error ? e.message : String(e));
+        // AEX-P2-004 分类：intentional fallback —— 转存失败时保留原始 data URL，
+        // 设置仍可保存（仅回退到 settings.json 内联存储的旧行为）。
+        logger.warn({ event: 'data.background_migration_failed', err: e, field: 'bgImage' }, '背景图迁移失败，保留原值');
       }
     }
     // P1-6 修复：bgImages 数组同样迁移 — 逐项将超大 base64 背景图转存为文件并替换为 URL，
@@ -84,7 +87,9 @@ export function registerSettingsRoutes(app: FastifyInstance, config: BackendConf
           writeFileSync(resolve(bgDir, name), Buffer.from(match[2], 'base64'));
           return `/data/backgrounds/${name}`;
         } catch (e: unknown) {
-          console.warn('[Data] 背景图迁移失败，保留原值:', e instanceof Error ? e.message : String(e));
+          // AEX-P2-004 分类：intentional fallback —— 转存失败时保留原始 data URL（下方 return img），
+          // 设置仍可保存（仅回退到 settings.json 内联存储的旧行为）。
+          logger.warn({ event: 'data.background_migration_failed', err: e, field: 'bgImages' }, '背景图迁移失败，保留原值');
           return img;
         }
       });

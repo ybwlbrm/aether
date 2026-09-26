@@ -1,3 +1,29 @@
+/**
+ * Legacy EventBus 核心（activity_events 写入路径）— AEX-P0-010 双写关系说明
+ *
+ * ── 事实来源（canonical source of truth）─────────────────────────────
+ * `events` 表（v2 EventStore，src/backend/src/core/events）是**唯一事实源**。
+ * 关键 Run 生命周期迁移（created → running → completed/failed/cancelled）
+ * 必须以 events 表 + runs 行状态机为准；activity_events 只是兼容读模型。
+ *
+ * ── 为什么现在还是「双写」────────────────────────────────────────────
+ * 现状：编排/工作流等模块在同一个分支里同时调用
+ *   eventBus.emit(...)      → 写 activity_events（legacy 投影）
+ *   emitV2Event(...)        → 写 events（canonical）
+ * 两张表的行由同一次业务决策产生，理论上应完全一致；但 legacy 表缺少
+ * runId/seq 唯一约束、缺少 v2 判别联合类型，因此**不得**从 activity_events
+ * 反推 Run 状态或事件轨迹。
+ *
+ * ── 收敛方向（本轮不做，禁止新增写入）───────────────────────────────
+ * 收敛路径 = 「只写 events + 由 projector 投影出 activity_events」：
+ *   src/backend/src/core/events/event-projector.ts 即为该投影器
+ *   （当前生产零引用，属待接线状态）。
+ * 因此本文件不做任何行为变更，只固化约定：
+ *   1. 新代码禁止直接 emit legacy 事件（见下方 emit() 的 @deprecated 契约）；
+ *   2. 关键状态迁移只依赖 events 表 + RunLifecycleManager；
+ *   3. 任何新的 activity_events 写入点都必须先评估能否删掉，而不是再加一处。
+ */
+
 import { randomUUID } from 'node:crypto';
 import {
   activityEvents,

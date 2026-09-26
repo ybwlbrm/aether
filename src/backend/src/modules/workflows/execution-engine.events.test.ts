@@ -9,7 +9,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runMigrations } from '../../db/migrate.js';
 import { initDb, getDb } from '../../db/client.js';
-import { workflowRuns } from '../../db/schema/index.js';
+import { workflowRuns, workflowNodeRuns } from '../../db/schema/index.js';
 import { makeTestConfig } from '../../tests/helpers/mock-provider.sse.js';
 import type { BackendConfig } from '../../config/index.js';
 import { executeWorkflow } from './execution-engine.js';
@@ -27,9 +27,13 @@ const fakeRequest = {
 function makeDb() {
   const runRows = new Map<string, Record<string, unknown>>();
   const workflowRunRows = new Map<string, Record<string, unknown>>();
-  const rowsFor = (table: unknown): Map<string, Record<string, unknown>> => (
-    table === workflowRuns ? workflowRunRows : runRows
-  )
+  // AEX-P0-015：节点行必须与 runs 行分表，否则节点状态 patch 会污染 runs.status
+  const nodeRunRows = new Map<string, Record<string, unknown>>();
+  const rowsFor = (table: unknown): Map<string, Record<string, unknown>> => {
+    if (table === workflowRuns) return workflowRunRows
+    if (table === workflowNodeRuns) return nodeRunRows
+    return runRows
+  }
   const baseDb = {
     _runs: runRows,
     insert: (table: unknown) => ({

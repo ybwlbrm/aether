@@ -1,4 +1,4 @@
-/**
+﻿/**
  * SEC-003: 日志脱敏配置
  *
  * 背景：默认 pino 配置无 redact，若生产日志记录了请求头/请求体/错误对象，
@@ -31,6 +31,15 @@ export const LOGGER_REDACT: { paths: string[]; censor: string } = {
     '*.secret',
     '*.token',
     '*.authorization',
+    // 顶层裸字段（单级通配 *./req.body 不覆盖顶层裸 token/key）
+    'token',
+    'apiKey',
+    'key',
+    'api_key',
+    'password',
+    'secret',
+    // 顶层裸字段（auth/token/key 等）
+
   ],
   censor: '[REDACTED]',
 };

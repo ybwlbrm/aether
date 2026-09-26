@@ -1,4 +1,4 @@
-import Fastify from 'fastify';
+import Fastify, { type FastifyRequest } from 'fastify';
 import cors from '@fastify/cors';
 import swagger from '@fastify/swagger';
 import swaggerUi from '@fastify/swagger-ui';
@@ -64,10 +64,12 @@ export async function buildApp(config?: BackendConfig) {
 
   // P0-2: 全局 CSP 响应头 — 保护浏览器访问版本免受 XSS 注入加载远程脚本
   // 与 Electron 内 onHeadersReceived 注入的 CSP 保持一致
+  // CSP hash：index.html 首屏主题脚本（避免闪烁）— 用 hash 白名单而非 'unsafe-inline'
+  // 若 index.html 内联脚本变更，需重新计算 hash（浏览器错误消息会给出新值）
   app.addHook('onSend', async (_request, reply, payload) => {
     const csp = [
       "default-src 'self'",
-      "script-src 'self'",
+      "script-src 'self' 'sha256-L23Sk4vY33je+xT+l0p9hLAi0fWa3tdqhZrn8qTk4D8='",
       "style-src 'self' 'unsafe-inline'",
       "img-src 'self' data: blob:",
       "font-src 'self' data:",
@@ -90,7 +92,7 @@ export async function buildApp(config?: BackendConfig) {
   app.addHook('onRequest', async (request, reply) => {
     const incoming = request.headers['x-correlation-id'];
     const correlationId = typeof incoming === 'string' && incoming ? incoming : randomUUID();
-    (request as any).correlationId = correlationId;
+    (request as FastifyRequest & { correlationId: string }).correlationId = correlationId;
     reply.header('x-correlation-id', correlationId);
   });
 

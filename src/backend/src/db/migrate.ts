@@ -605,6 +605,29 @@ export async function runMigrations(config: BackendConfig): Promise<void> {
     db.run(`INSERT INTO schema_version (version, applied_at) VALUES (17, ?)`, [new Date().toISOString()])
   }
 
+  // 版本 18 (AEX-P0-015): workflow_node_runs 表 —— 节点级执行态持久化。
+  // 动机：workflow_runs 只有 current_node_id 单列（并行节点互相覆盖）与终态一次性
+  // 覆盖的 results JSON，运行中看不到任何节点态。此表按 (workflow_run_id, node_id)
+  // 一行一节点，节点开始/终态/重试即时落库。
+  // FK ON DELETE CASCADE：workflow_runs 被删（含 deleteWorkflow）时节点行一并清除。
+  if (currentVersion < 18) {
+    db.run(`CREATE TABLE IF NOT EXISTS workflow_node_runs (
+      id TEXT PRIMARY KEY,
+      workflow_run_id TEXT NOT NULL REFERENCES workflow_runs(id) ON DELETE CASCADE,
+      node_id TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'pending',
+      attempt INTEGER NOT NULL DEFAULT 1,
+      retry_count INTEGER NOT NULL DEFAULT 0,
+      started_at TEXT,
+      completed_at TEXT,
+      error TEXT,
+      output TEXT
+    )`);
+    // 确定性主键已保证 (run, node) 唯一；此索引服务按 run 聚合查询
+    db.run(`CREATE INDEX IF NOT EXISTS idx_workflow_node_runs_run ON workflow_node_runs(workflow_run_id)`);
+    db.run(`INSERT INTO schema_version (version, applied_at) VALUES (18, ?)`, [new Date().toISOString()])
+  }
+
   // 整改计划第 7 章（P1）：所有迁移成功 → 提交单事务
   db.run('COMMIT');
   // 恢复迁移前的 FK 开关（SQLite 事务内不可修改，故在此恢复）

@@ -12,6 +12,7 @@ import { pushDirective, drainDirectives } from '../../lib/inbox.js';
 import { handleSendMessage } from './chat-handler.js';
 import { runCancellationRegistry } from '../../lib/run-cancellation-registry.js';
 import { deleteConversationCascade } from './delete-conversation.js';
+import { logger } from '../../lib/logger.js';
 
 /**
  * 注册所有对话相关路由
@@ -192,7 +193,10 @@ export function registerConversationRoutes(app: FastifyInstance, config: Backend
     // P0-21: 先中止该对话仍在进行的生成，避免 SSE 续写已删除的 conversation
     const cancelledRunIds = runCancellationRegistry.cancelConversation(id);
     if (cancelledRunIds.length > 0) {
-      console.log(`[Conversations] Cancelled ${cancelledRunIds.length} run(s) for conversation ${id} before deletion`);
+      logger.info(
+        { event: 'conversations.runs_cancelled_before_delete', count: cancelledRunIds.length, conversationId: id },
+        `[Conversations] Cancelled ${cancelledRunIds.length} run(s) for conversation ${id} before deletion`,
+      );
     }
     // P0-21: 按 FK 依赖顺序级联删除全部关联行（tasks/events/activity_events/messages/runs → conversations），
     // 否则 sql.js 抛 FOREIGN KEY constraint failed

@@ -9,6 +9,7 @@ import { readFileSync, existsSync } from 'node:fs';
 import { resolve, basename } from 'node:path';
 import { homedir } from 'node:os';
 import { closeMcpServer } from '../../lib/mcp-client.js';
+import { logger } from '../../lib/logger.js';
 
 // P0-6: MCP 命令白名单 — 只允许常见的 MCP server 启动命令
 const MCP_ALLOWED_COMMANDS = new Set([
@@ -34,8 +35,8 @@ const MCP_DANGEROUS_ARG_FRAGMENTS = [
 ];
 
 /** P0-6: 校验 MCP 命令是否安全 */
-function validateMcpCommand(command: any): { ok: boolean; error?: string } {
-  if (!Array.isArray(command) || command.length === 0) {
+function validateMcpCommand(command: unknown[]): { ok: boolean; error?: string } {
+  if (command.length === 0) {
     return { ok: false, error: '命令必须是非空数组' };
   }
   const cmdName = String(command[0]).toLowerCase();
@@ -81,7 +82,10 @@ function isSafeMcpUrl(raw: string): boolean {
       if (/^\d+$/.test(ip.replace(/\./g, '')) && ip.includes('.')) {
         if (/^(169\.254\.)/.test(ip)) return false;
       }
-    } catch { /* 忽略解析失败 */ }
+    } catch {
+      // AEX-P2-004 分类：intentional fallback —— 纯字符串解析的防御性 try；
+      // 失败时跳过十进制/八进制混淆检查，host 判定仍由上面的正则分支兜底。
+    }
     return true;
   } catch {
     return false;
@@ -112,28 +116,29 @@ export function registerMcpRoutes(app: FastifyInstance, _config: BackendConfig):
   app.post('/api/mcp/servers', {
     schema: { description: '创建 MCP 服务器', tags: ['MCP'] },
   }, async (request, reply) => {
-    const body = request.body as any;
+    const body = (request.body ?? {}) as Record<string, unknown>;
     // P0-6: 命令校验
-    if (body.command) {
+    if (Array.isArray(body.command)) {
       const check = validateMcpCommand(body.command);
       if (!check.ok) return reply.code(400).send({ error: check.error });
     }
     // P0-8: URL 安全校验（仅远程类型需要）
-    if (body.url && !isSafeMcpUrl(body.url)) {
+    if (typeof body.url === 'string' && body.url && !isSafeMcpUrl(body.url)) {
       return reply.code(400).send({ error: 'URL 不安全：禁止访问云元数据、链路本地或非 http/https 地址' });
     }
     const now = new Date().toISOString();
     const id = randomUUID();
+    const str = (v: unknown): string | undefined => (typeof v === 'string' ? v : undefined);
     db.insert(mcpServers).values({
       id,
-      name: body.name,
-      type: body.type || 'local',
-      command: body.command ? JSON.stringify(body.command) : null,
-      cwd: body.cwd || null,
+      name: str(body.name) ?? '',
+      type: str(body.type) === 'remote' ? 'remote' : 'local',
+      command: Array.isArray(body.command) ? JSON.stringify(body.command) : null,
+      cwd: str(body.cwd) ?? null,
       environment: body.environment ? JSON.stringify(body.environment) : null,
-      url: body.url || null,
+      url: str(body.url) ?? null,
       enabled: body.enabled !== false,
-      timeout: body.timeout || 5000,
+      timeout: typeof body.timeout === 'number' ? body.timeout : 5000,
       headers: body.headers ? JSON.stringify(body.headers) : null,
       createdAt: now,
       updatedAt: now,
@@ -146,29 +151,34 @@ export function registerMcpRoutes(app: FastifyInstance, _config: BackendConfig):
     schema: { description: '更新 MCP 服务器', tags: ['MCP'] },
   }, async (request, reply) => {
     const { id } = request.params as { id: string };
-    const body = request.body as any;
+    const body = (request.body ?? {}) as Record<string, unknown>;
     const existing = db.select().from(mcpServers).where(eq(mcpServers.id, id)).get();
     if (!existing) return { error: 'MCP server not found' };
     // P0-6: 命令校验
     if (body.command !== undefined && body.command !== null) {
-      const check = validateMcpCommand(body.command);
-      if (!check.ok) return reply.code(400).send({ error: check.error });
+      if (Array.isArray(body.command)) {
+        const check = validateMcpCommand(body.command);
+        if (!check.ok) return reply.code(400).send({ error: check.error });
+      } else {
+        return reply.code(400).send({ error: '命令必须是非空数组' });
+      }
     }
     // P0-8: URL 安全校验（仅远程类型需要，或显式提供 url 时）
-    if (body.url !== undefined && body.url !== null && !isSafeMcpUrl(body.url)) {
+    if (typeof body.url === 'string' && body.url && !isSafeMcpUrl(body.url)) {
       return reply.code(400).send({ error: 'URL 不安全：禁止访问云元数据、链路本地或非 http/https 地址' });
     }
 
-    const updateData: any = { updatedAt: new Date().toISOString() };
-    if (body.name !== undefined) updateData.name = body.name;
-    if (body.type !== undefined) updateData.type = body.type;
-    if (body.command !== undefined) updateData.command = JSON.stringify(body.command);
-    if (body.cwd !== undefined) updateData.cwd = body.cwd;
-    if (body.environment !== undefined) updateData.environment = JSON.stringify(body.environment);
-    if (body.url !== undefined) updateData.url = body.url;
-    if (body.enabled !== undefined) updateData.enabled = body.enabled;
-    if (body.timeout !== undefined) updateData.timeout = body.timeout;
-    if (body.headers !== undefined) updateData.headers = JSON.stringify(body.headers);
+    const updateData: Partial<typeof mcpServers.$inferInsert> = { updatedAt: new Date().toISOString() };
+    const str = (v: unknown): string | undefined => (typeof v === 'string' ? v : undefined);
+    if (body.name !== undefined) updateData.name = str(body.name) ?? '';
+    if (body.type !== undefined) updateData.type = str(body.type) === 'remote' ? 'remote' : 'local';
+    if (body.command !== undefined) updateData.command = Array.isArray(body.command) ? JSON.stringify(body.command) : undefined;
+    if (body.cwd !== undefined) updateData.cwd = str(body.cwd);
+    if (body.environment !== undefined) updateData.environment = body.environment ? JSON.stringify(body.environment) : undefined;
+    if (body.url !== undefined) updateData.url = str(body.url);
+    if (body.enabled !== undefined) updateData.enabled = body.enabled !== false;
+    if (body.timeout !== undefined) updateData.timeout = typeof body.timeout === 'number' ? body.timeout : undefined;
+    if (body.headers !== undefined) updateData.headers = body.headers ? JSON.stringify(body.headers) : undefined;
 
     db.update(mcpServers).set(updateData).where(eq(mcpServers.id, id)).run();
     // 整改计划第 2 章（P0）：更新后关闭旧 transport —— 旧连接携带过期命令/URL/凭据，
@@ -201,8 +211,8 @@ export function registerMcpRoutes(app: FastifyInstance, _config: BackendConfig):
       if (server.type === 'local') {
         // 本地类型：尝试启动进程并获取工具列表
         // P1-7 修复：JSON.parse 加 try-catch，避免数据库脏数据导致测试接口 500
-        let cmd: any[] = [];
-        try { const parsed = server.command ? JSON.parse(server.command) : []; if (Array.isArray(parsed)) cmd = parsed; } catch { cmd = []; }
+        let cmd: string[] = [];
+        try { const parsed = server.command ? JSON.parse(server.command) : []; if (Array.isArray(parsed)) cmd = parsed.map(String); } catch { cmd = []; }
         if (!Array.isArray(cmd) || cmd.length === 0) {
           return { success: false, message: '未配置命令' };
         }
@@ -210,7 +220,11 @@ export function registerMcpRoutes(app: FastifyInstance, _config: BackendConfig):
         try {
           const parsedEnv = server.environment ? JSON.parse(server.environment) : null;
           if (parsedEnv && typeof parsedEnv === 'object') env = { ...process.env, ...parsedEnv };
-        } catch { /* 无效 environment 则忽略 */ }
+        } catch {
+          // AEX-P2-004 分类：intentional fallback —— environment 字段是 DB 中的 JSON 文本，
+          // 脏数据时整体回退到继承 process.env（不注入任何自定义变量），比部分注入更可预测。
+          logger.warn({ event: 'mcp.environment_parse_failed', serverId: server.id }, 'MCP environment 解析失败，回退到 process.env');
+        }
         const child = spawn(cmd[0], cmd.slice(1), {
           cwd: server.cwd || undefined,
           env,
@@ -256,7 +270,13 @@ export function registerMcpRoutes(app: FastifyInstance, _config: BackendConfig):
         }
         const headers: Record<string, string> = {};
         if (server.headers) {
-          try { Object.assign(headers, JSON.parse(server.headers)); } catch (_e: unknown) { console.warn("[SilentCatch]", _e); }
+          try {
+            Object.assign(headers, JSON.parse(server.headers));
+          } catch (e: unknown) {
+            // AEX-P2-004 分类：recoverable —— headers 是 DB 中的 JSON 文本，脏数据时不注入自定义头
+            // 继续发起探测。风险已显式化：缺头多半得到 401，测试结果不可信，据此告警而非静默吞掉。
+            logger.warn({ event: 'mcp.headers_parse_failed', err: e, serverId: server.id, serverName: server.name }, 'MCP headers 解析失败，将不带自定义头测试');
+          }
         }
         const res = await fetch(server.url, { method: 'GET', headers, signal: AbortSignal.timeout(server.timeout || 5000) });
         return { success: res.ok, message: `HTTP ${res.status}: ${res.statusText}` };
@@ -287,23 +307,25 @@ export function registerMcpRoutes(app: FastifyInstance, _config: BackendConfig):
       if (!existsSync(configPath)) continue;
       try {
         const raw = readFileSync(configPath, 'utf-8');
-        const cfg = JSON.parse(raw);
-        const mcpEntries = cfg.mcp || cfg.mcpServers || {};
+        const cfg = JSON.parse(raw) as Record<string, unknown>;
+        const mcpEntries = (cfg.mcp ?? cfg.mcpServers ?? {}) as Record<string, unknown>;
         for (const [name, server] of Object.entries(mcpEntries)) {
           try {
-            const s = server as any;
+            const s = server as Record<string, unknown>;
+            const sType = (v: unknown): 'local' | 'remote' => (v === 'remote' ? 'remote' : 'local');
+            const sStr = (v: unknown): string | null => (typeof v === 'string' ? v : null);
             // 检查是否已存在同名服务器
             const existing = db.select().from(mcpServers).where(eq(mcpServers.name, name)).get();
             if (existing) {
               // 更新已有配置
               db.update(mcpServers).set({
-                type: s.type || 'local',
+                type: sType(s.type),
                 command: s.command ? JSON.stringify(s.command) : null,
-                cwd: s.cwd || null,
+                cwd: sStr(s.cwd),
                 environment: s.environment ? JSON.stringify(s.environment) : null,
-                url: s.url || null,
+                url: sStr(s.url),
                 enabled: s.enabled !== false,
-                timeout: s.timeout || 5000,
+                timeout: typeof s.timeout === 'number' ? s.timeout : 5000,
                 headers: s.headers ? JSON.stringify(s.headers) : null,
                 updatedAt: now,
               }).where(eq(mcpServers.name, name)).run();
@@ -313,13 +335,13 @@ export function registerMcpRoutes(app: FastifyInstance, _config: BackendConfig):
               db.insert(mcpServers).values({
                 id: randomUUID(),
                 name,
-                type: s.type || 'local',
+                type: sType(s.type),
                 command: s.command ? JSON.stringify(s.command) : null,
-                cwd: s.cwd || null,
+                cwd: sStr(s.cwd),
                 environment: s.environment ? JSON.stringify(s.environment) : null,
-                url: s.url || null,
+                url: sStr(s.url),
                 enabled: s.enabled !== false,
-                timeout: s.timeout || 5000,
+                timeout: typeof s.timeout === 'number' ? s.timeout : 5000,
                 headers: s.headers ? JSON.stringify(s.headers) : null,
                 createdAt: now,
                 updatedAt: now,

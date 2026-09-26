@@ -146,8 +146,14 @@ export function convertWithFfmpeg(input: Buffer, ext: string, target: string): P
         resolveP(readFileSync(outPath));
       } catch (e) { rejectP(e); }
       finally {
-        try { if (existsSync(inPath)) unlinkSync(inPath); } catch (_e: unknown) { /* ignore - intentional */ }
-        try { if (existsSync(outPath)) unlinkSync(outPath); } catch (_e: unknown) { /* ignore - intentional */ }
+        // AEX-P2-004 分类：ignored —— 临时文件清理是尽力而为，Promise 已 settle，
+        // 删除失败（文件被占用）只会在 %TEMP% 留下残片，不影响转换结果。
+        try { if (existsSync(inPath)) unlinkSync(inPath); } catch {
+          // 忽略：输入临时文件删除失败
+        }
+        try { if (existsSync(outPath)) unlinkSync(outPath); } catch {
+          // 忽略：输出临时文件删除失败
+        }
       }
     });
   });
@@ -176,8 +182,13 @@ export function convertWithLibreOffice(input: Buffer, ext: string): Promise<Buff
         resolveP(readFileSync(outPath));
       } catch (e) { rejectP(e); }
       finally {
-        try { unlinkSync(inPath); } catch (_e: unknown) { /* ignore - intentional */ }
-        try { if (existsSync(outDir)) { for (const f of readdirSync(outDir)) unlinkSync(resolve(outDir, f)); unlinkSync(outDir); } } catch (_e: unknown) { /* ignore - intentional */ }
+        // AEX-P2-004 分类：ignored —— 同上：Promise 已 settle，临时目录清理失败不影响转换结果。
+        try { unlinkSync(inPath); } catch {
+          // 忽略：输入临时文件删除失败
+        }
+        try { if (existsSync(outDir)) { for (const f of readdirSync(outDir)) unlinkSync(resolve(outDir, f)); unlinkSync(outDir); } } catch {
+          // 忽略：LibreOffice 临时目录清理失败
+        }
       }
     });
   });

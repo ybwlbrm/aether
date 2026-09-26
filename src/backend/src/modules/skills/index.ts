@@ -3,6 +3,7 @@ import type { BackendConfig } from '../../config/index.js';
 import { readdirSync, readFileSync, existsSync, rmSync, mkdirSync, copyFileSync, writeFileSync } from 'node:fs';
 import { resolve, basename } from 'node:path';
 import { homedir } from 'node:os';
+import { logger } from '../../lib/logger.js';
 
 /** 技能状态存储路径 */
 function getSkillsStatePath(config: BackendConfig): string {
@@ -16,7 +17,11 @@ function loadSkillsState(config: BackendConfig): Record<string, boolean> {
     if (existsSync(statePath)) {
       return JSON.parse(readFileSync(statePath, 'utf-8'));
     }
-  } catch { /* 忽略 */ }
+  } catch (e: unknown) {
+    // AEX-P2-004 分类：intentional fallback —— state 文件损坏时回退「全部启用」默认值，
+    // 而非让技能列表整体不可用。
+    logger.warn({ event: 'skills.state_load_failed', err: e, path: statePath }, '技能启用状态文件损坏，回退为全部启用');
+  }
   return {};
 }
 
@@ -40,7 +45,7 @@ export function registerSkillsRoutes(app: FastifyInstance, config: BackendConfig
       resolve(process.cwd(), '.codex', 'skills'),
     ];
 
-    const skills: any[] = [];
+    const skills: Array<{ name: string; title: string; description: string; path: string; source: string; isLocal: boolean; hasYaml: boolean; installed: boolean; enabled: boolean }> = [];
     const seen = new Set<string>();
     const state = loadSkillsState(config);
 
@@ -77,9 +82,16 @@ export function registerSkillsRoutes(app: FastifyInstance, config: BackendConfig
               installed: true,
               enabled: state[entry.name] !== false, // 默认启用
             });
-          } catch { /* skip corrupt skill */ }
+          } catch (e: unknown) {
+            // AEX-P2-004 分类：intentional fallback —— 单个技能目录损坏只跳过该技能，
+            // 其余技能照常列出。
+            logger.debug({ event: 'skills.entry_skipped', err: e, dir }, '技能条目损坏，已跳过');
+          }
         }
-      } catch { /* skip unreadable dir */ }
+      } catch (e: unknown) {
+        // AEX-P2-004 分类：intentional fallback —— 技能根目录不可读时只跳过该来源目录。
+        logger.warn({ event: 'skills.source_dir_skipped', err: e, dir }, '技能来源目录不可读，已跳过');
+      }
     }
 
     return skills;

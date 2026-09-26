@@ -7,6 +7,7 @@ import { randomUUID } from 'node:crypto';
 import { CreateProviderSchema, UpdateProviderSchema, AppError } from '@pacc/shared';
 import { encrypt as encryptKey, decrypt as decryptKey } from '../../lib/crypto.js';
 import { isSafeFetchUrl } from '../../lib/safe-fetch.js';
+import { logger } from '../../lib/logger.js';
 
 // P1-7 修复：数据库中的 models/capabilities 是 JSON 字符串，健壮解析避免非法 JSON 导致 500
 function parseJsonArray(value: string | null, fallback: string[] = []): string[] {
@@ -152,10 +153,17 @@ export function registerProviderRoutes(app: FastifyInstance, config: BackendConf
     if (!existing) throw AppError.notFound('Provider', id);
     try {
       db.delete(providers).where(eq(providers.id, id)).run();
-      try { saveDb(config); } catch (e: unknown) { console.error('[Providers] 保存失败:', (e instanceof Error ? e.message : String(e)) || e); }
+      try {
+        saveDb(config);
+      } catch (e: unknown) {
+        // AEX-P2-004 分类：recoverable —— SQLite 删除已生效，快照落盘失败交由下次 saveDb 补齐。
+        logger.error({ event: 'providers.persist_failed', err: e, providerId: id }, 'Provider 删除后持久化失败');
+      }
       return { success: true };
     } catch (e: unknown) {
-      console.error('[Providers] 删除失败:', (e instanceof Error ? e.message : String(e)) || e);
+      // AEX-P2-004 分类：bug 传播 —— DB 删除异常属真实故障，记录后原样抛出，
+      // 交由 plugins/error-handler 统一转 500，不静默吞掉。
+      logger.error({ event: 'providers.delete_failed', err: e, providerId: id }, '删除 Provider 失败');
       throw e;
     }
   });
@@ -263,17 +271,24 @@ export function registerProviderRoutes(app: FastifyInstance, config: BackendConf
 
       // 从响应体获取额度/余额信息
       let bodyDetail = '';
-      let bodyJson: any = null;
+      let bodyJson: Record<string, unknown> | null = null;
       try {
-        bodyJson = await response.json();
-        if (bodyJson?.error?.message) bodyDetail = bodyJson.error.message;
-        if (bodyJson?.error?.code) bodyDetail += ` (${bodyJson.error.code})`;
+        const parsed = await response.json() as unknown;
+        bodyJson = parsed && typeof parsed === 'object' ? parsed as Record<string, unknown> : null;
+        const err = bodyJson?.error && typeof bodyJson.error === 'object' ? bodyJson.error as Record<string, unknown> : null;
+        if (err && typeof err.message === 'string') bodyDetail = err.message;
+        if (err && typeof err.code === 'string') bodyDetail += ` (${err.code})`;
         // 检查余额/额度字段（不同 Provider 字段名不同）
-        if (bodyJson?.data?.credits) bodyDetail = `余额: ${bodyJson.data.credits}`;
-        if (bodyJson?.credits) bodyDetail = `余额: ${bodyJson.credits}`;
-        if (bodyJson?.balance) bodyDetail = `余额: ${bodyJson.balance}`;
-        if (bodyJson?.remaining_credits) bodyDetail = `剩余额度: ${bodyJson.remaining_credits}`;
-      } catch { /* 忽略解析失败 */ }
+        const data = bodyJson?.data && typeof bodyJson.data === 'object' ? bodyJson.data as Record<string, unknown> : null;
+        if (data && typeof data.credits === 'number') bodyDetail = `余额: ${data.credits}`;
+        if (typeof bodyJson?.credits === 'number') bodyDetail = `余额: ${bodyJson.credits}`;
+        if (typeof bodyJson?.balance === 'number') bodyDetail = `余额: ${bodyJson.balance}`;
+        if (typeof bodyJson?.remaining_credits === 'number') bodyDetail = `剩余额度: ${bodyJson.remaining_credits}`;
+      } catch {
+        // AEX-P2-004 分类：intentional fallback —— 额度探测响应体不是 JSON（网关 HTML/纯文本）时，
+        // 保留空 bodyDetail，由下方 statusCode 分支给出可读状态。
+        logger.debug({ event: 'providers.quota_body_unparsable', providerId: id, status: response.status }, 'Provider 额度响应体解析失败，忽略正文');
+      }
 
       // 判断额度状态
       let quotaStatus = '正常';

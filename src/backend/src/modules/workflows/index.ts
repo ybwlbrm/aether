@@ -3,6 +3,7 @@ import type { BackendConfig } from '../../config/index.js';
 import { getAllWorkflows, createWorkflow, getWorkflowById, updateWorkflow, deleteWorkflow, getWorkflowRuns } from './store.js';
 import { executeWorkflow, repairOrphanWorkflowRuns } from './execution-engine.js';
 import { executeNode } from './node-executors.js';
+import { createRequestAbortSignal } from './request-abort.js';
 import { aiCreateWorkflow } from './ai-creator.js';
 import type { WorkflowNode, WorkflowEdge } from './types.js';
 // Aether 2.0 v2 Event Runtime (FIX-5): workflow lifecycle events (§57) into
@@ -136,6 +137,9 @@ export function registerWorkflowRoutes(app: FastifyInstance, config: BackendConf
     const workflow = await getWorkflowById(id);
     if (!workflow) return reply.code(404).send({ error: '工作流不存在' });
 
+    // AEX-P0-016：把「客户端断开」接到引擎的 AbortSignal —— 页面关闭 / 网络断开
+    // 时中止在途节点，走 cancelled 终态而不是继续跑完再标记 failed。
+    const requestAbort = createRequestAbortSignal(request);
     try {
       const db = (await import('../../db/client.js')).getDb();
       const result = await executeWorkflow({
@@ -148,6 +152,7 @@ export function registerWorkflowRoutes(app: FastifyInstance, config: BackendConf
         db,
         saveDb: (await import('../../db/client.js')).saveDb,
         request,
+        signal: requestAbort.signal,
         // Aether 2.0 §57: mirror workflow lifecycle events into the v2 events
         // table (FIX-5) — workflow.started → run.created, node.started →
         // task.started, node.completed → task.completed, completed/failed →
@@ -179,6 +184,8 @@ export function registerWorkflowRoutes(app: FastifyInstance, config: BackendConf
       return result;
     } catch (e: unknown) {
       return reply.code(400).send({ error: e instanceof Error ? e.message : String(e) });
+    } finally {
+      requestAbort.dispose();
     }
   });
 

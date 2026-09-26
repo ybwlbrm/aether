@@ -18,6 +18,7 @@ import { runCancellationRegistry } from '../../lib/run-cancellation-registry.js'
 import { deleteConversationCascade } from '../conversations/delete-conversation.js';
 import type { SyncConfig } from './sync-config.js';
 import { shouldScheduleReconnect } from './realtime-logic.js';
+import { logger } from '../../lib/logger.js';
 
 // ============================================================
 // 设置 Realtime 监听（远程命令）
@@ -70,7 +71,7 @@ export async function setupRealtimeListener(
         const row = payload.new
         const cmd = row ? parseRemoteCommandRow(row) : null
         if (!cmd) {
-          if (row) console.warn('[Sync] 收到无法解析的远程命令，已忽略')
+          if (row) logger.warn({ event: 'sync.realtime_command_unparsable' }, '[Sync] 收到无法解析的远程命令，已忽略')
           return
         }
 
@@ -86,23 +87,40 @@ export async function setupRealtimeListener(
               (conversationId) => runCancellationRegistry.runIdsForConversation(conversationId),
             )
             if (!runId) {
-              console.warn(`[Sync] 收到取消命令但未找到唯一活动 Run (command=${cmd.id}, client_command_id=${cmd.client_command_id ?? '无'})`)
+              logger.warn(
+                { event: 'sync.realtime_cancel_run_missing', commandId: cmd.id, clientCommandId: cmd.client_command_id ?? '无' },
+                '[Sync] 收到取消命令但未找到唯一活动 Run',
+              )
               return
             }
             if (!runCancellationRegistry.has(runId)) {
-              console.warn(`[Sync] 收到取消命令但 Run ${runId} 未注册，可能已结束`)
+              logger.warn(
+                { event: 'sync.realtime_cancel_run_unregistered', runId },
+                '[Sync] 收到取消命令但 Run 未注册，可能已结束',
+              )
               return
             }
             const aborted = runCancellationRegistry.cancel(runId)
             if (aborted) {
-              console.log(`[Sync] Realtime 收到取消命令 → 取消 Run ${runId}`)
+              logger.info(
+                { event: 'sync.realtime_run_cancelled', runId },
+                `[Sync] Realtime 收到取消命令 → 取消 Run ${runId}`,
+              )
             } else {
-              console.error(`[Sync] Realtime 取消 Run ${runId} 失败：注册表未接受取消`)
+              logger.error(
+                { event: 'sync.realtime_cancel_run_failed', runId },
+                '[Sync] Realtime 取消 Run 失败：注册表未接受取消',
+              )
             }
           } catch (e: unknown) {
-            console.error(
-              `[Sync] Realtime 定位取消 Run 失败 (command=${cmd.id}, client_command_id=${cmd.client_command_id ?? '无'}):`,
-              e instanceof Error ? e.message : e,
+            logger.error(
+              {
+                event: 'sync.realtime_cancel_run_lookup_failed',
+                commandId: cmd.id,
+                clientCommandId: cmd.client_command_id ?? '无',
+                error: e instanceof Error ? e.message : String(e),
+              },
+              '[Sync] Realtime 定位取消 Run 失败',
             )
           } finally {
             processingCommandIds.delete(cmd.id)
@@ -113,7 +131,10 @@ export async function setupRealtimeListener(
         // 去重检查：防止 Supabase Realtime 重复推送同一 INSERT 事件
         if (cmd.status === 'pending' && !processingCommandIds.has(cmd.id)) {
           processingCommandIds.add(cmd.id)
-          console.log('[Sync] 收到远程命令:', cmd.content.slice(0, 100))
+          logger.info(
+            { event: 'sync.realtime_command_received', commandId: cmd.id, contentPreview: cmd.content.slice(0, 100) },
+            '[Sync] 收到远程命令:',
+          )
           // 二次确认：从数据库查当前状态，防止重放已处理完的命令
           try {
             const { data: current, error: statusError } = await sb
@@ -122,17 +143,26 @@ export async function setupRealtimeListener(
               .eq('id', cmd.id)
               .single()
             if (statusError) {
-              console.error(`[Sync] 二次确认远程命令状态失败，跳过处理 (command=${cmd.id}):`, statusError.message)
+              logger.error(
+                { event: 'sync.realtime_status_recheck_failed', commandId: cmd.id, error: statusError.message },
+                '[Sync] 二次确认远程命令状态失败，跳过处理',
+              )
               processingCommandIds.delete(cmd.id)
               return
             }
             if (current?.status !== 'pending') {
-              console.log('[Sync] 命令已处理，跳过重放:', cmd.id)
+              logger.info(
+                { event: 'sync.realtime_command_replay_skipped', commandId: cmd.id },
+                '[Sync] 命令已处理，跳过重放:',
+              )
               processingCommandIds.delete(cmd.id)
               return
             }
           } catch (e: unknown) {
-            console.warn('[Sync] 二次确认远程命令状态异常，继续处理:', e instanceof Error ? e.message : e)
+            logger.warn(
+              { event: 'sync.realtime_status_recheck_error', commandId: cmd.id, error: e instanceof Error ? e.message : String(e) },
+              '[Sync] 二次确认远程命令状态异常，继续处理:',
+            )
           }
           try {
             await processRemoteCommand(sb, cfg, cmd, backendConfig)
@@ -158,16 +188,22 @@ export async function setupRealtimeListener(
               // P0-21: 按 FK 依赖顺序级联删除全部关联行（显式删除，兼容未迁移 v13 的旧库）
               deleteConversationCascade(db, deletedId);
               saveDb(backendConfig);
-              console.log('[Sync] 已同步删除本地对话:', deletedId);
+              logger.info(
+                { event: 'sync.realtime_conversation_deleted', conversationId: deletedId },
+                '[Sync] 已同步删除本地对话:',
+              );
             }
           } catch (e: unknown) {
-            console.warn('[Sync] 同步删除本地对话失败:', e instanceof Error ? e.message : e);
+            logger.warn(
+              { event: 'sync.realtime_conversation_delete_failed', conversationId: deletedId, error: e instanceof Error ? e.message : String(e) },
+              '[Sync] 同步删除本地对话失败:',
+            );
           }
         }
       },
     )
     .subscribe((status: string, err: unknown) => {
-      console.log('[Sync] Realtime 订阅状态:', status);
+      logger.info({ event: 'sync.realtime_subscribe_status', status }, '[Sync] Realtime 订阅状态:');
       // BE-RL-03 修复：仅当本 channel 仍是当前注册的 channel 时才处理状态回调。
       // 主动 removeChannel 的旧 channel 触发的 CLOSED/TIMED_OUT 回调被直接忽略，
       // 不再调度重连 → 打断「重连 → removeChannel → 回调 → 再重连」死循环。
@@ -176,27 +212,39 @@ export async function setupRealtimeListener(
       // 断线重连：SUBSCRIBED 但之后 CLOSED/CHANNEL_ERROR/TIMED_OUT → 重新订阅
       if (shouldScheduleReconnect(status, isCurrent)) {
         const errorMessage = err instanceof Error ? err.message : typeof err === 'string' ? err : ''
-        console.warn(`[Sync] Realtime 连接异常 (${status})，3s 后重新订阅:`, errorMessage)
+        logger.warn(
+          { event: 'sync.realtime_connection_abnormal', status, error: errorMessage },
+          '[Sync] Realtime 连接异常，3s 后重新订阅:',
+        )
         // 使用闭包捕获重试次数，实现指数退避 + 最大重试次数，防止无限重试风暴
         let reconnectAttempt = 0;
         const MAX_RECONNECT_ATTEMPTS = 10;
         const scheduleReconnect = (attempt: number) => {
           if (attempt >= MAX_RECONNECT_ATTEMPTS) {
-            console.error('[Sync] Realtime 重连次数超限，放弃重连。请检查网络或 Supabase 状态。');
+            logger.error(
+              { event: 'sync.realtime_reconnect_exhausted', attempts: attempt },
+              '[Sync] Realtime 重连次数超限，放弃重连。请检查网络或 Supabase 状态。',
+            );
             return;
           }
           const delayMs = Math.min(3000 * Math.pow(2, attempt), 60_000); // 指数退避，上限 60s
-          console.log(`[Sync] 安排第 ${attempt + 1} 次重连，延迟 ${delayMs}ms`);
+          logger.info(
+            { event: 'sync.realtime_reconnect_scheduled', attempt: attempt + 1, delayMs },
+            `[Sync] 安排第 ${attempt + 1} 次重连，延迟 ${delayMs}ms`,
+          );
           // BE-RL-02: 保存重连定时器引用，重连前 clearTimeout 防堆积
           if (reconnectTimer) { clearTimeout(reconnectTimer); }
           reconnectTimer = setTimeout(async () => {
             reconnectTimer = null;
             try {
               await setupRealtimeListener(sb, cfg, backendConfig);
-              console.log('[Sync] Realtime 重连成功');
+              logger.info({ event: 'sync.realtime_reconnected' }, '[Sync] Realtime 重连成功');
             } catch (e) {
               const msg = e instanceof Error ? e.message : String(e);
-              console.warn('[Sync] 重订阅失败，将重试:', msg);
+              logger.warn(
+                { event: 'sync.realtime_resubscribe_failed', attempt: attempt + 1, error: msg },
+                '[Sync] 重订阅失败，将重试:',
+              );
               scheduleReconnect(attempt + 1);
             }
           }, delayMs);
@@ -207,7 +255,10 @@ export async function setupRealtimeListener(
 
   setRealtimeChannel(realtimeChannel);
 
-  console.log('[Sync] Realtime 监听已启动（监听所有 pending 远程命令 + 对话删除同步）');
+  logger.info(
+    { event: 'sync.realtime_listener_started' },
+    '[Sync] Realtime 监听已启动（监听所有 pending 远程命令 + 对话删除同步）',
+  );
 
   // ---- 轮询兜底：Realtime 断开/丢失事件时，仍能处理手机端命令 ----
   // BE-03(a): 双层错误处理 + processingCommandIds 去重

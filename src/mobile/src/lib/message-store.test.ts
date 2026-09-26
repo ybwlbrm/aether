@@ -10,6 +10,7 @@ import {
   replaceOptimistic,
   hasAssistantAfter,
   compareMessages,
+  advanceMessageCursor,
   type ChatMessage,
 } from './message-store.ts';
 
@@ -84,4 +85,23 @@ test('compareMessages: 同 created_at 按 id 升序（确定性）', () => {
   assert.ok(compareMessages(a, z) < 0);
   assert.ok(compareMessages(z, a) > 0);
   assert.equal(compareMessages(a, a), 0);
+});
+
+test('advanceMessageCursor: 游标取最大 created_at 并单调不回退', () => {
+  const t1 = '2026-01-01T00:00:01Z';
+  const t2 = '2026-01-01T00:00:05Z';
+  // 输入乱序也取最大
+  assert.equal(
+    advanceMessageCursor(null, [msg({ id: 'b', created_at: t2 }), msg({ id: 'a', created_at: t1 })]),
+    t2,
+  );
+  // 旧消息（乱序到达 / 迟到）不得让游标回退，否则增量拉取会重复拉大量历史
+  assert.equal(advanceMessageCursor(t2, [msg({ id: 'old', created_at: t1 })]), t2);
+  // 同秒消息也推进不了游标但不得回退
+  assert.equal(advanceMessageCursor(t2, [msg({ id: 'same', created_at: t2 })]), t2);
+  // 空输入保持原值；空输入且无游标 → null（走全量）
+  assert.equal(advanceMessageCursor(t1, []), t1);
+  assert.equal(advanceMessageCursor(null, []), null);
+  // 非法时间戳被忽略
+  assert.equal(advanceMessageCursor(null, [msg({ id: 'bad', created_at: 'not-a-date' })]), null);
 });

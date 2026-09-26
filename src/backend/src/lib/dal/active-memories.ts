@@ -1,6 +1,7 @@
 import { getDb } from '../../db/client.js';
 import { memories } from '../../db/schema/index.js';
 import { desc, like, or, gt, isNull, and, sql, type SQL } from 'drizzle-orm';
+import { logger } from '../logger.js';
 
 /**
  * P1-19 修复：中文关键词提取。
@@ -90,7 +91,13 @@ export async function getActiveMemoriesFormatted(context?: string): Promise<stri
           .limit(10).all();
         for (const m of recalled) {
           let tags = '';
-          try { const t = JSON.parse(m.tags || '[]'); tags = Array.isArray(t) ? t.slice(0, 3).join(', ') : ''; } catch { /* ignore */ }
+          try {
+            const t = JSON.parse(m.tags || '[]');
+            tags = Array.isArray(t) ? t.slice(0, 3).join(', ') : '';
+          } catch {
+            // AEX-P2-004 分类：intentional fallback —— tags 是可选展示字段，
+            // 解析失败只丢标签，记忆正文照常注入 Prompt。
+          }
           parts.push(`- [${m.type}] ${m.key}: ${m.content}${tags ? ' (#' + tags + ')' : ''}`);
         }
       }
@@ -106,10 +113,20 @@ export async function getActiveMemoriesFormatted(context?: string): Promise<stri
       if (existing.has(key)) continue;
       existing.add(key);
       let tags = '';
-      try { const t = JSON.parse(m.tags || '[]'); tags = Array.isArray(t) ? t.slice(0, 3).join(', ') : ''; } catch { /* ignore */ }
+      try {
+        const t = JSON.parse(m.tags || '[]');
+        tags = Array.isArray(t) ? t.slice(0, 3).join(', ') : '';
+      } catch {
+        // AEX-P2-004 分类：intentional fallback —— tags 是可选展示字段，
+        // 解析失败只丢标签，记忆正文照常注入 Prompt。
+      }
       parts.push(`${key}: ${m.content}${tags ? ' (#' + tags + ')' : ''}`);
     }
-  } catch { /* DB 未初始化或表不存在，静默降级 */ }
+  } catch (e: unknown) {
+    // AEX-P2-004 分类：intentional fallback —— DB 未初始化/表不存在时返回空上下文，
+    // 由调用方按「无记忆」继续，不阻断对话。
+    logger.debug({ event: 'memory.context_db_unavailable', err: e }, '记忆上下文 DB 不可用，返回空上下文');
+  }
 
   return parts.join('\n');
 }

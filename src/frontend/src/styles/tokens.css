@@ -175,7 +175,15 @@
   --list-padding-x: var(--space-5);
   --card-height: 120px;
   --page-header-min-height: 64px;
-  --page-content-max-width: 1100px;
+  /* ---- 语义内容宽度（AEX-P1-062）----
+   * 页面不应硬编码 840/1100/1200/1280 等任意数值，统一使用以下语义档位：
+   *   readable: 阅读型（长文/代码）  standard: 常规管理页  wide: 宽屏仪表/编辑  full: 全宽
+   */
+  --content-readable: min(100%, 820px);
+  --content-standard: min(100%, 1120px);
+  --content-wide: min(100%, 1260px);
+  --content-full: 100%;
+  --page-content-max-width: var(--content-standard);
 
   /* ---- Motion ---- */
   --anim-duration-fast: 150ms;

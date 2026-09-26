@@ -50,17 +50,18 @@ const ThinkLine = React.memo(function ThinkLine({ text, running }: { text: strin
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     }
   }, [text, expanded]);
+  const panelId = React.useId();
   return (
     <div data-variant="think" data-state={running ? 'running' : 'ok'} style={{ fontFamily: 'var(--font-mono, ui-monospace)', fontSize: 14, lineHeight: '24px' }}>
-      <div role="button" aria-expanded={expanded} onClick={() => setExpanded(!expanded)}
-        style={{ cursor: 'pointer', userSelect: 'none', display: 'flex', alignItems: 'center', gap: 6, color: 'var(--text-tertiary)', whiteSpace: 'nowrap', overflow: 'hidden' }}>
+      <button type="button" aria-expanded={expanded} aria-controls={panelId} onClick={() => setExpanded(!expanded)}
+        style={{ cursor: 'pointer', userSelect: 'none', display: 'flex', alignItems: 'center', gap: 6, color: 'var(--text-tertiary)', whiteSpace: 'nowrap', overflow: 'hidden', background: 'transparent', border: 'none', padding: 0, font: 'inherit', textAlign: 'left', width: '100%' }}>
         <span style={{ flexShrink: 0, color: 'var(--text-tertiary)', fontSize: 12 }}>{expanded ? '▾' : '▸'}</span>
         <span style={{ fontWeight: 400 }}>Think</span>
         <span style={{ width: 2, height: 2, borderRadius: 1, background: 'var(--text-tertiary)', flexShrink: 0 }} />
         <span style={{ flex: '1 1 auto', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: 'var(--text-tertiary)' }}>{truncated}</span>
-      </div>
+      </button>
       {expanded && (
-        <div ref={scrollRef} style={{ padding: '4px 0 4px 20px', color: 'var(--text-tertiary)', whiteSpace: 'pre-wrap', fontSize: 13, lineHeight: 1.5, maxHeight: 200, overflowY: 'auto' }}>
+        <div id={panelId} ref={scrollRef} style={{ padding: '4px 0 4px 20px', color: 'var(--text-tertiary)', whiteSpace: 'pre-wrap', fontSize: 13, lineHeight: 1.5, maxHeight: 200, overflowY: 'auto' }}>
           {text}
         </div>
       )}
@@ -116,15 +117,16 @@ export function ActivityStream({ events, taskCard }: { events: AgentEventEnvelop
 
 export function ThinkingIndicator({ content }: { content: string }) {
   const [expanded, setExpanded] = React.useState(false);
+  const panelId = React.useId();
   if (!content) return null;
   return (
     <div style={{ margin: '2px 12px', fontFamily: 'var(--font-mono, ui-monospace)', fontSize: 12 }}>
-      <div role="button" aria-expanded={expanded} onClick={() => setExpanded(!expanded)}
-        style={{ cursor: 'pointer', userSelect: 'none', color: 'var(--color-accent)' }}>
+      <button type="button" aria-expanded={expanded} aria-controls={panelId} onClick={() => setExpanded(!expanded)}
+        style={{ cursor: 'pointer', userSelect: 'none', color: 'var(--color-accent)', background: 'transparent', border: 'none', padding: 0, font: 'inherit' }}>
         {expanded ? '▾' : '▸'} keep diving...
-      </div>
+      </button>
       {expanded && (
-        <div style={{ marginTop: 2, color: 'var(--text-tertiary)', whiteSpace: 'pre-wrap', fontSize: 12, lineHeight: 1.5, maxHeight: 120, overflowY: 'auto' }}>
+        <div id={panelId} style={{ marginTop: 2, color: 'var(--text-tertiary)', whiteSpace: 'pre-wrap', fontSize: 12, lineHeight: 1.5, maxHeight: 120, overflowY: 'auto' }}>
           {content}
         </div>
       )}

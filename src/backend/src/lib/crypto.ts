@@ -2,6 +2,7 @@
  * AES-256-GCM 加密/解密工具 — 用于加密存储 API Key
  */
 import { createCipheriv, createDecipheriv, randomBytes, createHash } from 'node:crypto';
+import { logger } from './logger.js';
 
 const ALGORITHM = 'aes-256-gcm';
 const IV_LENGTH = 12;
@@ -77,7 +78,7 @@ export async function reencryptPlaintextKeys(encryptionKey: string): Promise<num
   }
 
   if (migrated > 0) {
-    console.log(`[Crypto] 已迁移 ${migrated} 个明文 API Key 为加密存储`);
+    logger.info({ event: 'crypto.api_key_migrated', count: migrated }, '已将明文 API Key 迁移为加密存储');
   }
   return migrated;
 }

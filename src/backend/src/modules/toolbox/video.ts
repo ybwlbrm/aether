@@ -8,6 +8,7 @@ import { execFile, spawnSync } from 'node:child_process';
 import { exportDir } from './utils.js';
 import { isSafeFetchUrl, isPublicFetchUrl, parseIpv4, isLinkLocal, isPrivateOrLoopback, isMetadataHostname } from '../../lib/safe-fetch.js';
 import { assertMagicMatches } from '../../lib/magic-bytes.js';
+import { logger } from '../../lib/logger.js';
 
 // ESM 兼容：项目为 "type": "module"，无 __dirname 全局变量
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -34,7 +35,11 @@ function resolveFfmpegPath(): string | null {
      
     const staticPath = require('ffmpeg-static');
     if (typeof staticPath === 'string' && existsSync(staticPath)) return staticPath;
-  } catch { /* ffmpeg-static 未安装，回退系统 PATH */ }
+  } catch (e: unknown) {
+    // AEX-P2-004 分类：intentional fallback —— ffmpeg-static 是可选依赖，
+    // 未安装时回退到系统 PATH 的 `ffmpeg`（下方 return），由 execFile 自行解析。
+    logger.debug({ event: 'toolbox.ffmpeg_static_missing', err: e }, 'ffmpeg-static 不可用，回退系统 PATH');
+  }
   return 'ffmpeg'; // 让 execFile 搜索 PATH
 }
 
@@ -84,8 +89,13 @@ export function extractAudioFromVideo(input: Buffer, videoExt: string, target: s
     writeFileSync(inPath, input);
 
     const cleanup = () => {
-      try { if (existsSync(inPath)) unlinkSync(inPath); } catch (_e: unknown) { /* ignore - intentional */ }
-      try { if (existsSync(outPath)) unlinkSync(outPath); } catch (_e: unknown) { /* ignore - intentional */ }
+      // AEX-P2-004 分类：ignored —— Promise 已 settle，音频提取临时文件清理失败不影响结果。
+      try { if (existsSync(inPath)) unlinkSync(inPath); } catch {
+        // 忽略：输入临时文件删除失败
+      }
+      try { if (existsSync(outPath)) unlinkSync(outPath); } catch {
+        // 忽略：输出临时文件删除失败
+      }
     };
 
     // 先尝试流拷贝；失败则回退重编码（兼容 mkv/mov 容器）
@@ -195,7 +205,9 @@ export function downloadWithYtDlp(url: string, format: string, quality: string):
         resolveP({ buffer: readFileSync(fullPath), title, ext });
       } catch (e) { rejectP(e instanceof Error ? e : new Error(String(e))); }
       finally {
-        try { rmSync(tmpDir, { recursive: true, force: true }); } catch (_e: unknown) { /* ignore - intentional */ }
+        try { rmSync(tmpDir, { recursive: true, force: true }); } catch {
+          // AEX-P2-004 分类：ignored —— Promise 已 settle，yt-dlp 工作目录清理失败不影响结果。
+        }
       }
     });
   });

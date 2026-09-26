@@ -1,8 +1,56 @@
+import {
+  ApiErrorCode,
+  extractErrorMessage,
+  fromHttpFailure,
+  fromTransportFailure,
+  type ApiError,
+  type ApiResult,
+} from './contract';
+import type {
+  DefaultProviders,
+  ImportAllResult,
+  McpImportResult,
+  MemoryRow,
+  ProviderSummary,
+  TerminalEntry,
+  TerminalExecuteResult,
+  ToolboxConvertResult,
+  ToolboxEncodePayload,
+  ToolboxEncodeResult,
+  ToolboxFileResult,
+  ToolboxPdfCompressResult,
+  ToolboxPdfToDocxResult,
+  ToolboxReadResult,
+  ToolboxUnlockResult,
+  ToolboxUtilityResult,
+  ToolboxYoutubeResult,
+  ToolsStatus,
+  SyncConfigInfo,
+  WikiPageRow,
+} from './types';
+
 const BASE = '/api';
 // P1-5: 默认请求超时 30s（SSE 流式端点除外）
 const DEFAULT_TIMEOUT_MS = 30000;
 // P2: AI 媒体生成超时 300s（图片/视频 AI 生成+轮询最长 5 分钟）
 const MEDIA_TIMEOUT_MS = 300000;
+
+const TIMEOUT_MESSAGE = '请求超时，请检查网络连接';
+
+/** request / requestResult 共用的请求选项（timeout 为本层扩展，非标准 RequestInit） */
+export interface ApiRequestOptions extends RequestInit {
+  timeout?: number;
+}
+
+/**
+ * 传输层结果：把 fetch 的三种失败（主动取消 / 超时 / 网络中断）与成功响应分开表达，
+ * 让 `request`（抛 Error，向后兼容）与 `requestResult`（返回 ApiError）共用同一段 IO。
+ */
+type TransportOutcome =
+  | { kind: 'response'; res: Response }
+  | { kind: 'aborted'; cause: unknown }
+  | { kind: 'timeout' }
+  | { kind: 'network'; cause: unknown };
 
 // 本地认证 token（启动时从 /api/auth/token 获取，仅内存）
 let authToken: string | null = null;
@@ -53,7 +101,11 @@ export function authHeaders(): Record<string, string> {
   return authToken ? { Authorization: `Bearer ${authToken}` } : {};
 }
 
-async function request<T>(path: string, options?: RequestInit & { timeout?: number }): Promise<T> {
+/**
+ * 统一传输层：注入 CSRF 头 / 鉴权头 / 超时，**不解释响应体**。
+ * request（抛 Error）与 requestResult（返回 ApiError）都建立在它之上，避免逻辑分叉。
+ */
+async function sendRequest(path: string, options?: ApiRequestOptions): Promise<TransportOutcome> {
   // 仅当有请求体时才设置 Content-Type: application/json，
   // 否则 Fastify 会因空 JSON body 报 400/415 错误。
   const hasBody = options?.body != null;
@@ -74,6 +126,7 @@ async function request<T>(path: string, options?: RequestInit & { timeout?: numb
   const sensitiveReadPaths = [
     '/export/all',
     '/sync/download',
+    '/sync/config',
     '/approvals/',
   ];
   const isSensitiveRead = sensitiveReadPaths.some(p =>
@@ -89,29 +142,98 @@ async function request<T>(path: string, options?: RequestInit & { timeout?: numb
   }
 
   try {
-    const res = await fetch(`${BASE}${path}`, {
-      ...options,
-      headers,
-      signal,
-    });
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({ error: { message: '网络错误' } }));
-      throw new Error(err.error?.message || `请求失败: ${res.status}`);
-    }
-    return res.json();
+    const res = await fetch(`${BASE}${path}`, { ...options, headers, signal });
+    return { kind: 'response', res };
   } catch (e: unknown) {
+    // P1-2 修复：区分主动取消（调用方 signal）与超时，避免误导性文案
     if (e instanceof Error && e.name === 'AbortError') {
-      // P1-2 修复：区分主动取消（调用方 signal）与超时，避免误导性文案
-      if (options?.signal?.aborted) throw e; // 调用方主动取消 → 原样抛出（组件卸载/用户停止）
-      if (controller.signal.aborted || timedOut) throw new Error('请求超时，请检查网络连接');
-      throw e;
+      if (options?.signal?.aborted) return { kind: 'aborted', cause: e };
+      if (controller.signal.aborted || timedOut) return { kind: 'timeout' };
     }
-    throw e;
+    return { kind: 'network', cause: e };
   } finally {
     clearTimeout(timeout);
     // P0 修复：请求结束移除 mergeSignals 注册的监听器，防内存泄漏
     if (options?.signal) cleanupMergedSignals(options.signal, controller.signal);
   }
+}
+
+/** 读取错误响应体：非 JSON / 空体时返回 null，由 fromHttpFailure 回退到状态码文案。 */
+async function readErrorBody(res: Response): Promise<unknown> {
+  try {
+    const text = await res.text();
+    if (!text) return null;
+    return JSON.parse(text) as unknown;
+  } catch {
+    return null;
+  }
+}
+
+function transportError(outcome: Exclude<TransportOutcome, { kind: 'response' }>): ApiError {
+  switch (outcome.kind) {
+    case 'aborted':
+      return fromTransportFailure(ApiErrorCode.Aborted, '请求已取消', outcome.cause);
+    case 'timeout':
+      return fromTransportFailure(ApiErrorCode.Timeout, TIMEOUT_MESSAGE);
+    case 'network':
+      return fromTransportFailure(
+        ApiErrorCode.NetworkError,
+        '网络连接失败，请检查网络后重试',
+        outcome.cause instanceof Error ? outcome.cause.message : String(outcome.cause),
+      );
+  }
+}
+
+async function request<T>(path: string, options?: ApiRequestOptions): Promise<T> {
+  const outcome = await sendRequest(path, options);
+  if (outcome.kind === 'response') {
+    const { res } = outcome;
+    if (!res.ok) throw new Error(extractErrorMessage(await readErrorBody(res)) ?? `请求失败: ${res.status}`);
+    return res.json() as Promise<T>;
+  }
+  if (outcome.kind === 'timeout') throw new Error(TIMEOUT_MESSAGE);
+  throw outcome.cause;
+}
+
+/**
+ * AEX-P1-017 统一契约入口：**永不 throw**，成功给 data，失败给结构化 ApiError。
+ * 调用点必须判别 `ok` —— 因此"空数据"与"请求失败"在类型层就是两件事，
+ * 从根上杜绝 `catch → []` 把错误伪装成空列表。
+ */
+export async function requestResult<T>(path: string, options?: ApiRequestOptions): Promise<ApiResult<T>> {
+  const outcome = await sendRequest(path, options);
+  if (outcome.kind !== 'response') return { ok: false, error: transportError(outcome) };
+  const { res } = outcome;
+  if (!res.ok) return { ok: false, error: fromHttpFailure(res.status, await readErrorBody(res)) };
+  let raw: string;
+  try {
+    raw = await res.text();
+  } catch (e: unknown) {
+    return { ok: false, error: fromTransportFailure(ApiErrorCode.ParseError, '响应读取失败', String(e)) };
+  }
+  if (!raw) {
+    return { ok: false, error: fromTransportFailure(ApiErrorCode.ParseError, '响应体为空（期望 JSON）') };
+  }
+  try {
+    return { ok: true, data: JSON.parse(raw) as T };
+  } catch {
+    // 代理返回 HTML 错误页 / 网关拦截 —— 必须暴露为错误，不能退化成空数据
+    return { ok: false, error: fromTransportFailure(ApiErrorCode.ParseError, '响应解析失败：返回内容不是合法 JSON') };
+  }
+}
+
+/** 无响应体端点（204）的统一契约入口；避免用 `undefined as T` 伪造成功。 */
+export async function requestResultVoid(path: string, options?: ApiRequestOptions): Promise<ApiResult<void>> {
+  const outcome = await sendRequest(path, options);
+  if (outcome.kind !== 'response') return { ok: false, error: transportError(outcome) };
+  const { res } = outcome;
+  if (!res.ok) return { ok: false, error: fromHttpFailure(res.status, await readErrorBody(res)) };
+  return { ok: true, data: undefined };
+}
+
+/** JSON POST 写请求的公共选项收敛（只做序列化，不解释响应）。 */
+function postJson(body: unknown, options?: ApiRequestOptions): ApiRequestOptions {
+  return { method: 'POST', body: JSON.stringify(body), ...options };
 }
 
 /** 合并两个 AbortSignal — 优先使用 AbortSignal.any()（现代浏览器/Electron 43+ 原生支持），
@@ -360,4 +482,59 @@ export const api = {
   updatePromptTemplate: (id: string, data: { name?: string; content?: string }) =>
     request<any>(`/knowledge/templates/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
   deletePromptTemplate: (id: string) => request<any>(`/knowledge/templates/${id}`, { method: 'DELETE' }),
+
+  /**
+   * AEX-P1-017 统一契约：以下方法返回 `ApiResult<T>`，**永不 throw**。
+   * 调用点必须判别 `ok` —— 空数据（`ok:true, data:[]`）与请求失败（`ok:false`）在类型层分开，
+   * 从根上杜绝 `catch → []` 把错误伪装成空列表。收敛范围：Toolbox / Terminal / MCP 导入 /
+   * Sync 断开 / 全量导入（原先均为页面内裸 fetch，绕过统一鉴权与超时）。
+   */
+  result: {
+    // ---- Toolbox ----
+    getToolsStatus: () => requestResult<ToolsStatus>('/toolbox/tools-status'),
+    encode: (data: ToolboxEncodePayload) => requestResult<ToolboxEncodeResult>('/toolbox/encode', postJson(data)),
+    utility: (data: { op: string; input: string }) => requestResult<ToolboxUtilityResult>('/toolbox/utility', postJson(data)),
+    convert: (data: { files: { name: string; data: string }[]; targetFormat: string; options: Record<string, unknown> }) =>
+      requestResult<ToolboxConvertResult>('/toolbox/convert', postJson(data)),
+    pdfCompress: (files: { name: string; data: string }[]) =>
+      requestResult<ToolboxPdfCompressResult>('/toolbox/pdf-compress', postJson({ files })),
+    unlockMusic: (file: { name: string; data: string }) =>
+      requestResult<ToolboxUnlockResult>('/toolbox/unlock-music', postJson({ file })),
+    pdfOperate: (data: { operation?: string; files: { name: string; data: string }[]; text: string }) =>
+      requestResult<ToolboxFileResult>('/toolbox/pdf-operate', postJson(data)),
+    pdfRead: (data: { op?: string; file: { name: string; data: string } }) =>
+      requestResult<ToolboxReadResult>('/toolbox/pdf-read', postJson(data)),
+    pdfToDocx: (file: { name: string; data: string }) =>
+      requestResult<ToolboxPdfToDocxResult>('/toolbox/pdf-to-docx', postJson({ file })),
+    videoExtract: (data: { files: { name: string; data: string }[]; targetFormat: string }) =>
+      requestResult<ToolboxConvertResult>('/toolbox/video-extract', postJson(data)),
+    youtubeDownload: (data: { url: string; format: string; quality: number }) =>
+      requestResult<ToolboxYoutubeResult>('/toolbox/youtube-download', postJson(data)),
+
+    // ---- Terminal ----
+    getTerminalHistory: () => requestResult<TerminalEntry[]>('/terminal/history'),
+    executeTerminal: (command: string) =>
+      requestResult<TerminalExecuteResult>('/terminal/execute', postJson({ command })),
+
+    // ---- MCP ----
+    importMcpServers: () => requestResult<McpImportResult>('/mcp/import', postJson({})),
+
+    // ---- Sync（断开无需读响应体） ----
+    disconnectSync: () => requestResultVoid('/sync/disconnect', postJson({})),
+
+    // ---- 数据层全量导入 ----
+    importAll: (backendPayload: unknown) => requestResult<ImportAllResult>('/import/all', postJson(backendPayload)),
+
+    // ---- 列表页读接口（原 catch → [] 把失败伪装成空列表的四处，收敛到统一契约） ----
+    providers: () => requestResult<ProviderSummary[]>('/providers'),
+    defaultProviders: () => requestResult<DefaultProviders>('/settings/default-providers'),
+    wikiPages: () => requestResult<WikiPageRow[]>('/knowledge/wiki'),
+    memories: (type?: string) =>
+      requestResult<MemoryRow[]>(type ? `/memory?type=${encodeURIComponent(type)}` : '/memory'),
+    searchMemories: (q: string) =>
+      requestResult<MemoryRow[]>(`/memory/search?q=${encodeURIComponent(q)}`),
+
+    // ---- 云同步（/sync/config 属敏感读路径，sendRequest 会自动附 Authorization） ----
+    syncConfig: () => requestResult<SyncConfigInfo>('/sync/config'),
+  },
 };

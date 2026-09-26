@@ -6,6 +6,7 @@ import { eq, desc, gte } from 'drizzle-orm';
 import { cpus, totalmem, freemem, loadavg, uptime, networkInterfaces, hostname } from 'node:os';
 import { decrypt as decryptKey } from '../../lib/crypto.js';
 import { isSafeFetchUrl } from '../../lib/safe-fetch.js';
+import { logger } from '../../lib/logger.js';
 
 // CPU 使用率采样：用 os.cpus() 的 times 差值计算系统级 CPU 使用率
 // 之前用 process.cpuUsage() 只测量 Node.js 进程自身，与任务管理器不一致
@@ -196,7 +197,11 @@ export function registerMonitoringRoutes(app: FastifyInstance, config: BackendCo
         totalTokens += tokens;
         if (msg.createdAt >= todayStart) todayTokens += tokens;
         if (msg.createdAt >= monthAgo) monthTokens += tokens;
-      } catch (_e: unknown) { /* ignore - intentional */ }
+      } catch (e: unknown) {
+        // AEX-P2-004 分类：intentional fallback —— toolResults 是可选的用量 JSON，
+        // 单条脏数据只少计该条 token，不影响统计接口其余部分返回。
+        logger.debug({ event: 'monitoring.token_usage_unparsable', err: e, messageId: msg.id }, 'toolResults 解析失败，跳过该条用量统计');
+      }
     }
 
     return {

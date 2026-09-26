@@ -1,23 +1,18 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { motion } from 'framer-motion';
-import { Terminal as TerminalIcon, Play, Trash2, Clock, ChevronRight } from 'lucide-react';
+import { Terminal as TerminalIcon, Play, Trash2, Clock, ChevronRight, AlertCircle } from 'lucide-react';
 import { PageHeader } from '../components/PageHeader';
-import { authHeaders } from '../api/client';
-
-interface CommandEntry {
-  id: string;
-  command: string;
-  output: string;
-  timestamp: string;
-  duration: number;
-  success: boolean;
-  source?: 'terminal' | 'agent';
-}
+import { api } from '../api/client';
+import type { TerminalEntry as CommandEntry } from '../api/types';
 
 export function Terminal() {
   const [input, setInput] = useState('');
   const [entries, setEntries] = useState<CommandEntry[]>([]);
   const [executing, setExecuting] = useState(false);
+  // AEX-P1-017：区分 loading / success-empty / error —— 原先 `catch { 忽略 }` 让
+  // "后端挂了"与"还没有任何命令"呈现同一个空屏，用户无从判断。
+  const [historyLoading, setHistoryLoading] = useState(true);
+  const [historyError, setHistoryError] = useState<string | null>(null);
   const [historyIndex, setHistoryIndex] = useState(-1);
   const [commandHistory, setCommandHistory] = useState<string[]>([]);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -35,22 +30,22 @@ export function Terminal() {
 
   // 轮询共享命令历史（Agent 执行的命令也会显示在这里）
   useEffect(() => {
+    let disposed = false;
     const poll = async () => {
-      try {
-        const res = await fetch('/api/terminal/history', {
-          headers: { 'X-Requested-With': 'XMLHttpRequest' },
-        });
-        if (res.ok) {
-          const data = await res.json();
-          if (Array.isArray(data)) {
-            setEntries(data);
-          }
-        }
-      } catch { /* 忽略 */ }
+      const res = await api.result.getTerminalHistory();
+      if (disposed) return;
+      if (res.ok) {
+        // ok:true + data:[] 是"成功但无记录"，与 ok:false 是两件事
+        setEntries(res.data);
+        setHistoryError(null);
+      } else if (res.error.code !== 'ABORTED') {
+        setHistoryError(res.error.message);
+      }
+      setHistoryLoading(false);
     };
-    poll();
+    void poll();
     const interval = setInterval(poll, 2000);
-    return () => clearInterval(interval);
+    return () => { disposed = true; clearInterval(interval); };
   }, []);
 
   const execute = useCallback(async (cmd: string) => {
@@ -67,28 +62,22 @@ export function Terminal() {
       timestamp: new Date().toLocaleTimeString(), duration: 0, success: true, source: 'terminal',
     }]);
 
-    try {
-      const res = await fetch('/api/terminal/execute', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest', ...authHeaders() },
-        body: JSON.stringify({ command: cmd }),
-      });
-      const data = await res.json();
-      const duration = Date.now() - startTime;
-      const success = res.ok && !data.output?.startsWith('错误:') && !data.output?.startsWith('安全限制');
-
+    const res = await api.result.executeTerminal(cmd);
+    const duration = Date.now() - startTime;
+    if (res.ok) {
+      const output = res.data.output ?? '';
+      const success = !output.startsWith('错误:') && !output.startsWith('安全限制');
       setEntries(prev => prev.map(e =>
-        e.id === entryId ? { ...e, output: data.output || '(无输出)', duration, success } : e
+        e.id === entryId ? { ...e, output: output || '(无输出)', duration, success } : e
       ));
       setCommandHistory(prev => [cmd, ...prev].slice(0, 50));
-    } catch (e: unknown) {
+    } else {
       setEntries(prev => prev.map(e =>
-        e.id === entryId ? { ...e, output: `错误: ${e instanceof Error ? e.message : '请求失败'}`, duration: Date.now() - startTime, success: false } : e
+        e.id === entryId ? { ...e, output: `错误: ${res.error.message}`, duration, success: false } : e
       ));
-    } finally {
-      setExecuting(false);
-      inputRef.current?.focus();
     }
+    setExecuting(false);
+    inputRef.current?.focus();
   }, [executing]);
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
@@ -129,11 +118,25 @@ export function Terminal() {
       {/* 终端输出区域 — 使用 glass-card 类获得 Apple Glass 效果 */}
       <div ref={outputRef} className="glass-card" style={{ flex: 1, overflowY: 'auto', padding: 'var(--space-4)', marginBottom: 'var(--space-4)', fontFamily: 'var(--font-mono)', fontSize: 'var(--font-sm)', lineHeight: 1.6 }}>
         {entries.length === 0 ? (
-          <div style={{ color: 'var(--text-tertiary)', textAlign: 'center', paddingTop: '30%' }}>
-            <TerminalIcon size={32} style={{ opacity: 0.3, margin: '0 auto 12px', display: 'block' }} />
-            <div style={{ fontSize: 'var(--font-base)', marginBottom: 8 }}>输入命令开始</div>
-            <div style={{ fontSize: 'var(--font-xs)' }}>Agent 执行的命令也会显示在这里</div>
-          </div>
+          historyLoading ? (
+            <div style={{ color: 'var(--text-tertiary)', textAlign: 'center', paddingTop: '30%', fontSize: 'var(--font-sm)' }}>
+              正在加载命令历史…
+            </div>
+          ) : historyError ? (
+            // AEX-P1-017：轮询失败显式呈现（可重试语义由 ApiError.retryable 承载），
+            // 不再与"暂无记录"共用同一个空态。
+            <div style={{ color: 'var(--color-danger)', textAlign: 'center', paddingTop: '30%' }}>
+              <AlertCircle size={32} style={{ opacity: 0.5, margin: '0 auto 12px', display: 'block' }} />
+              <div style={{ fontSize: 'var(--font-base)', marginBottom: 8 }}>命令历史加载失败</div>
+              <div style={{ fontSize: 'var(--font-xs)' }}>{historyError}（2 秒后自动重试，也可直接执行命令）</div>
+            </div>
+          ) : (
+            <div style={{ color: 'var(--text-tertiary)', textAlign: 'center', paddingTop: '30%' }}>
+              <TerminalIcon size={32} style={{ opacity: 0.3, margin: '0 auto 12px', display: 'block' }} />
+              <div style={{ fontSize: 'var(--font-base)', marginBottom: 8 }}>输入命令开始</div>
+              <div style={{ fontSize: 'var(--font-xs)' }}>Agent 执行的命令也会显示在这里</div>
+            </div>
+          )
         ) : (
           entries.map(entry => (
             <motion.div key={entry.id} initial={{ opacity: 0, y: 4 }} animate={{ opacity: 1, y: 0 }}

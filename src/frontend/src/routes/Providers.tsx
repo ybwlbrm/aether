@@ -29,17 +29,26 @@ const [testingId, setTestingId] = useState<string | null>(null);
   ];
   const capabilityLabels: Record<string, string> = { text: '文本', image: '图片', video: '视频', audio: '音频' };
 
+  // AEX-P1-017：区分 loading / success-empty / error。
+  // 原先 `catch { setProviders([]) }` 把"后端没起来"渲染成"你还没有配置任何 Provider"——
+  // 用户会以为是自己操作的问题，排查方向完全跑偏。空列表现在是**加载成功后的合法结果**。
+  const [loadState, setLoadState] = useState<'loading' | 'success' | 'error'>('loading');
+  const [loadError, setLoadError] = useState<string | null>(null);
   const load = async () => {
-    try {
-      const data = await api.getProviders();
-      setProviders(Array.isArray(data) ? data : []);
-    } catch { setProviders([]); }
-    try {
-      const dp = await api.getDefaultProviders();
-      setDefaultProviders(dp || {});
-    } catch (_e: unknown) { /* ignore - intentional */ }
+    setLoadState('loading');
+    const res = await api.result.providers();
+    if (res.ok) {
+      setProviders(res.data);
+      setLoadError(null);
+      setLoadState('success');
+    } else {
+      setLoadError(res.error.message);
+      setLoadState('error');
+    }
+    const dp = await api.result.defaultProviders();
+    if (dp.ok) setDefaultProviders(dp.data);
   };
-  useEffect(() => { load(); }, []);
+  useEffect(() => { void load(); }, []);
 
   const handleSetDefault = async (capability: string, providerId: string) => {
     try {
@@ -147,6 +156,24 @@ const [testingId, setTestingId] = useState<string | null>(null);
     <div className="min-h-screen" style={{ background: 'var(--bg-base)', backgroundImage: 'var(--bg-gradient)' }}>
       <div style={{ maxWidth: '1100px', margin: '0 auto', padding: '0 24px' }}>
         <PageHeader title="AI Providers" description="管理 AI 模型连接" icon={<Cable size={22} />} color="var(--color-accent)" action={<button className="btn btn-primary" onClick={() => setShowForm(!showForm)}>{showForm ? <X size={18} /> : <Plus size={18} />}{showForm ? '关闭' : '添加 Provider'}</button>} />
+
+        {/* AEX-P1-017：loading / error 显式呈现。error 时提供重试入口（ApiError 承载可重试语义）。 */}
+        {loadState === 'error' && (
+          <div className="glass-card mb-6" style={{ borderColor: 'var(--color-danger)' }}>
+            <div style={{ color: 'var(--color-danger)', fontSize: 13, marginBottom: 12 }}>
+              ❌ Provider 列表加载失败：{loadError}
+            </div>
+            <button className="btn btn-primary" onClick={() => { void load(); }}>重试</button>
+          </div>
+        )}
+        {loadState === 'loading' && (
+          <div className="glass-card mb-6" style={{ color: 'var(--text-tertiary)', fontSize: 13 }}>正在加载 Provider 列表…</div>
+        )}
+        {loadState === 'success' && providers.length === 0 && (
+          <div className="glass-card mb-6" style={{ color: 'var(--text-tertiary)', fontSize: 13, textAlign: 'center', padding: '24px' }}>
+            还没有配置任何 Provider —— 点击右上角「添加 Provider」开始。
+          </div>
+        )}
 
         {showForm && (
           <motion.div className="glass-card mb-6" initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }}>

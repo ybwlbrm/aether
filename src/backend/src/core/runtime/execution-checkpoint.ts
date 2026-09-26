@@ -246,6 +246,37 @@ export function deserializeCheckpoint(
   return checkpoint
 }
 
+// ============================================================
+// 进程内 checkpoint 仓库（Phase 4：Loop 每轮写入，本轮不做持久化）
+// ============================================================
+
+/** 仓库容量上限：按 runId 先进先出淘汰，避免长驻进程内存无界增长。 */
+const MAX_TRACKED_CHECKPOINTS = 200
+
+const executionCheckpoints = new Map<string, ExecutionCheckpoint>()
+
+/** 记录（覆盖）某个 runId 的最新 checkpoint。 */
+export function recordExecutionCheckpoint(checkpoint: ExecutionCheckpoint): void {
+  const validated = parseCheckpoint(checkpoint)
+  executionCheckpoints.delete(validated.runId)
+  while (executionCheckpoints.size >= MAX_TRACKED_CHECKPOINTS) {
+    const oldest = executionCheckpoints.keys().next()
+    if (oldest.done === true) break
+    executionCheckpoints.delete(oldest.value)
+  }
+  executionCheckpoints.set(validated.runId, validated)
+}
+
+/** 读取某个 runId 的最新 checkpoint（供后续 Retry 恢复）。 */
+export function getExecutionCheckpoint(runId: string): ExecutionCheckpoint | undefined {
+  return executionCheckpoints.get(runId)
+}
+
+/** 清空仓库（测试隔离用）。 */
+export function clearExecutionCheckpoints(): void {
+  executionCheckpoints.clear()
+}
+
 export function mergeStepResult(
   checkpoint: ExecutionCheckpoint,
   toolResult: ExecutionStepResult,

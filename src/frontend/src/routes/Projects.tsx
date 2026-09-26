@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+﻿import { useEffect, useState } from 'react';
 import { motion } from 'framer-motion';
 import { PageHeader } from '../components/PageHeader';
 import { api } from '../api/client';
@@ -93,7 +93,7 @@ export function Projects() {
 
   return (
     <div className="min-h-screen" style={{ background: 'var(--bg-base)', backgroundImage: 'var(--bg-gradient)' }}>
-    <div style={{ maxWidth: '1100px', margin: '0 auto', padding: '0 24px' }}>
+    <div style={{ maxWidth: 'var(--content-standard)', margin: '0 auto', padding: '0 24px' }}>
       <PageHeader title="Projects" description="项目管理 · URL / 脚本 / 命令执行" icon={<FolderKanban size={22} />} color="var(--color-danger)"
         action={<button className="btn btn-primary" onClick={() => setShowForm(!showForm)}><Plus size={18} /> New Project</button>}
       />
@@ -155,7 +155,7 @@ export function Projects() {
       <div className="glass-card">
         {projects.map((p, i) => (
           <motion.div key={p.id} className="list-row gap-4"
-            initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: i * 0.05 }}>
+            initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: Math.min(i * 0.05, 0.2) }}>
             <div className="flex items-center justify-center flex-shrink-0"
               style={{ width: 40, height: 40, borderRadius: 'var(--radius-md)', background: typeBg(p.type), color: typeColor(p.type) }}>
               {typeIcon(p.type)}

@@ -11,6 +11,8 @@
 
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import {
   runExecutionLoop,
   normalExecutionBudget,
@@ -20,11 +22,25 @@ import {
   finalizeOnBudgetExceeded,
   budgetFromAgentLimits,
   type ExecutionLoopDeps,
+  type ExecutionLoopResult,
   type ExecutionTool,
-} from './execution-loop.js';
+} from './execution-loop.js'
+import type { ExecutionCheckpoint } from './execution-checkpoint.js'
 import type { ModelRequest, ModelResponse, ModelRuntime } from '../models/model-runtime.js'
 import { ToolError } from '../errors/index.js'
 import type { StreamChunk } from '@pacc/shared'
+
+/** Loop 结果上的 checkpoint 附加字段（additive）：类型化读取，避免 any */
+type LoopResultWithCheckpoint = ExecutionLoopResult & { readonly checkpoint?: ExecutionCheckpoint }
+
+function checkpointOf(result: ExecutionLoopResult): ExecutionCheckpoint | undefined {
+  return (result as LoopResultWithCheckpoint).checkpoint
+}
+
+/** 显式可重试错误：AEX-P0-005 起"未知错误"不再默认重试 */
+function retryableFailure(message: string): Error {
+  return Object.assign(new Error(message), { retryable: true })
+}
 
 /** 可编程 ModelRuntime mock：按序号返回预设响应 */
 function mockModel(responses: Array<Partial<ModelResponse>>): ModelRuntime & { calls: number } {
@@ -540,7 +556,7 @@ describe('core/runtime/execution-loop', () => {
     const model: ModelRuntime = {
       async complete(): Promise<ModelResponse> {
         modelCalls += 1
-        if (modelCalls <= 8) throw new Error('temporary model failure')
+        if (modelCalls <= 8) throw retryableFailure('temporary model failure')
         return {
           id: 'recovered',
           provider: 'mock',
@@ -583,7 +599,7 @@ describe('core/runtime/execution-loop', () => {
     const model: ModelRuntime = {
       async complete(): Promise<ModelResponse> {
         modelCalls += 1
-        throw new Error('permanent task failure')
+        throw retryableFailure('permanent task failure')
       },
       async *stream(): AsyncIterable<StreamChunk> { return },
     }
@@ -605,7 +621,7 @@ describe('core/runtime/execution-loop', () => {
     assert.equal(modelCalls, 9)
   })
 
-  it('Tool Retry：可重试工具耗尽后 Task Retry，成功工具通过 checkpoint 不重复执行', async () => {
+  it('Tool Retry：可重试工具耗尽 → 终态上抛（AEX-P0-005 不再升级为 Task Retry），成功工具仍不重复执行', async () => {
     let modelCalls = 0
     let successfulToolCalls = 0
     let flakyToolCalls = 0
@@ -659,6 +675,8 @@ describe('core/runtime/execution-loop', () => {
           retryable: true,
         })
       }),
+      // AEX-P0-006：声明副作用安全（可重放）才允许工具层自动重试
+      classifyToolSideEffect: () => 'idempotent',
     }, [], {
       loop: false,
       retry: {
@@ -669,11 +687,14 @@ describe('core/runtime/execution-loop', () => {
       },
     })
 
-    assert.equal(result.state, 'completed')
-    assert.equal(modelCalls, 3)
+    // AEX-P0-005：工具层重试耗尽是终态信号（RetryExhaustedError.retryable=false），
+    // 任务层不再从头重启；成功过的工具仍由 checkpoint 保证不重复执行
+    assert.equal(result.state, 'failed')
+    assert.equal(result.retryExhausted, true)
+    assert.equal(modelCalls, 1)
     assert.equal(successfulToolCalls, 1)
     assert.equal(flakyToolCalls, 4)
-    assert.equal(result.turnsUsed, 2)
+    assert.equal(result.turnsUsed, 1)
   })
 
   it('Tool Retry：不可重试参数错误不自动重试，错误交给 Agent 处理', async () => {
@@ -725,7 +746,7 @@ describe('core/runtime/execution-loop', () => {
     const model: ModelRuntime = {
       async complete(): Promise<ModelResponse> {
         modelCalls += 1
-        if (modelCalls === 1) throw new Error('retry with context')
+        if (modelCalls === 1) throw retryableFailure('retry with context')
         return {
           id: 'context-2',
           provider: 'mock',
@@ -758,7 +779,7 @@ describe('core/runtime/execution-loop', () => {
   it('Retry 等待中 Stop 立即把 Loop 置为 cancelled', async () => {
     const model: ModelRuntime = {
       async complete(): Promise<ModelResponse> {
-        throw new Error('retryable failure')
+        throw retryableFailure('retryable failure')
       },
       async *stream(): AsyncIterable<StreamChunk> { return },
     }
@@ -846,4 +867,280 @@ describe('core/runtime/execution-loop', () => {
     assert.deepEqual(executed, ['search'], '流式 tool-call 应聚合为工具调用并执行');
     assert.equal(result.toolCallCount, 1);
   });
+
+  // ============ Phase 4：Loop 控制接线（缺省 evaluator / verdict 事件 / checkpoint） ============
+
+  it('P4 缺省判定: 有文本但目标未完成（无产出证据）→ continue 而非立即完成', async () => {
+    // Given
+    const model = mockModel([
+      { content: '我先梳理思路', finishReason: 'stop' },
+      { toolCalls: [toolCall('collect_data')], finishReason: 'tool_calls' },
+      { content: '结论：已完成调研', finishReason: 'stop' },
+    ])
+
+    // When
+    const result = await runExecutionLoop(
+      depsFor(model),
+      [{ role: 'user', content: '调研并给出结论' }],
+      { loop: true },
+    )
+
+    // Then
+    assert.equal(result.turnsUsed, 3, '仅有进度文本、无完成证据 → 必须继续下一轮（不再"有文本即完成"）')
+    assert.equal(result.state, 'completed')
+    assert.equal(result.content, '结论：已完成调研')
+  })
+
+  it('P4 缺省判定: 无文本但已完成工具步骤（目标已满足）→ complete', async () => {
+    // Given
+    const model = mockModel([
+      { toolCalls: [toolCall('write_report')], finishReason: 'tool_calls' },
+      { content: '', finishReason: 'stop' },
+    ])
+
+    // When
+    const result = await runExecutionLoop(
+      depsFor(model),
+      [{ role: 'user', content: '生成报告' }],
+      { loop: true },
+    )
+
+    // Then
+    assert.equal(result.state, 'completed')
+    assert.equal(result.turnsUsed, 2)
+    assert.equal(result.content, '', '目标已由工具产出满足 → 无文本也应判完成')
+  })
+
+  it('P4 needs_correction: 继续下一轮并把纠正指令注入消息历史', async () => {
+    // Given
+    const model = mockModel([
+      { toolCalls: [toolCall('write_file')], finishReason: 'tool_calls' },
+      { content: '已经写好了', finishReason: 'stop' },
+    ])
+    const requests: Array<Array<Record<string, unknown>>> = []
+    const events: Array<{ type: string; payload: Record<string, unknown> }> = []
+    const budget = { ...loopExecutionBudget(), maxTurns: 3, maxToolCalls: 0, maxTimeMs: 0, maxTokens: 0, maxCostCny: 0 }
+
+    // When
+    const result = await runExecutionLoop({
+      ...depsFor(model, async () => { throw new Error('磁盘只读') }),
+      buildRequest: (messages) => {
+        requests.push([...messages])
+        return { provider: 'mock', model: 'm', messages }
+      },
+      onEvent: (type, payload) => events.push({ type, payload }),
+    }, [{ role: 'user', content: '写入文件' }], { loop: true, budget })
+
+    // Then
+    const lastRequest = requests.at(-1) ?? []
+    assert.ok(
+      lastRequest.some(message => typeof message.content === 'string' && message.content.includes('[task_correction]')),
+      'needs_correction 必须把纠正指令注入下一轮消息历史',
+    )
+    assert.ok(
+      events.some(event => event.type === 'execution.continuing' && event.payload.verdict === 'needs_correction'),
+      '继续事件必须携带 needs_correction verdict',
+    )
+    assert.notEqual(result.state, 'completed', '工具失败后不得伪造完成')
+  })
+
+  it('P4 verifying 事件: payload 携带 evaluator verdict', async () => {
+    // Given
+    const events: Array<{ type: string; payload: Record<string, unknown> }> = []
+    const model = mockModel([
+      { content: '进展汇报', finishReason: 'stop' },
+      { toolCalls: [toolCall('collect')], finishReason: 'tool_calls' },
+      { content: '', finishReason: 'stop' },
+    ])
+
+    // When
+    const result = await runExecutionLoop({
+      ...depsFor(model),
+      onEvent: (type, payload) => events.push({ type, payload }),
+    }, [{ role: 'user', content: '完成目标' }], { loop: true })
+
+    // Then
+    const verdicts = events
+      .filter(event => event.type === 'execution.verifying')
+      .map(event => event.payload.verdict)
+    assert.deepEqual(verdicts, ['continue', 'complete'], '每次进入 verifying 都要补发 evaluator verdict')
+    assert.equal(result.state, 'completed')
+  })
+
+  it('P4 显式钩子只能收紧不能放宽：返回 true 仍需 evaluator 确认目标满足', async () => {
+    // Given: 只有文本、没有任何产出证据
+    const model = mockModel([{ content: '好的', finishReason: 'stop' }])
+    const budget = { ...loopExecutionBudget(), maxTurns: 3, maxToolCalls: 0, maxTimeMs: 0, maxTokens: 0, maxCostCny: 0 }
+
+    // When
+    const result = await runExecutionLoop(
+      { ...depsFor(model), isTaskComplete: () => true },
+      [{ role: 'user', content: '目标' }],
+      { loop: true, budget },
+    )
+
+    // Then: 钩子不能把"有文本"升级为完成
+    assert.equal(result.state, 'budget_exceeded')
+    assert.equal(result.turnsUsed, 3, '钩子返回 true 也必须经过 evaluator（无产出证据不得判完成）')
+  })
+
+  it('P4 显式钩子只能收紧：返回 false 时即使已有产出证据也继续下一轮', async () => {
+    // Given: 工具已产出结果（evaluator 会判 complete），但钩子要求继续
+    const model = mockModel([
+      { toolCalls: [toolCall('write_report')], finishReason: 'tool_calls' },
+      { content: '报告已生成', finishReason: 'stop' },
+    ])
+    const budget = { ...loopExecutionBudget(), maxTurns: 3, maxToolCalls: 0, maxTimeMs: 0, maxTokens: 0, maxCostCny: 0 }
+    const events: Array<{ type: string; payload: Record<string, unknown> }> = []
+
+    // When
+    const result = await runExecutionLoop({
+      ...depsFor(model),
+      isTaskComplete: () => false,
+      onEvent: (type, payload) => events.push({ type, payload }),
+    }, [{ role: 'user', content: '生成报告' }], { loop: true, budget })
+
+    // Then
+    assert.equal(result.state, 'budget_exceeded')
+    assert.equal(result.turnsUsed, 3, '钩子返回 false → 强制继续，不被 evaluator 的 complete 覆盖')
+    assert.ok(
+      events.some(event => event.type === 'execution.verifying' && event.payload.reason === '调用方显式判定任务未完成'),
+      'verifying 事件应反映钩子收紧结果',
+    )
+  })
+
+  it('P4 显式钩子返回 true 且确有产出证据 → 与缺省 evaluator 一致判完成', async () => {
+    // Given
+    const model = mockModel([
+      { toolCalls: [toolCall('write_report')], finishReason: 'tool_calls' },
+      { content: '报告已生成', finishReason: 'stop' },
+    ])
+
+    // When
+    const result = await runExecutionLoop(
+      { ...depsFor(model), isTaskComplete: () => true },
+      [{ role: 'user', content: '生成报告' }],
+      { loop: true },
+    )
+
+    // Then
+    assert.equal(result.state, 'completed')
+    assert.equal(result.turnsUsed, 2, '钩子与 evaluator 一致时仍按证据判完成')
+  })
+
+  it('P4 checkpoint: 预算耗尽时生成并随结果返回（供 Retry 恢复）', async () => {
+    // Given
+    const model = mockModel([{ content: '仍在处理', finishReason: 'stop' }])
+    const budget = { ...loopExecutionBudget(), maxTurns: 2, maxToolCalls: 0, maxTimeMs: 0, maxTokens: 0, maxCostCny: 0 }
+
+    // When
+    const result = await runExecutionLoop(
+      depsFor(model),
+      [{ role: 'user', content: '完成报告' }],
+      { loop: true, budget, runId: 'run-budget-checkpoint' },
+    )
+
+    // Then
+    const checkpoint = checkpointOf(result)
+    assert.ok(checkpoint, '预算耗尽时必须返回最新 checkpoint')
+    assert.equal(result.state, 'budget_exceeded')
+    assert.equal(checkpoint?.runId, 'run-budget-checkpoint')
+    assert.equal(checkpoint?.turn, 2)
+    assert.equal(checkpoint?.currentObjective, '完成报告')
+    assert.deepEqual(checkpoint?.pendingSteps, [])
+  })
+
+  it('P4 checkpoint: 取消时生成并随结果返回（供 Retry 恢复）', async () => {
+    // Given
+    const controller = new AbortController()
+    const model = mockModel([{ toolCalls: [toolCall('read_file')], finishReason: 'tool_calls' }])
+    const deps = depsFor(model, async (tool) => {
+      controller.abort()
+      return `ok:${tool.name}`
+    })
+
+    // When
+    const result = await runExecutionLoop(
+      deps,
+      [{ role: 'user', content: '读取文件' }],
+      { loop: true, signal: controller.signal, runId: 'run-cancel-checkpoint' },
+    )
+
+    // Then
+    const checkpoint = checkpointOf(result)
+    assert.equal(result.state, 'cancelled')
+    assert.ok(checkpoint, '取消时必须返回最新 checkpoint')
+    assert.equal(checkpoint?.turn, 1)
+    assert.deepEqual(checkpoint?.completedSteps, ['read_file'])
+    assert.equal(checkpoint?.toolResults.length, 1)
+    assert.equal(checkpoint?.lastError, null)
+  })
+
+  it('P4 预算优先: 成本预算耗尽时即使目标已满足也不判完成', async () => {
+    // Given
+    const usage = { inputTokens: 600_000, outputTokens: 400_000, totalTokens: 1_000_000 }
+    const model = mockModel([
+      { toolCalls: [toolCall('prepare')], finishReason: 'tool_calls', usage },
+      { content: '结论：已完成', finishReason: 'stop', usage },
+    ])
+    const budget = { ...loopExecutionBudget(), maxTurns: 0, maxToolCalls: 0, maxTimeMs: 0, maxTokens: 0, maxCostCny: 1.5 }
+
+    // When
+    const result = await runExecutionLoop(
+      depsFor(model),
+      [{ role: 'user', content: '完成分析' }],
+      { loop: true, budget },
+    )
+
+    // Then
+    assert.equal(result.state, 'budget_exceeded')
+    assert.equal(result.budgetExceeded, 'cost')
+    assert.ok(result.content.includes('费用预算耗尽'))
+  })
+
+  // ============ AEX-P0-001 生产接线守卫：wrapper 不得旁路完成判定 ============
+
+  it('AEX-P0-006: 未声明副作用分级的工具（缺省 unknown）不自动重试', async () => {
+    // Given: 可重试的工具错误，但调用方未声明 sideEffectClass
+    let toolCalls = 0
+    const model = mockModel([
+      { toolCalls: [toolCall('side_effect_tool')], finishReason: 'tool_calls' },
+      { content: '工具失败已上报', finishReason: 'stop' },
+    ])
+
+    // When
+    const result = await runExecutionLoop({
+      ...depsFor(model, async () => {
+        toolCalls += 1
+        throw new ToolError('temporary failure', {
+          toolName: 'side_effect_tool',
+          code: 'NETWORK_ERROR',
+          retryable: true,
+        })
+      }),
+    }, [], { loop: false })
+
+    // Then: 错误交给下一轮模型处理，工具不被自动重放
+    assert.equal(toolCalls, 1, 'unknown 副作用分级不得自动重试（防重复副作用）')
+    assert.equal(result.state, 'completed')
+    assert.equal(result.content, '工具失败已上报')
+  })
+
+  it('AEX-P0-001: 三个生产 wrapper 不再向 runExecutionLoop 注入内容型完成判据', () => {
+    // 守卫针对已编译产物：任何 wrapper 重新注入 `isTaskComplete:` 属性都会失败
+    const compiledModules = [
+      '../../modules/conversations/tool-loop.js',
+      '../../modules/agents/tool-loop.js',
+      '../../modules/sync/command-processor.js',
+    ]
+
+    for (const relativePath of compiledModules) {
+      const absolutePath = fileURLToPath(new URL(relativePath, import.meta.url))
+      const source = readFileSync(absolutePath, 'utf8')
+      assert.ok(
+        !source.includes('isTaskComplete:'),
+        `${relativePath} 不得注入内容型完成判据（"有文本≠任务完成"，判定必须走 evaluateTaskCompletion）`,
+      )
+    }
+  })
 });

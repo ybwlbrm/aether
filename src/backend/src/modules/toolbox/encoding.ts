@@ -8,7 +8,7 @@ export function registerEncodingRoutes(app: FastifyInstance, config: BackendConf
 }
 
 /** Utility 工具操作（Base64、URL、时间戳、颜色、GBK-UTF8） */
-export async function utilityOp(op: string, input?: string, options?: any): Promise<{ success: boolean; result: string }> {
+export async function utilityOp(op: string, input?: string, options?: Record<string, unknown>): Promise<{ success: boolean; result: string }> {
   switch (op) {
     case 'base64-encode': return { success: true, result: Buffer.from(input || '').toString('base64') };
     case 'base64-decode': return { success: true, result: Buffer.from(input || '', 'base64').toString('utf-8') };
@@ -51,7 +51,7 @@ export async function utilityOp(op: string, input?: string, options?: any): Prom
     case 'gbk-utf8': {
       // 输入按二进制字节读取，按 GBK 解码为 UTF-8 文本
       const iconvModule = await import('iconv-lite');
-      const iconv = (iconvModule as any).default ?? iconvModule;
+      const iconv = (iconvModule as unknown as { default?: typeof iconvModule }).default ?? iconvModule as unknown as typeof iconvModule;
       const raw = Buffer.from(input || '');
       return { success: true, result: iconv.decode(raw, 'gbk') };
     }
@@ -63,7 +63,7 @@ export async function utilityOp(op: string, input?: string, options?: any): Prom
 /** 编码转换核心逻辑（文本↔编码 双向互转 / base64 / 图片转base64） */
 export async function encodeOp(op: string, input: string, encoding: string, format: string): Promise<{ success: boolean; result: string }> {
   const iconvModule = await import('iconv-lite');
-  const iconv = (iconvModule as any).default ?? iconvModule;
+  const iconv = (iconvModule as unknown as { default?: typeof iconvModule }).default ?? iconvModule as unknown as typeof iconvModule;
   // 将编码名映射到 iconv-lite 支持的名字
   const encMap: Record<string, string> = { utf8: 'utf8', utf8bom: 'utf8', gbk: 'gbk', big5: 'big5', gb18030: 'gb18030', latin1: 'latin1', unicode: 'utf16le' };
   const enc = encMap[encoding] || 'utf8';

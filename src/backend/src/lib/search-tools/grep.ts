@@ -96,7 +96,10 @@ export function executeGrep(
             if (matches.length >= limit) { truncated = true; return; }
           }
         }
-      } catch { /* 读取失败（权限/编码），跳过 */ }
+      } catch {
+        // AEX-P2-004 分类：intentional fallback —— 单个文件不可读（权限/编码）时跳过该文件，
+        // grep 仍返回其余文件的匹配结果。
+      }
     };
 
     // 根路径本身是文件时，只搜该文件

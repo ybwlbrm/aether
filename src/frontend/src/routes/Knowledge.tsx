@@ -66,41 +66,82 @@ const tabs = [
   { id: 'memory' as TabType, label: '记忆', icon: <Brain size={20} />, color: '#22d3ee' },
 ];
 
+interface LocalCache {
+  bookmarks: Bookmark[];
+  notes: Note[];
+  wikiPages: WikiPage[];
+  /** 损坏的缓存 key；非 null 时 UI 必须提示"数据被重置"，不能装作"本来就没有数据" */
+  corruptKeys: string[];
+}
+
+/**
+ * AEX-P1-017：本地缓存读取的单一来源。
+ * 原先是 4 份各自 `catch → []` 的复制粘贴（3 个 useState 惰性初始化器 + 1 个 loadFromStorage），
+ * 损坏时全部静默降级为空列表。现在损坏原因被记录并上屏。
+ */
+function readLocalCache(): LocalCache {
+  const read = <T,>(key: string): { rows: T[]; corrupt: boolean } => {
+    try {
+      return { rows: JSON.parse(localStorage.getItem(key) || '[]') as T[], corrupt: false };
+    } catch {
+      return { rows: [], corrupt: true };
+    }
+  };
+  const bookmarks = read<Bookmark>('knowledge_bookmarks');
+  const notes = read<Note>('knowledge_notes');
+  const wikiPages = read<WikiPage>('knowledge_wiki');
+  const corruptKeys = [
+    bookmarks.corrupt ? 'knowledge_bookmarks' : null,
+    notes.corrupt ? 'knowledge_notes' : null,
+    wikiPages.corrupt ? 'knowledge_wiki' : null,
+  ].filter((k): k is string => k !== null);
+  return { bookmarks: bookmarks.rows, notes: notes.rows, wikiPages: wikiPages.rows, corruptKeys };
+}
+
+function corruptMessage(keys: string[]): string | null {
+  return keys.length ? `本地缓存 ${keys.join(' / ')} 已损坏，无法解析，已重置为空列表` : null;
+}
+
 export function Knowledge() {
   const [activeTab, setActiveTab] = useState<TabType>('bookmarks');
 
+  // 单一缓存快照：首次渲染即可判定缓存是否损坏（惰性初始化器内无法 setState）
+  const [localCache] = useState(readLocalCache);
+  const [cacheError, setCacheError] = useState<string | null>(() => corruptMessage(localCache.corruptKeys));
+  // 后端 Wiki 拉取失败态（原先 `.catch(() => {})` 完全吞掉错误）
+  const [wikiLoadError, setWikiLoadError] = useState<string | null>(null);
+
   // 从 localStorage 读取数据，并提供刷新函数
   const loadFromStorage = () => {
-    try {
-      setBookmarks(JSON.parse(localStorage.getItem('knowledge_bookmarks') || '[]'));
-    } catch { setBookmarks([]); }
-    try {
-      setNotes(JSON.parse(localStorage.getItem('knowledge_notes') || '[]'));
-    } catch { setNotes([]); }
-    try {
-      setWikiPages(JSON.parse(localStorage.getItem('knowledge_wiki') || '[]'));
-    } catch { setWikiPages([]); }
+    const cache = readLocalCache();
+    setBookmarks(cache.bookmarks);
+    setNotes(cache.notes);
+    setWikiPages(cache.wikiPages);
+    setCacheError(corruptMessage(cache.corruptKeys));
   };
 
-  const [bookmarks, setBookmarks] = useState<Bookmark[]>(() => {
-    try { return JSON.parse(localStorage.getItem('knowledge_bookmarks') || '[]'); } catch { return []; }
-  });
-  const [notes, setNotes] = useState<Note[]>(() => {
-    try { return JSON.parse(localStorage.getItem('knowledge_notes') || '[]'); } catch { return []; }
-  });
-  const [wikiPages, setWikiPages] = useState<WikiPage[]>(() => {
-    try { return JSON.parse(localStorage.getItem('knowledge_wiki') || '[]'); } catch { return []; }
-  });
+  const [bookmarks, setBookmarks] = useState<Bookmark[]>(localCache.bookmarks);
+  const [notes, setNotes] = useState<Note[]>(localCache.notes);
+  const [wikiPages, setWikiPages] = useState<WikiPage[]>(localCache.wikiPages);
   const [wikiPage, setWikiPage] = useState<WikiPage | null>(null);
   const [wikiEditing, setWikiEditing] = useState(false);
 
   // 首次加载时尝试从后端 API 加载 Wiki 页面
   useEffect(() => {
-    if (activeTab === 'wiki') {
-      api.getWikiPages().then(pages => {
-        if (pages && pages.length > 0) { setWikiPages(pages); }
-      }).catch(() => {});
-    }
+    if (activeTab !== 'wiki') return;
+    let cancelled = false;
+    void (async () => {
+      const res = await api.result.wikiPages();
+      if (cancelled) return;
+      if (res.ok) {
+        // ok:true + data:[] 是"后端确认无数据"，与 ok:false（拉取失败）严格区分
+        if (res.data.length > 0) setWikiPages(res.data);
+        setWikiLoadError(null);
+      } else {
+        setWikiLoadError(res.error.message);
+      }
+    })();
+    return () => { cancelled = true; };
   }, [activeTab]);
 
   // 监听云同步事件，数据变化时自动刷新
@@ -130,21 +171,20 @@ export function Knowledge() {
 
   const loadMemories = async () => {
     setMemoryError(null);
-    try {
-      let list: Memory[] = memorySearch.trim()
-        ? await api.searchMemories(memorySearch.trim())
-        : await api.getMemories(memoryFilter || undefined);
-      // 搜索 + 类型筛选组合时本地过滤
-      if (memorySearch.trim() && memoryFilter) {
-        list = (list || []).filter(m => m.type === memoryFilter);
-      }
-      setMemories(list || []);
-    } catch (e: unknown) {
-      // 审计修复：加载失败不再仅 console.error，显示错误提示供用户知晓
-      console.error('加载记忆失败:', e);
-      setMemories([]);
-      setMemoryError(e instanceof Error ? e.message : '加载记忆失败');
+    // AEX-P1-017：走统一契约 —— 空结果（ok:true, data:[]）与失败（ok:false）在类型层分开，
+    // 不再需要 try/catch + console.error 猜测发生了什么。
+    const res = memorySearch.trim()
+      ? await api.result.searchMemories(memorySearch.trim())
+      : await api.result.memories(memoryFilter || undefined);
+    if (!res.ok) {
+      setMemoryError(res.error.message);
+      return;
     }
+    // 搜索 + 类型筛选组合时本地过滤
+    const list = memorySearch.trim() && memoryFilter
+      ? res.data.filter(m => m.type === memoryFilter)
+      : res.data;
+    setMemories(list);
   };
 
   // 切换 tab / 搜索 / 筛选变化时重新加载（搜索输入带 300ms 防抖）
@@ -276,6 +316,18 @@ export function Knowledge() {
     <div className="min-h-screen" style={{ background: 'var(--bg-base)', backgroundImage: 'var(--bg-gradient)' }}>
       <div style={{ maxWidth: '1100px', margin: '0 auto', padding: '0 24px' }}>
         <PageHeader title="知识管理" description="收藏夹 · 闪念备忘录 · 知识库 · 记忆" icon={<BookOpen size={22} />} color="#a78bfa" />
+
+        {/* AEX-P1-017：加载失败与"确实没有数据"分开呈现（原先两者共用同一个空态） */}
+        {cacheError && (
+          <div className="glass-card" style={{ padding: '10px 14px', marginBottom: 16, fontSize: 13, color: 'var(--color-warning)' }}>
+            ⚠️ {cacheError}
+          </div>
+        )}
+        {activeTab === 'wiki' && wikiLoadError && (
+          <div className="glass-card" style={{ padding: '10px 14px', marginBottom: 16, fontSize: 13, color: 'var(--color-danger)' }}>
+            ❌ 云端知识库加载失败：{wikiLoadError}（当前展示本地缓存内容）
+          </div>
+        )}
 
         {/* Tabs - 加大、方正、接近标准 input 高度 */}
         <div className="flex gap-3 mb-6">

@@ -90,7 +90,7 @@ export function clearReadFileCache(): void {
   readFileCache.clear();
 }
 
-export async function executeFileTool(name: string, args: any, allowedDirs: string[], defaultDir?: string, permissionLevel?: number): Promise<string> {
+export async function executeFileTool(name: string, args: Record<string, unknown>, allowedDirs: string[], defaultDir?: string, permissionLevel?: number): Promise<string> {
   try {
     // 权限检查：Level 1 只允许读操作
     if (permissionLevel === 1) {
@@ -99,6 +99,12 @@ export async function executeFileTool(name: string, args: any, allowedDirs: stri
         return `权限不足：当前为 Level 1（只读）模式，不允许执行 "${name}" 操作。请切换到 Level 2 以允许写操作。`;
       }
     }
+
+    // 边界收口：args 来自 LLM 工具调用（不可信），path/content 必须先收窄为字符串。
+    // path 缺失交给 resolvePath 统一报「请指定文件路径」；content 缺失在 write_file 分支显式拒绝
+    // （避免旧实现把 undefined 传给 writeFileSync 抛 TypeError，或静默写入空文件）。
+    const pathArg: string = typeof args.path === 'string' ? args.path : '';
+    const contentArg: string | null = typeof args.content === 'string' ? args.content : null;
 
     // 路径解析：所有 Level 都受 allowedDirs 限制（P0-7 已修复）
     const resolvePath = (p: string) => {
@@ -113,7 +119,7 @@ export async function executeFileTool(name: string, args: any, allowedDirs: stri
 
     switch (name) {
       case 'read_file': {
-        const fullPath = resolvePath(args.path);
+        const fullPath = resolvePath(pathArg);
         const check = isPathSafe(fullPath, allowedDirs, permissionLevel);
         if (!check.ok) return `错误: ${check.error}`;
         if (!existsSync(fullPath)) return `错误: 文件不存在: ${fullPath}`;
@@ -126,16 +132,17 @@ export async function executeFileTool(name: string, args: any, allowedDirs: stri
         return `文件内容 (${fullPath}):\n\`\`\`\n${content}\n\`\`\``;
       }
       case 'write_file': {
-        const fullPath = resolvePath(args.path);
+        const fullPath = resolvePath(pathArg);
         const check = isPathSafe(fullPath, allowedDirs, permissionLevel);
         if (!check.ok) return `错误: ${check.error}`;
+        if (contentArg === null) return `错误: 缺少 content 参数（write_file 需要字符串内容）`;
         const dir = resolve(fullPath, '..');
         if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-        writeFileSync(fullPath, args.content, 'utf-8');
-        return `文件已写入: ${fullPath} (${Buffer.byteLength(args.content, 'utf-8')} 字节)`;
+        writeFileSync(fullPath, contentArg, 'utf-8');
+        return `文件已写入: ${fullPath} (${Buffer.byteLength(contentArg, 'utf-8')} 字节)`;
       }
       case 'list_files': {
-        const fullPath = resolvePath(args.path);
+        const fullPath = resolvePath(pathArg);
         const check = isPathSafe(fullPath, allowedDirs, permissionLevel);
         if (!check.ok) return `错误: ${check.error}`;
         if (!existsSync(fullPath)) return `错误: 目录不存在: ${fullPath}`;
@@ -155,7 +162,7 @@ export async function executeFileTool(name: string, args: any, allowedDirs: stri
         return `目录 ${fullPath} 的内容:\n${header}\n${rows.join('\n')}`;
       }
       case 'delete_file': {
-        const fullPath = resolvePath(args.path);
+        const fullPath = resolvePath(pathArg);
         const check = isPathSafe(fullPath, allowedDirs, permissionLevel);
         if (!check.ok) return `错误: ${check.error}`;
         if (!existsSync(fullPath)) return `错误: 文件不存在: ${fullPath}`;
@@ -163,7 +170,7 @@ export async function executeFileTool(name: string, args: any, allowedDirs: stri
         return `文件已删除: ${fullPath}`;
       }
       case 'create_directory': {
-        const fullPath = resolvePath(args.path);
+        const fullPath = resolvePath(pathArg);
         const check = isPathSafe(fullPath, allowedDirs, permissionLevel);
         if (!check.ok) return `错误: ${check.error}`;
         mkdirSync(fullPath, { recursive: true });

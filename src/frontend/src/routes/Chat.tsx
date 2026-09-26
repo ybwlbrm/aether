@@ -1,95 +1,31 @@
-import { useEffect, useState, useRef, useMemo, useCallback, memo } from 'react';
+﻿import { useEffect, useState, useRef, useMemo, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Send, Plus, MessageSquare, Trash2, Bot, PanelLeftClose, PanelLeftOpen, XCircle, Edit3, Bookmark } from 'lucide-react';
-import { confirm as confirmDialog } from '../components/ui/confirm-dialog';
 import {
   EmptyState,
-  ErrorState,
   PageHeader,
   PageShell,
   Panel,
   Stack,
 } from '../components/ui';
+// Phase 5：会话视图收敛到共享实现（CodingHome 复用同一气泡/活动流/失败态）
+import {
+  ConversationActivityStream,
+  ConversationMessageBubble,
+  StreamFailureState,
+} from '../components/conversation';
 import { PromptTemplateSelector } from '../components/PromptTemplateSelector';
+import { ReasoningBar } from '../components/ReasoningBar';
 import { useActivityStore } from '../store/activityStore';
 // P0 通知幂等化：统一经 NotificationCenter（权限收敛到 App Shell/Layout，业务页不再散调）
 import { notificationCenter } from '../lib/notification-center';
 import { api } from '../api/client';
 import { fetchEvents } from '../api/streamClient';
-import { Streamdown } from 'streamdown';
-import { cjk } from '@streamdown/cjk';
-import { OpenCodeStyleCodeBlock } from '../components/OpenCodeBlock';
 import { useConversations, useStreamSend, useMessagePolling } from '../hooks';
 import { createStreamFailure, type StreamFailure } from '../hooks/useStreamSend'
 
-// 流式消息 markdown 渲染（含 shiki 代码高亮 — OpenCode 风格代码卡片化）
-const streamdownPlugins = { cjk };
-
-export function ChatStreamFailure({ failure }: { readonly failure: StreamFailure }) {
-  return (
-    <ErrorState
-      title="回复失败"
-      description={failure.message}
-      data-retryable={failure.retryable}
-      action={(
-        <button type="button" className="btn btn-ghost" disabled>
-          重试
-        </button>
-      )}
-    />
-  )
-}
-
-/** 当前会话的 Activity Stream — 显示所有过程事件（thinking、tools），按 seq 顺序排列 */
-function ChatActivityStream({ convId }: { convId: string | null }) {
-  const events = useActivityStore(s => (convId ? s.getEvents(convId) : undefined));
-  const taskCard = useMemo(() => (convId && events ? useActivityStore.getState().projectTaskCard(convId) : null), [convId, events]);
-  if (!convId || !events || events.length === 0) return null;
-  return <ActivityStream events={events} taskCard={taskCard} />;
-}
-
-// P2-5: 提取 MessageBubble 组件，用 React.memo 包裹，防止流式更新时全列表重渲染
-const MessageBubble = memo(({ msg, i }: { msg: any; i: number }) => {
-  if (msg.role === 'tool') return null;
-  return (
-  <motion.div key={msg.id} style={{ display: 'flex', justifyContent: msg.role === 'user' ? 'flex-end' : 'flex-start' }}
-    initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: i * 0.05 }}
-  >
-    {msg.role === 'user' ? (
-      <div style={{
-        maxWidth: '75%',
-        padding: '10px 16px',
-        borderRadius: 22,
-        background: 'var(--color-accent)',
-        color: 'var(--on-accent)',
-        fontSize: 16,
-        lineHeight: '24px',
-        overflowWrap: 'anywhere',
-        whiteSpace: 'pre-wrap',
-      }}>
-        {msg.content}
-        <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.5)', marginTop: 4, textAlign: 'right' }}>
-          {new Date(msg.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-        </div>
-      </div>
-    ) : (
-      <div style={{ maxWidth: '75%', padding: '2px 0' }}>
-        {msg.content && (
-          <div className="prose-md-body" style={{ fontSize: 'var(--font-base)', color: 'var(--text-primary)', lineHeight: 1.65, minWidth: 0, maxWidth: '100%' }}>
-            <Streamdown plugins={streamdownPlugins} components={{ pre: OpenCodeStyleCodeBlock }}>{msg.content}</Streamdown>
-          </div>
-        )}
-        <div style={{ fontSize: 11, color: 'var(--text-tertiary)', marginTop: 2 }}>
-          {new Date(msg.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-        </div>
-      </div>
-    )}
-  </motion.div>
-  );
-});
-MessageBubble.displayName = 'MessageBubble';
-
-import { ActivityStream } from '../components/activity/ActivityStream';
+/** 失败态渲染统一走共享 conversation 组件（保留既有导出名，避免调用方破坏） */
+export const ChatStreamFailure = StreamFailureState
 
 export function Chat() {
   const [providers, setProviders] = useState<any[]>([]);
@@ -244,6 +180,14 @@ export function Chat() {
   });
   const visibleFailure = failure ?? directFailure
 
+  /** 失败重试：重新发送最后一条用户指令（共享失败态按钮的实际语义） */
+  const retryLastSend = useCallback(() => {
+    const lastUser = [...messages].reverse().find(m => m?.role === 'user');
+    const content = typeof lastUser?.content === 'string' ? lastUser.content.trim() : '';
+    if (!content) return;
+    void handleSend(content);
+  }, [messages, handleSend]);
+
   // 整改计划第 3 章（P0）修复：发送必须传入输入框内容。
   // 原实现调用 handleSend() 不带参数，而 useStreamSend 的 handleSend(contentOverride?)
   // 内部 `content = (contentOverride ?? '').trim()` → 恒为空 → 被守卫拦截，
@@ -273,24 +217,29 @@ export function Chat() {
     activityPollReqIdRef,
     mountedRef,
     pollActivityEvents: true,
+    // 会话维度游标：fetchEvents 的 afterSeq 是后端"会话内单调序号"，必须取全会话最大值
     getLastSeq: (convId) => useActivityStore.getState().getLastSeq(convId),
   });
 
   // 整改计划第 5 章（P1）：循环模式指标 —— 从 activityStore 终态事件（task.completed/failed）读取
+  // Run 作用域回溯：每个 Run 的 seq 独立，跨 Run 合并排序不可靠，必须逐 Run 逆序找终态。
   useEffect(() => {
     if (!currentConv) { setLoopMetrics(null); return; }
-    const events = useActivityStore.getState().getEvents(currentConv);
-    // 从最新事件往回找终态事件
-    for (let i = events.length - 1; i >= 0; i--) {
-      const ev = events[i];
-      if ((ev.eventType === 'task.completed' || ev.eventType === 'task.failed') && ev.metadata && typeof ev.metadata.turnsUsed === 'number') {
-        setLoopMetrics({
-          turnsUsed: Number(ev.metadata.turnsUsed),
-          elapsedMs: Number(ev.metadata.elapsedMs || 0),
-          toolCalls: Number(ev.metadata.toolCalls || 0),
-          budgetExceeded: ev.metadata.budgetExceeded ? String(ev.metadata.budgetExceeded) : null,
-        });
-        return;
+    const store = useActivityStore.getState();
+    const runIds = store.getRunsForConversation(currentConv);
+    for (let i = runIds.length - 1; i >= 0; i--) {
+      const events = store.getEventsByRun(runIds[i]);
+      for (let j = events.length - 1; j >= 0; j--) {
+        const ev = events[j];
+        if ((ev.eventType === 'task.completed' || ev.eventType === 'task.failed') && ev.metadata && typeof ev.metadata.turnsUsed === 'number') {
+          setLoopMetrics({
+            turnsUsed: Number(ev.metadata.turnsUsed),
+            elapsedMs: Number(ev.metadata.elapsedMs || 0),
+            toolCalls: Number(ev.metadata.toolCalls || 0),
+            budgetExceeded: ev.metadata.budgetExceeded ? String(ev.metadata.budgetExceeded) : null,
+          });
+          return;
+        }
       }
     }
   }, [currentConv, sending]);
@@ -548,7 +497,7 @@ export function Chat() {
         {/* 右侧 — 聊天区域 */}
           {currentConv ? (
             <Panel className="flex min-h-0 flex-1 flex-col p-4!">
-              <div ref={messageListRef} onScroll={handleScroll} className="flex-1 overflow-y-auto min-h-0" style={{ display: 'flex', flexDirection: 'column', gap: 16, padding: '8px 8px 16px', overflowAnchor: 'none', position: 'relative' }} aria-live="polite" aria-atomic="true">
+              <div ref={messageListRef} onScroll={handleScroll} className="flex-1 overflow-y-auto min-h-0" style={{ display: 'flex', flexDirection: 'column', gap: 16, padding: '8px 8px 16px', overflowAnchor: 'none', position: 'relative' }} aria-live="polite">
                 {/* 整改计划第 4 章（P1）：用户上滑阅读时提供"回到底部"按钮 */}
                 {userScrolledUp && (
                   <button
@@ -586,15 +535,11 @@ export function Chat() {
                     )}
                   </div>
                 )}
-                {!loadError && messageList.map((msg, i) => {
-                const isUser = msg.role === 'user';
-                return (
-                  <div key={msg.id}>
-                    <MessageBubble msg={msg} i={i} />
-                    {isUser && <ChatActivityStream convId={currentConv} />}
-                  </div>
-                );
-              })}
+                {!loadError && messageList.map((msg, i) => (
+                  <ConversationMessageBubble key={msg.id} message={msg} index={i} />
+                ))}
+                {/* 活动流：会话定位活动 Run，时间线由 Run 自己拥有（AEX-P0-012） */}
+                <ConversationActivityStream conversationId={currentConv} />
                 {thinking && (
                   <div className="flex items-center justify-center py-4">
                     <div className="flex items-center gap-3">
@@ -615,7 +560,9 @@ export function Chat() {
                     </div>
                   </div>
                 )}
-                {visibleFailure && <ChatStreamFailure failure={visibleFailure} />}
+                {visibleFailure && <ChatStreamFailure failure={visibleFailure} onRetry={retryLastSend} />}
+                {/* P1-007: 活跃 reasoning 渲染（liveReasoning 由 useStreamSend onLiveReasoning 维护） */}
+                {liveReasoning.trim() && <ReasoningBar content={liveReasoning} />}
                 <div ref={messagesEndRef} />
               </div>
               <div className="flex items-center justify-between" style={{ padding: '6px 8px 4px', borderTop: '1px solid var(--border-primary)' }}>
@@ -735,7 +682,7 @@ export function Chat() {
               className="flex min-h-0 flex-1 items-center justify-center"
             >
               {visibleFailure ? (
-                <ChatStreamFailure failure={visibleFailure} />
+                <ChatStreamFailure failure={visibleFailure} onRetry={retryLastSend} />
               ) : (
                 <EmptyState
                   icon={<Bot size={48} />}

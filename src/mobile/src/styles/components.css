@@ -307,6 +307,42 @@ input, textarea { font-family: inherit; }
 }
 .continue-chevron { color: var(--text-tertiary); flex-shrink: 0; }
 
+/* 离线队列失败可见性（AEX-P1-076：N actions failed [View] [Retry all]） */
+.queue-failed {
+  margin: 0 var(--space-5) var(--space-3);
+  padding: var(--space-3);
+  border: 1px solid var(--color-danger);
+  border-radius: var(--radius-sm);
+  background: var(--bg-surface);
+}
+.queue-failed-head { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); }
+.queue-failed-label {
+  display: flex; align-items: center; gap: 6px;
+  font-size: var(--font-sm); font-weight: 600; color: var(--color-danger);
+}
+.queue-failed-actions { display: flex; align-items: center; gap: var(--space-2); flex-shrink: 0; }
+.queue-failed-btn {
+  font-size: var(--font-caption); font-weight: 500;
+  padding: 4px 10px; border-radius: var(--radius-sm);
+  border: 1px solid var(--divider); background: transparent; color: var(--text-secondary);
+}
+.queue-failed-btn.primary { border-color: var(--color-danger); color: var(--color-danger); }
+.queue-failed-list { list-style: none; margin: var(--space-3) 0 0; padding: 0; }
+.queue-failed-item {
+  display: flex; align-items: center; justify-content: space-between; gap: var(--space-3);
+  padding: var(--space-2) 0; border-top: 1px solid var(--divider);
+}
+.queue-failed-item-text {
+  display: flex; flex-direction: column; min-width: 0;
+  font-size: var(--font-sm); color: var(--text-primary);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.queue-failed-item-meta { font-size: var(--font-caption); color: var(--text-tertiary); }
+.queue-failed-clear {
+  font-size: var(--font-caption); color: var(--text-tertiary);
+  background: transparent; border: none; flex-shrink: 0;
+}
+
 /* Section 标题 */
 .section-label {
   padding: var(--space-4) var(--space-5) var(--space-2);

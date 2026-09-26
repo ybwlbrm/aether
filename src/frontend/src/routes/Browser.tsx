@@ -1,4 +1,4 @@
-import { useState, useRef } from 'react';
+﻿import { useState, useRef } from 'react';
 import { Globe, ExternalLink, ArrowRight, RotateCcw, Search } from 'lucide-react';
 import { PageHeader } from '../components/PageHeader';
 
@@ -74,7 +74,7 @@ export function Browser() {
 
   return (
     <div className="min-h-screen" style={{ background: 'var(--bg-base)', backgroundImage: 'var(--bg-gradient)' }}>
-      <div style={{ maxWidth: '1100px', margin: '0 auto', padding: '0 24px' }}>
+      <div style={{ maxWidth: 'var(--content-standard)', margin: '0 auto', padding: '0 24px' }}>
         <PageHeader
           title="Browser"
           description="内置浏览器与网页搜索"
@@ -131,8 +131,8 @@ export function Browser() {
         )}
 
         <div
-          className="glass-card overflow-hidden"
-          style={{ padding: 0, backdropFilter: 'blur(var(--glass-blur-radius)) saturate(var(--glass-saturate))', WebkitBackdropFilter: 'blur(var(--glass-blur-radius)) saturate(var(--glass-saturate))', border: '1px solid var(--card-border)', boxShadow: 'var(--card-shadow)' }}
+          className="overflow-hidden"
+          style={{ padding: 0, background: 'var(--bg-surface)', border: '1px solid var(--card-border)', boxShadow: 'var(--shadow-sm)' }}
         >
           {src ? (
             <iframe

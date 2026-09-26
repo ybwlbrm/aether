@@ -5,7 +5,8 @@ import { Sidebar } from './Sidebar';
 import { CommandPalette } from './CommandPalette';
 import { LiquidGlassFilter } from './LiquidGlassFilter';
 import { api, authHeaders } from '../api/client';
-import { requestNotificationPermission } from '../lib/notifications';
+// P2-011 通知收敛：统一走 NotificationCenter（唯一通知源），旧 lib/notifications 已废弃
+import { requestNotificationPermission } from '../lib/notification-center';
 import { useAppStore } from '../store/app';
 import { Maximize2, Minimize2, Trash2, MessageSquare } from 'lucide-react';
 import { confirm as confirmDialog } from './ui/confirm-dialog';

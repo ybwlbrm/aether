@@ -7,6 +7,7 @@ import { existsSync, statSync } from 'node:fs';
 import { resolve, dirname, parse, sep } from 'node:path';
 import { spawn } from 'node:child_process';
 import { isPathSafe } from './path-guard.js';
+import { logger } from './logger.js';
 
 const DIAG_TIMEOUT_MS = 30000;
 const MAX_OUTPUT_CHARS = 50000;
@@ -136,7 +137,13 @@ export async function executeLspDiagnostics(
 
       const timer = setTimeout(() => {
         timedOut = true;
-        try { child.kill(); } catch { /* 进程可能已退出 */ }
+        try {
+          child.kill();
+        } catch {
+          // AEX-P2-004 分类：ignored —— 超时 kill 时子进程可能已自行退出，
+          // kill 抛错不影响「已标记 timedOut」这一超时结论。
+          logger.debug({ event: 'lsp.kill_ignored', pid: child.pid }, 'LSP 子进程 kill 失败（可能已退出），已忽略');
+        }
       }, DIAG_TIMEOUT_MS);
 
       child.stdout?.on('data', (d: Buffer) => {

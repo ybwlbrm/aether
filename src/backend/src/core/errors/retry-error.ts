@@ -5,9 +5,9 @@
  * Pure TypeScript only.
  */
 
-import { RuntimeError } from './runtime-error.js'
+import { ErrorCode } from './error-code.js'
+import { AetherError, RuntimeError } from './runtime-error.js'
 import type { RuntimeErrorOptions } from './runtime-error.js'
-import { ModelError } from './model-error.js'
 
 export interface RetryErrorOptions extends Omit<RuntimeErrorOptions, 'code'> {
   /** Current attempt number (1-indexed) */
@@ -18,6 +18,8 @@ export interface RetryErrorOptions extends Omit<RuntimeErrorOptions, 'code'> {
   backoffMs: number
   /** Override the default error code */
   code?: string
+  /** Override the error category; defaults to 'execution'（重试编排属于执行层） */
+  category?: RuntimeErrorOptions['category']
   /** Override retryable (default: true for RetryError, false for RetryExhaustedError) */
   retryable?: boolean
 }
@@ -69,9 +71,9 @@ export class RetryError extends RuntimeError {
 
   constructor(message: string, options: RetryErrorOptions) {
     super(message, {
-      code: options.code ?? 'RETRY_ERROR',
-      cause: options.cause,
-      context: options.context,
+      ...options,
+      code: options.code ?? ErrorCode.RETRY_ERROR,
+      category: options.category ?? 'execution',
       retryable: options.retryable ?? true, // RetryError is retryable by default
     });
 
@@ -166,16 +168,20 @@ export class RetryExhaustedError extends RetryError {
 /**
  * Type guard to determine if an error is retryable.
  *
+ * 单一事实源：重试与否由 `AetherError.retryable` 决定，而每个子类在构造时
+ * 就把自己的默认语义固化进这个字段（ModelTransient=true / ModelPermanent=false
+ * / ModelStream=true / ToolTimeout=true / ToolCancelled=false / BudgetExceeded=
+ * false / AttemptFailed=true …）。因此这里不需要按类型枚举，新增子类自动生效。
+ *
  * Returns true for:
- * - RuntimeError with retryable === true
- * - ModelError with rate-limit (statusCode 429) or 5xx status
+ * - Any AetherError (incl. RuntimeError / ModelError / ToolError subclasses)
+ *   whose `retryable === true`
  * - RetryError (always retryable)
- * - RetryExhaustedError (NOT retryable — returns false)
  *
  * Returns false for:
- * - ToolError (never retryable by default)
- * - Any other error type
- * - null/undefined
+ * - RetryExhaustedError (terminal, even if retryable was forced)
+ * - ModelError 4xx (non-429) / ToolError / WorkflowError / SyncError by default
+ * - Any non-Aether value, including null/undefined and random objects
  *
  * @example
  * ```ts
@@ -185,16 +191,7 @@ export class RetryExhaustedError extends RetryError {
  * ```
  */
 export function isRetryable(err: unknown): boolean {
-  if (err instanceof RetryError) {
-    // RetryError is retryable, but RetryExhaustedError is not
-    return !RetryExhaustedError.isRetryExhaustedError(err);
-  }
-  if (err instanceof ModelError) {
-    // ModelError handles its own retryable logic in constructor
-    return err.retryable;
-  }
-  if (err instanceof RuntimeError) {
-    return err.retryable;
-  }
-  return false;
+  // RetryExhaustedError is terminal regardless of the flag
+  if (RetryExhaustedError.isRetryExhaustedError(err)) return false
+  return AetherError.isAetherError(err) ? err.retryable : false
 }

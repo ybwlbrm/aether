@@ -1,38 +1,41 @@
 import type { HTMLAttributes, ReactNode } from "react"
 
+import { RUN_STATUSES } from "@pacc/shared"
+
 import { cn } from "@/lib/utils"
 
-export const STATUS_PILL_STATUSES = [
-  "completed",
-  "failed",
-  "running",
-  "retrying",
-  "verifying",
-  "cancelled",
-  "interrupted",
-  "budget_exceeded",
-] as const
+/**
+ * AEX-P0-002: run statuses are canonical in @pacc/shared.
+ * The pill covers every one of them instead of a locally redefined 8-state subset.
+ */
+export const STATUS_PILL_STATUSES = RUN_STATUSES
 
 export type StatusPillStatus = (typeof STATUS_PILL_STATUSES)[number]
 export type StatusPillTone = "success" | "danger" | "info" | "warning" | "accent" | "neutral"
 
 export const STATUS_PILL_TONE_BY_STATUS = {
-  completed: "success",
-  failed: "danger",
+  created: "neutral",
   running: "info",
+  waiting: "info",
+  retry_waiting: "warning",
   retrying: "warning",
   verifying: "accent",
+  completed: "success",
+  failed: "danger",
   cancelled: "neutral",
   interrupted: "warning",
   budget_exceeded: "danger",
 } as const satisfies Record<StatusPillStatus, StatusPillTone>
 
 export const STATUS_PILL_LABELS = {
-  completed: "completed",
-  failed: "failed",
+  created: "created",
   running: "running",
+  waiting: "waiting",
+  retry_waiting: "retry waiting",
   retrying: "retrying",
   verifying: "verifying",
+  completed: "completed",
+  failed: "failed",
   cancelled: "cancelled",
   interrupted: "interrupted",
   budget_exceeded: "budget exceeded",

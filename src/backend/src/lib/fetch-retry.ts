@@ -1,3 +1,25 @@
+/**
+ * fetch-retry.ts — **通用 HTTP 重试**（P0-014 边界声明）
+ *
+ * 与 `src/backend/src/core/models/retry-policy.ts`（Model RetryPolicy）是两套
+ * **刻意分离**的重试系统，不做合并：
+ *
+ * | 维度     | fetchWithRetry（本文件）                       | RetryPolicy（core/models）            |
+ * |----------|------------------------------------------------|---------------------------------------|
+ * | 故障域   | 任意 HTTP 端点                                | 模型调用（chat/completions 等）        |
+ * | 生产调用 | workflows media 节点（/images/generations、   | OpenAICompatibleAdapter →             |
+ * | 点       | /videos —— ProviderAdapter 不实现这两个端点）  | createFetchTransport                  |
+ * | 熔断键   | `protocol//host`（模块级 Map，窗口 60s/3 次） | providerId（provider 级实例）          |
+ * | 可重试集 | 429/500/502/503/504 + 网络错误                | 429/5xx/网络错误/STREAM_CLOSED         |
+ *
+ * 共享的公共原语（不共享实现，避免把两个故障域耦合在一起）：
+ * - `RetryDecision` 形状（{ retry, delayMs }）—— 见 core/models/retry-policy.ts
+ * - Retry-After 解析语义（本文件 parseRetryAfter ↔ retry-policy 的 extractRetryAfterMs）
+ * - abortable sleep 语义（取消必须 reject AbortError）
+ *
+ * 迁移方向：本文件是遗留层，新代码（core/ 与 lib/ 的模型调用）一律走 RetryPolicy。
+ */
+
 // 可重试的状态码（Wave0-FR: 404 从可重试集合移除——它是"资源不存在"，重试无意义）
 const RETRYABLE_STATUSES = [429, 500, 502, 503, 504];
 
@@ -8,6 +30,31 @@ const NON_RETRYABLE_THROW_STATUSES = [401, 403, 404, 422];
 const circuitBreakerState = new Map<string, { count: number; lastFailure: number }>();
 const CIRCUIT_BREAKER_THRESHOLD = 3; // 连续 3 次 429/5xx 触发熔断
 const CIRCUIT_BREAKER_WINDOW_MS = 60000; // 60 秒窗口内
+
+// ---- 错误元数据增强（AEX-P2-002：不再用 (err as any).xxx 附加字段）----
+interface EnhancedFetchError extends Error {
+  circuitBreaker?: boolean;
+  providerEndpoint?: string;
+  status?: number;
+  responseBody?: string;
+  nonRetryable?: boolean;
+}
+
+/** 创建带元数据的 Error（供熔断/重试决策读取结构化字段，避免字符串推断） */
+function makeFetchError(message: string, meta: { circuitBreaker?: boolean; providerEndpoint?: string; status?: number; responseBody?: string; nonRetryable?: boolean }): EnhancedFetchError {
+  const err = new Error(message) as EnhancedFetchError;
+  if (meta.circuitBreaker !== undefined) err.circuitBreaker = meta.circuitBreaker;
+  if (meta.providerEndpoint !== undefined) err.providerEndpoint = meta.providerEndpoint;
+  if (meta.status !== undefined) err.status = meta.status;
+  if (meta.responseBody !== undefined) err.responseBody = meta.responseBody;
+  if (meta.nonRetryable !== undefined) err.nonRetryable = meta.nonRetryable;
+  return err;
+}
+
+/** AbortSignal.any 的 feature 检测（Node < 20 不支持时回落多信号合并） */
+function supportsSignalAny(): boolean {
+  return typeof (AbortSignal as { any?: unknown }).any === 'function';
+}
 
 /**
  * Wave0-FR: 解析 Retry-After 头。
@@ -71,10 +118,7 @@ export async function fetchWithRetry(
   if (cbState && cbState.count >= CIRCUIT_BREAKER_THRESHOLD) {
     const timeSinceLastFailure = Date.now() - cbState.lastFailure;
     if (timeSinceLastFailure < CIRCUIT_BREAKER_WINDOW_MS) {
-      const err = new Error(`熔断器开启：${providerEndpoint} 连续 ${cbState.count} 次失败，快速失败`);
-      (err as any).circuitBreaker = true;
-      (err as any).providerEndpoint = providerEndpoint;
-      throw err;
+      throw makeFetchError(`熔断器开启：${providerEndpoint} 连续 ${cbState.count} 次失败，快速失败`, { circuitBreaker: true, providerEndpoint });
     } else {
       // 窗口过期，重置计数
       circuitBreakerState.delete(providerEndpoint);
@@ -87,8 +131,8 @@ export async function fetchWithRetry(
       // P0-5: 保留调用方 signal（客户端断连取消），叠加 120s timeout
       const retryOptions = { ...options };
       if (options.signal) {
-        if (typeof (AbortSignal as any).any === 'function') {
-          retryOptions.signal = (AbortSignal as any).any([options.signal, AbortSignal.timeout(120000)]);
+        if (supportsSignalAny()) {
+          retryOptions.signal = (AbortSignal as unknown as { any(signals: AbortSignal[]): AbortSignal }).any([options.signal, AbortSignal.timeout(120000)]);
         } else {
           const combined = new AbortController();
           const onAbort = () => combined.abort();
@@ -116,12 +160,7 @@ export async function fetchWithRetry(
         // BE-04b: 非重试但需显式抛出的状态码（401/403/404/422）— 抛出带 provider/status 详情的错误
         // Wave0-FR: 标记 nonRetryable=true，catch 块据此直接放行（否则会被误当作网络错误进入指数退避重试）
         const errText = await response.text().catch(() => '');
-        const err = new Error(`AI API 请求失败 (${status}): ${errText.slice(0, 200)}`);
-        (err as any).status = status;
-        (err as any).providerEndpoint = providerEndpoint;
-        (err as any).responseBody = errText;
-        (err as any).nonRetryable = true;
-        throw err;
+        throw makeFetchError(`AI API 请求失败 (${status}): ${errText.slice(0, 200)}`, { status, providerEndpoint, responseBody: errText, nonRetryable: true });
       }
 
       if (isRetryable) {

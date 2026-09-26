@@ -8,6 +8,7 @@ import { join, resolve } from 'node:path';
 import { platform } from 'node:os';
 import { randomBytes } from 'node:crypto';
 import type { TypeObject, KoffiFunc } from 'koffi';
+import { logger } from './logger.js';
 
 const DPAPI_BLOB_FILENAME = '.encryption_key.dpapi';
 const LEGACY_KEY_FILENAME = '.encryption_key';
@@ -81,7 +82,7 @@ export async function loadOrCreateMasterKey(dataDir: string): Promise<KeyLoadRes
       // 自愈：旧版本 buggy fallback 写入的是原始字节，重新用真实 DPAPI 保护
       const protectedBlob = await protectData(Buffer.from(key, 'utf-8'));
       writeFileSync(dpapiPath, protectedBlob);
-      console.warn('[Keystore] 检测到旧格式密钥（raw fallback），已重新用 DPAPI 保护');
+      logger.warn({ event: 'keystore.raw_fallback_reprotected' }, '检测到旧格式密钥（raw fallback），已重新用 DPAPI 保护');
     }
     return { encryptionKey: key, migratedFromLegacy: false, rawFallback };
   }
@@ -95,7 +96,7 @@ export async function loadOrCreateMasterKey(dataDir: string): Promise<KeyLoadRes
       writeFileSync(dpapiPath, protectedBlob);
       // Delete legacy plaintext key file
       unlinkSync(legacyPath);
-      console.log('[Keystore] Migrated legacy plaintext key to DPAPI-protected storage');
+      logger.info({ event: 'keystore.legacy_key_migrated' }, '已把旧版明文主密钥迁移到 DPAPI 保护存储');
       return { encryptionKey: legacyKey, migratedFromLegacy: true, rawFallback: false };
     }
   }
@@ -179,7 +180,7 @@ async function protectData(data: Buffer): Promise<Buffer> {
     return protectedData;
   } catch (e) {
     // If DPAPI unavailable (shouldn't happen on Windows), fall back to raw
-    console.warn('[Keystore] DPAPI protect failed, falling back to raw storage:', (e as Error).message);
+    logger.warn({ event: 'keystore.dpapi_protect_failed', err: e }, 'DPAPI 保护失败，回退为原始字节存储');
     return data;
   }
 }
@@ -227,7 +228,7 @@ async function unprotectData(protectedData: Buffer): Promise<{ key: string; rawF
       koffi.free(inBlobPtr);
       koffi.free(outBlobPtr);
       // 自愈路径：旧版本 fallback 写入了原始字节（非 DPAPI 密文），按 raw 读取以恢复密钥
-      console.warn('[Keystore] DPAPI 解保护失败（可能为旧格式原始密钥），尝试按原始字节恢复');
+      logger.warn({ event: 'keystore.dpapi_unprotect_failed_raw_recovery' }, 'DPAPI 解保护失败（可能为旧格式原始密钥），尝试按原始字节恢复');
       return { key: protectedData.toString('utf-8').trim(), rawFallback: true };
     }
 

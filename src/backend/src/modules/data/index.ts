@@ -1,4 +1,4 @@
-import type { FastifyInstance } from 'fastify';
+﻿import type { FastifyInstance } from 'fastify';
 import type { BackendConfig } from '../../config/index.js';
 import { registerSettingsRoutes, filterSettingsFields } from './settings.js';
 import { registerProjectsRoutes } from './projects.js';
@@ -27,8 +27,8 @@ export function registerDataRoutes(app: FastifyInstance, config: BackendConfig):
 
   app.post('/api/chat', { schema: { description: '新建聊天（已弃用，请使用 POST /api/conversations）', tags: ['数据'] } }, async (request) => {
     const { saveChatHistory } = await import('../../lib/dal.js');
-    const body = request.body as any;
-    return saveChatHistory(body.title || '新对话');
+    const body = (request.body ?? {}) as Record<string, unknown>;
+    return saveChatHistory(typeof body.title === 'string' ? body.title : '新对话');
   });
 
   app.post('/api/chat/:id/messages', {

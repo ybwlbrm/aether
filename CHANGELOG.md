@@ -1,5 +1,42 @@
 # Changelog
 
+## [2.3.1] - 2026-09-26 · Master Remediation（AEX-MASTER 规范整改）
+
+### 架构收口（单一执行模型）
+
+- **统一完成判定**：`core/runtime/execution-completion.ts` evaluateTaskCompletion 成为唯一任务完成判定；移除 conversations/agents/sync 三个 wrapper 的 `content.trim() !== ''` 旁路（AEX-P0-001）
+- **统一 Run 状态**：`RUN_STATUSES`（11 态）收敛到 `@pacc/shared`，routes/checkpoint/status-pill 不再持有私有副本（AEX-P0-002）
+- **统一事件事实源**：`events` 表为 canonical，`activity_events` 为过渡期投影；关键状态迁移事件 await 确认（AEX-P0-011）；未知 legacy 事件不再映射为 `run.created`（AEX-P0-016）
+- **统一重试边界**：模型 → RetryPolicy / 任务 → ExecutionRetryController / 工具 → ToolRecoveryController / 通用 HTTP → fetch-retry（AEX-P0-014）；未知错误默认不可重试（AEX-P0-005）
+- **Provider 级熔断器**：CircuitBreaker 生命周期收敛为 provider 级（经 model-runtime-bridge 缓存），recordSuccess 移至流完整消费后（AEX-P0-007/008）
+- **流截断参与重试**：STREAM_CLOSED 语义从 provider 层抛出，激活既有重试判定（AEX-P0-009）
+
+### Added（新增）
+
+- `workflow_node_runs` 表：节点级状态持久化（status/attempt/output/error/retry_count），替代单列 currentNodeId（AEX-P0-015）
+- Workflow 节点级重试/恢复：接入 `ExecutionRetryController` + RetryCheckpoint（AEX-P0-018）
+- `docs/SOURCE_OF_TRUTH.md`、`docs/TEST_MATRIX.md`：事实源归属矩阵 + 测试所有权矩阵
+
+### Changed（变更）
+
+- `chat-handler.ts`：预算耗尽不再触发隐藏的 executeForceSummary 模型调用（AEX-P0-003）
+- `runs/routes.ts`：cancel 端点白名单扩展至 retry_waiting/retrying/verifying（AEX-P0-004）
+- `execution-retry.ts`：`isTaskRetryable` 未知错误默认 false（保守 fail-safe，AEX-P0-005）
+- Workflow 引擎：取消经 HTTP 请求传播 AbortSignal；节点失败结构化（code/retryable/statusCode），tool/system 节点失败不再被当成功（AEX-P0-016/017）
+- 前端 Activity：按 Run 投影 timeline（AEX-P0-012）；CodingHome 超时/远程失败不再伪造 assistant 消息（AEX-P0-013）
+
+### Fixed（修复）
+
+- 关键事件 fire-and-forget：run.created/started 等 7 处 `void emitV2Event` 改为 await + 失败补偿（AEX-P0-011）
+- 流截断静默成功：EOF 未收 [DONE] 且无 finish_reason → STREAM_CLOSED 错误（AEX-P0-009）
+- 文档归档：历史审计报告移至 `docs/archive/`，避免"FINAL 已修复"标记误导
+
+### Migration（迁移）
+
+- 数据库新增 `workflow_node_runs` 表（FK ON DELETE CASCADE）
+
+---
+
 ## [2.3.0] - 2026-09-23 · 全项目最终整改与架构收口版
 
 ### 架构收口（四个统一）

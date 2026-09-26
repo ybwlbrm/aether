@@ -25,7 +25,12 @@ function killProcessTree(pid: number): void {
     });
   } catch {
     // 进程可能已退出；fallback 直接 kill
-    try { process.kill(pid); } catch { /* 已退出 */ }
+    try {
+      process.kill(pid);
+    } catch {
+      // AEX-P2-004 分类：ignored —— 目标进程已退出时 kill 抛 ESRCH，
+      // 这正是 fallback 想要的结果，无需处理。
+    }
   }
 }
 

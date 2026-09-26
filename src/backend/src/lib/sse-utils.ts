@@ -12,7 +12,12 @@ export const SSE_CHUNK_TIMEOUT_MS = 60_000;
  */
 export function startHeartbeat(reply: FastifyReply | { raw: { write: (chunk: string) => boolean } }): NodeJS.Timeout {
   return setInterval(() => {
-    try { reply.raw.write(': heartbeat\n\n'); } catch { /* 客户端已断开 */ }
+    try {
+      reply.raw.write(': heartbeat\n\n');
+    } catch {
+      // AEX-P2-004 分类：ignored —— 客户端已断开时写 socket 必然抛错，
+      // 定时器由调用方 clearInterval 兜底，心跳写失败无需处理。
+    }
   }, 15_000);
 }
 

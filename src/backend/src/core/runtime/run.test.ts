@@ -10,27 +10,17 @@ import assert from 'node:assert/strict';
 
 // Import types from source for compile-time checking
 import type { RunStatus, RunMode, RunEntity } from './run.js';
+// Canonical 状态定义在 @pacc/shared（AEX-P0-002）：backend 不再重复定义
+import { RUN_STATUSES, RUN_TERMINAL_STATUSES } from '@pacc/shared';
 // Import runtime values from built dist
-const { RunStateMachine, isValidRunTransition } = await import('./run.js')
+const { RunStateMachine, isValidRunTransition, RUN_STATUSES: MODULE_RUN_STATUSES, TERMINAL_RUN_STATUSES: MODULE_TERMINAL_RUN_STATUSES } = await import('./run.js')
 const { RuntimeError } = await import('../errors/index.js')
 
 function createMachine() {
   return new RunStateMachine();
 }
 
-const EXPECTED_RUN_STATUSES = [
-  'created',
-  'running',
-  'waiting',
-  'retry_waiting',
-  'retrying',
-  'verifying',
-  'completed',
-  'failed',
-  'cancelled',
-  'interrupted',
-  'budget_exceeded',
-] as const
+const EXPECTED_RUN_STATUSES = RUN_STATUSES;
 
 function isExpectedRunStatus(value: string): value is RunStatus {
   return EXPECTED_RUN_STATUSES.some((status) => status === value)
@@ -49,6 +39,18 @@ describe('core/runtime/run', () => {
       assert.equal(EXPECTED_RUN_STATUSES.length, 11)
       for (const status of EXPECTED_RUN_STATUSES) {
         assert.ok(isExpectedRunStatus(status))
+      }
+    });
+
+    it('re-exports the canonical @pacc/shared status set (no duplicated definition)', () => {
+      assert.deepEqual(MODULE_RUN_STATUSES, EXPECTED_RUN_STATUSES, 'run.ts 必须复用 shared 权威集合')
+      assert.deepEqual(MODULE_TERMINAL_RUN_STATUSES, RUN_TERMINAL_STATUSES, '终态集合同样以 shared 为准')
+    });
+
+    it('canonical terminal statuses are the 5 absorbing states', () => {
+      assert.equal(RUN_TERMINAL_STATUSES.length, 5)
+      for (const terminal of RUN_TERMINAL_STATUSES) {
+        assert.ok(isExpectedRunStatus(terminal), `${terminal} 必须属于 canonical 状态集合`)
       }
     });
   });
@@ -354,15 +356,7 @@ describe('core/runtime/run', () => {
     });
 
     it('all terminal states are absorbing (no outgoing transitions)', () => {
-      const terminalStatuses = [
-        'completed',
-        'failed',
-        'cancelled',
-        'interrupted',
-        'budget_exceeded',
-      ] as const
-
-      for (const terminal of terminalStatuses) {
+      for (const terminal of RUN_TERMINAL_STATUSES) {
         const m = createMachine()
         m.transition('running')
         m.transition(toRunStatus(terminal))

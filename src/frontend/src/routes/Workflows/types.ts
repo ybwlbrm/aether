@@ -33,11 +33,26 @@ export interface RunRecord {
     type: string
     output: string
     data?: unknown
-    status: 'completed' | 'failed'
+    status: 'completed' | 'failed' | 'cancelled'
     error?: string
+    /** 机器可读失败码（AEX-P0-017） */
+    code?: string
   }>;
+  /** 节点级执行态（AEX-P0-015）—— 与 results 的聚合快照不同，这是每节点一行的事实源 */
+  nodeRuns?: NodeRunRecord[];
   error?: string;
   startedAt: string;
+  completedAt?: string;
+}
+
+export interface NodeRunRecord {
+  nodeId: string;
+  status: 'pending' | 'running' | 'completed' | 'failed' | 'cancelled';
+  attempt: number;
+  retryCount: number;
+  output?: string;
+  error?: string;
+  startedAt?: string;
   completedAt?: string;
 }
 

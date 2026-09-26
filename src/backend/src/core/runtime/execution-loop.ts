@@ -29,7 +29,16 @@ import {
   ToolRecoveryController,
   type RetryEvent,
   type RetryType,
+  type ToolSideEffectClass,
 } from './execution-retry.js'
+import { evaluateTaskCompletion, type CompletionVerdict } from './execution-completion.js'
+import {
+  createExecutionCheckpoint,
+  mergeStepResult,
+  recordExecutionCheckpoint,
+  type ExecutionCheckpoint,
+  type ExecutionStepResult,
+} from './execution-checkpoint.js'
 
 // ============================================================
 // Completion State（P0-03：禁止仅靠"模型有没有输出文字"判断完成）
@@ -202,6 +211,11 @@ export interface ExecutionLoopResult {
   retryExhausted?: boolean
   /** retry_exhausted 终态标识（不改变既有 failed state 契约） */
   terminalState?: 'retry_exhausted'
+  /**
+   * Phase 4：最新执行检查点（进程内存态，本轮不做持久化）。
+   * 预算耗尽 / 取消 / 失败时随结果返回，供后续 Retry 恢复执行。
+   */
+  checkpoint?: ExecutionCheckpoint
 }
 
 // ============================================================
@@ -259,13 +273,136 @@ export interface ExecutionLoopDeps {
    */
   onChunk?: (chunk: StreamChunk) => void;
   /**
-   * §3.2 Loop 完成判定钩子（可选）：仅 Loop 模式生效。模型返回"无工具调用"的纯文本后，
-   * 调用方用此钩子判断"任务是否真的完成"（而非"有文本就算完成"）。
-   * - 返回 true → completed
-   * - 返回 false → verifying/continuing，继续下一轮（预算内），实现"执行→验证→继续→完成"
-   * 缺省：content 非空即视为完成（与 Normal 一致，保持兼容）。
+   * AEX-P0-006：工具副作用分级解析器（可选）。
+   * 缺省 `unknown` → 工具失败不自动重试（避免重复副作用）；只读工具应显式声明
+   * `read_only` / `idempotent` 以保留自动重试能力。
+   */
+  classifyToolSideEffect?: (tool: ExecutionTool) => ToolSideEffectClass;
+  /**
+   * §3.2 Loop 完成判定钩子（可选，仅 Loop 模式生效）：**只能收紧，不能放宽**。
+   * 完成与否始终由 evaluateTaskCompletion 依证据判定（不再"有文本即完成"）：
+   * - 返回 false → 强制继续下一轮（即使 evaluator 已判完成）
+   * - 返回 true  → 不短路，仍需 evaluator 确认目标满足
+   * 禁止注入 `content.trim() !== ''` 之类的文本判据（AEX-P0-001）。
    */
   isTaskComplete?: (response: ModelResponse, messages: Array<Record<string, unknown>>) => boolean;
+}
+
+// ============================================================
+// Phase 4：Loop 完成判定接线（TaskCompletionEvaluator + ExecutionCheckpoint）
+// ============================================================
+
+/** 纠正指令注入消息历史时的标记（与既有 [task_retry] 约定一致） */
+const CORRECTION_MESSAGE_PREFIX = '[task_correction]'
+
+/** checkpoint 内单个工具结果保留的最大字符数（与 Loop content 预览一致） */
+const CHECKPOINT_TOOL_RESULT_CHARS = 500
+
+/** 缺省目标描述：Loop 上下文未提供 user 指令时的占位（非空，满足 checkpoint 约束） */
+const UNSPECIFIED_OBJECTIVE = '未声明目标的任务'
+
+type LoopCompletionContext = {
+  readonly messages: Array<Record<string, unknown>>
+  readonly response: ModelResponse
+  readonly toolResults: readonly ExecutionStepResult[]
+  readonly pendingSteps: readonly string[]
+  readonly hasError: boolean
+  readonly objective: string
+  readonly taskPrompt: string
+}
+
+function messageText(message: Record<string, unknown>): string {
+  return typeof message.content === 'string' ? message.content.trim() : ''
+}
+
+function userMessages(messages: readonly Record<string, unknown>[]): string[] {
+  const texts: string[] = []
+  for (const message of messages) {
+    if (message.role !== 'user') continue
+    const text = messageText(message)
+    if (text !== '') texts.push(text)
+  }
+  return texts
+}
+
+/** 当前目标：最近一条 user 指令（对话推进后目标随之收敛） */
+function deriveObjective(messages: readonly Record<string, unknown>[]): string {
+  const texts = userMessages(messages)
+  return texts.at(-1) ?? UNSPECIFIED_OBJECTIVE
+}
+
+/** 原始提示词：第一条 user 指令（evaluator 的 taskPrompt 输入） */
+function deriveTaskPrompt(messages: readonly Record<string, unknown>[]): string {
+  return userMessages(messages)[0] ?? ''
+}
+
+/** 把 checkpoint 的强类型步骤结果转换为 evaluator 可消费的记录 */
+function toCompletionToolResults(
+  toolResults: readonly ExecutionStepResult[],
+): Array<Record<string, unknown>> {
+  return toolResults.map(result => ({
+    step: result.step,
+    result: result.result,
+    ...(result.status === undefined ? {} : { status: result.status }),
+    ...(result.error === undefined ? {} : { error: result.error }),
+  }))
+}
+
+function markStepPending(checkpoint: ExecutionCheckpoint, step: string): ExecutionCheckpoint {
+  if (checkpoint.pendingSteps.includes(step)) return checkpoint
+  return { ...checkpoint, pendingSteps: [...checkpoint.pendingSteps, step] }
+}
+
+function recordStepCompleted(checkpoint: ExecutionCheckpoint, step: string, result: string): ExecutionCheckpoint {
+  return mergeStepResult(checkpoint, {
+    step,
+    result: result.slice(0, CHECKPOINT_TOOL_RESULT_CHARS),
+    status: 'completed',
+  })
+}
+
+function recordStepFailed(checkpoint: ExecutionCheckpoint, step: string, reason: string): ExecutionCheckpoint {
+  return mergeStepResult(checkpoint, {
+    step,
+    result: `[tool_error] ${reason}`,
+    status: 'failed',
+    error: reason,
+  })
+}
+
+/**
+ * Loop 完成判据（AEX-P0-001）。
+ *
+ * 权威判据永远是 TaskCompletionEvaluator；显式注入的 `deps.isTaskComplete` 只能
+ * **收紧**、不能**放宽**：
+ * - 钩子返回 false → 强制 continue（下一轮），即使 evaluator 认为目标已满足；
+ * - 钩子返回 true  → 不再短路 complete，仍需 evaluator 用证据确认（"有文本≠完成"）。
+ *
+ * 理由：`content.trim() !== ''` 这类钩子曾让 evaluateTaskCompletion 在生产路径变成
+ * 死代码（模型只要吐字就 complete）。彻底删除钩子会破坏仍需自定义判据的调用方，
+ * 因此保留接口但去掉"放宽"能力——完成与否必须由证据决定。
+ */
+function judgeLoopCompletion(
+  deps: ExecutionLoopDeps,
+  context: LoopCompletionContext,
+): CompletionVerdict {
+  // 成功工具结果即产出证据：有产出且无待办 → 目标已满足（无文本也算完成）
+  const hasExpectedArtifact = context.toolResults.some(result => result.status === 'completed')
+  const verdict = evaluateTaskCompletion({
+    taskObjective: context.objective,
+    taskPrompt: context.taskPrompt,
+    messageHistory: context.messages,
+    completedToolResults: toCompletionToolResults(context.toolResults),
+    hasError: context.hasError,
+    hasExpectedArtifact,
+    currentResponse: context.response,
+    pendingSteps: context.pendingSteps,
+  })
+
+  if (!deps.isTaskComplete) return verdict
+  return deps.isTaskComplete(context.response, context.messages)
+    ? verdict
+    : { status: 'continue', reason: '调用方显式判定任务未完成', suggestedInstruction: '' }
 }
 
 // ============================================================
@@ -340,9 +477,24 @@ export async function runExecutionLoop(
   let reasoningContent = ''
   let interrupted = false
   let finishReason: ModelResponse['finishReason'] | undefined
+  let taskAttempt = 0
 
   const runId = opts.runId ?? deps.runId ?? 'unknown'
   const taskId = opts.taskId ?? deps.taskId ?? runId
+  const objective = deriveObjective(messages)
+  const taskPrompt = deriveTaskPrompt(messages)
+  let checkpoint = createExecutionCheckpoint({
+    runId,
+    turn: 0,
+    seq: 0,
+    completedSteps: [],
+    pendingSteps: [],
+    toolResults: [],
+    lastError: null,
+    currentObjective: objective,
+    attempt: 0,
+  })
+  recordExecutionCheckpoint(checkpoint)
   const emit = (type: string, payload: Record<string, unknown>): void => {
     try {
       deps.onEvent?.(type, payload)
@@ -351,6 +503,7 @@ export async function runExecutionLoop(
     }
   }
   const emitRetryEvent = (event: RetryEvent): void => {
+    if (event.type === 'attempt.started') taskAttempt = event.payload.attempt
     emit(event.type, { ...event.payload })
   }
 
@@ -466,8 +619,10 @@ export async function runExecutionLoop(
       emit('execution.tool_calls', { turn: turnsUsed, count: response.toolCalls.length })
       for (const toolCall of response.toolCalls) {
         if (opts.signal?.aborted) throw new CancellationError('Execution cancelled', opts.signal.reason)
+        checkpoint = markStepPending(checkpoint, toolCall.name)
         const cachedResult = taskController.getToolResult(toolCall.id, toolCall.arguments)
         if (cachedResult !== undefined) {
+          checkpoint = recordStepCompleted(checkpoint, toolCall.name, cachedResult)
           if (!hasToolResultMessage(messages, toolCall.id)) {
             messages.push({ role: 'tool', tool_call_id: toolCall.id, content: cachedResult })
             content += cachedResult.slice(0, 500)
@@ -486,16 +641,23 @@ export async function runExecutionLoop(
         toolCallCount++
         emit('execution.tool_started', { turn: turnsUsed, tool: toolCall.name })
         try {
+          const tool: ExecutionTool = {
+            name: toolCall.name,
+            arguments: toolCall.arguments,
+            id: toolCall.id,
+          }
           const result = await toolController.run(
             toolCall.id,
-            () => deps.executeTool({
-              name: toolCall.name,
+            () => deps.executeTool(tool, turnsUsed),
+            {
               arguments: toolCall.arguments,
-              id: toolCall.id,
-            }, turnsUsed),
-            { arguments: toolCall.arguments, signal: opts.signal },
+              signal: opts.signal,
+              // AEX-P0-006：未声明分级即按 unknown 处理（不自动重试）
+              sideEffectClass: deps.classifyToolSideEffect?.(tool),
+            },
           )
           taskController.markToolCompleted(toolCall.id, result, toolCall.arguments)
+          checkpoint = recordStepCompleted(checkpoint, toolCall.name, result)
           messages.push({ role: 'tool', tool_call_id: toolCall.id, content: result })
           content += result.slice(0, 500)
           emit('execution.tool_completed', {
@@ -507,7 +669,9 @@ export async function runExecutionLoop(
           if (opts.signal?.aborted || isCancellationError(error)) {
             throw new CancellationError('Execution cancelled', error)
           }
-          const result = `[tool_error] ${errorMessage(error)}`
+          const reason = errorMessage(error)
+          const result = `[tool_error] ${reason}`
+          checkpoint = recordStepFailed(checkpoint, toolCall.name, reason)
           messages.push({ role: 'tool', tool_call_id: toolCall.id, content: result })
           content += result.slice(0, 500)
           emit('execution.tool_completed', {
@@ -530,17 +694,46 @@ export async function runExecutionLoop(
     }
 
     if (opts.loop) {
-      emit('execution.verifying', { turn: turnsUsed, contentLength: response.content.length })
-      let taskComplete: boolean
+      let verdict: CompletionVerdict
       try {
-        taskComplete = deps.isTaskComplete
-          ? deps.isTaskComplete(response, messages)
-          : response.content.trim() !== ''
+        verdict = judgeLoopCompletion(deps, {
+          messages,
+          response,
+          toolResults: checkpoint.toolResults,
+          pendingSteps: checkpoint.pendingSteps,
+          // checkpoint.lastError 是执行错误的唯一真源：工具失败写入、成功重试后清除
+          hasError: checkpoint.lastError !== null,
+          objective,
+          taskPrompt,
+        })
       } catch (error: unknown) {
-        return { kind: 'failed', error: `isTaskComplete 抛错: ${errorMessage(error)}` }
+        return { kind: 'failed', error: `完成判定抛错: ${errorMessage(error)}` }
       }
-      if (taskComplete) return { kind: 'completed', response }
-      emit('execution.continuing', { turn: turnsUsed, reason: 'task_incomplete' })
+      emit('execution.verifying', {
+        turn: turnsUsed,
+        contentLength: response.content.length,
+        verdict: verdict.status,
+        reason: verdict.reason,
+      })
+      switch (verdict.status) {
+        case 'complete':
+          return { kind: 'completed', response }
+        case 'needs_correction':
+          // 纠正指令进入消息历史，下一轮模型据此修正（不静默重试同一请求）
+          messages.push({
+            role: 'system',
+            content: `${CORRECTION_MESSAGE_PREFIX} ${verdict.suggestedInstruction}`,
+          })
+          break
+        case 'continue':
+        case 'verify_required':
+          break
+      }
+      emit('execution.continuing', {
+        turn: turnsUsed,
+        reason: 'task_incomplete',
+        verdict: verdict.status,
+      })
       return { kind: 'continue' }
     }
 
@@ -614,6 +807,14 @@ export async function runExecutionLoop(
       }
 
       taskController.checkpoint.clear()
+      checkpoint = createExecutionCheckpoint({
+        ...checkpoint,
+        turn: turnsUsed,
+        seq: turnsUsed,
+        currentObjective: objective,
+        attempt: taskAttempt,
+      })
+      recordExecutionCheckpoint(checkpoint)
       const shouldStop = outcome.kind !== 'continue'
       switch (outcome.kind) {
         case 'continue':
@@ -680,6 +881,7 @@ export async function runExecutionLoop(
     budgetExceeded,
     usage,
     retryCount,
+    checkpoint,
     ...(interrupted ? { interrupted: true as const } : {}),
     ...(finishReason ? { finishReason } : {}),
     ...(retryExhausted ? { retryExhausted: true as const } : {}),

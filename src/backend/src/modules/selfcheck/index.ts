@@ -11,6 +11,7 @@ import { createProductionVerificationExecutors } from '../../lib/verification-en
 // P0-32: SelfCorrectionEngine（自我纠错闭环）
 import { createSelfCorrectionEngine, type SelfCorrectionInput } from '../../core/verification/self-correction-engine.js';
 import { buildRuntimeForProvider } from '../../lib/model-runtime-bridge.js';
+import { logger } from '../../lib/logger.js';
 
 export function registerSelfCheckRoutes(app: FastifyInstance, config: BackendConfig): void {
 
@@ -115,8 +116,9 @@ export function registerSelfCheckRoutes(app: FastifyInstance, config: BackendCon
             advice = `${diagnosis ? `诊断: ${diagnosis}\n` : ''}修复建议: ${resp.content.trim()}`;
           }
         } catch (e: unknown) {
-          console.warn('[SelfCorrection] LLM 修复建议失败，使用诊断兜底:',
-            e instanceof Error ? e.message : String(e));
+          // AEX-P2-004 分类：recoverable —— LLM 修复建议不可得时以诊断结论兜底，
+          // 自纠错闭环仍返回有效结果，不因模型故障中断。
+          logger.warn({ event: 'selfcheck.llm_advice_failed', err: e, goal: input.goal }, 'LLM 修复建议失败，使用诊断兜底');
         }
         // changedFiles 由调用方提供；本轮「变更」为修复建议文本
         return { changes: body.changedFiles ?? [], failureHint: undefined };

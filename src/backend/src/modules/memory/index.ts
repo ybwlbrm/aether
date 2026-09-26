@@ -7,6 +7,7 @@ import { randomUUID } from 'node:crypto';
 import { AppError } from '@pacc/shared';
 import { getProviderByCapability } from '../../lib/provider.js';
 import { buildRuntimeForProvider } from '../../lib/model-runtime-bridge.js';
+import { logger } from '../../lib/logger.js';
 
 /** 记忆类型枚举（与 schema 一致） */
 const MEMORY_TYPES = ['short_term', 'long_term', 'project'] as const;
@@ -37,7 +38,7 @@ const EXTRACT_SYSTEM_PROMPT = `你是一个记忆提取助手。从用户提供�
  */
 function parseMemoriesJson(text: string): { type: string; key: string; content: string; tags?: string[] }[] {
   const cleaned = text.trim().replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/, '');
-  let parsed: any = null;
+  let parsed: unknown = null;
   try {
     parsed = JSON.parse(cleaned);
   } catch {
@@ -45,12 +46,20 @@ function parseMemoriesJson(text: string): { type: string; key: string; content: 
     const start = cleaned.indexOf('{');
     const end = cleaned.lastIndexOf('}');
     if (start !== -1 && end > start) {
-      try { parsed = JSON.parse(cleaned.slice(start, end + 1)); } catch { /* 仍失败则返回空 */ }
+      try {
+        parsed = JSON.parse(cleaned.slice(start, end + 1));
+      } catch {
+        // AEX-P2-004 分类：intentional fallback —— 模型输出不是合法 JSON 时返回空列表，
+        // 表示「本轮无可提取记忆」，属于正常降级而非错误。
+      }
     }
   }
-  const list = parsed?.memories;
+  const obj = parsed as Record<string, unknown> | null;
+  const list = obj?.memories;
   if (!Array.isArray(list)) return [];
-  return list.filter((m: any) => m && typeof m === 'object' && typeof m.content === 'string');
+  return list.filter((m): m is { type: string; key: string; content: string; tags?: string[] } =>
+    !!m && typeof m === 'object' && typeof (m as Record<string, unknown>).content === 'string',
+  );
 }
 
 /** 解析 tags 字段（DB 中为 JSON 字符串） */
@@ -181,7 +190,7 @@ export function registerMemoryRoutes(app: FastifyInstance, config: BackendConfig
     const extracted = parseMemoriesJson(rawText);
 
     const now = new Date().toISOString();
-    const saved: any[] = [];
+    const saved: Array<{ id: string; type: string; key: string; content: string; tags: string[]; createdAt: string; updatedAt: string }> = [];
     for (const m of extracted) {
       const memContent = (m.content || '').trim();
       if (!memContent) continue;
@@ -204,7 +213,12 @@ export function registerMemoryRoutes(app: FastifyInstance, config: BackendConfig
     }
 
     // 显式持久化（与 conversations 模块一致）
-    try { saveDb(config); } catch (e: unknown) { console.error('[Memory] 持久化失败:', (e instanceof Error ? e.message : String(e)) || e); }
+    try {
+      saveDb(config);
+    } catch (e: unknown) {
+      // AEX-P2-004 分类：recoverable —— 记忆已写入内存态与 SQLite，快照落盘失败交由下次 saveDb 补齐。
+      logger.error({ event: 'memory.persist_failed', err: e, extracted: saved.length }, '记忆数据持久化失败');
+    }
 
     return { extracted: saved.length, memories: saved };
   });
@@ -221,7 +235,12 @@ export function registerMemoryRoutes(app: FastifyInstance, config: BackendConfig
     const existing = db.select().from(memories).where(eq(memories.id, id)).get();
     if (!existing) throw AppError.notFound('记忆', id);
     db.delete(memories).where(eq(memories.id, id)).run();
-    try { saveDb(config); } catch (e: unknown) { console.error('[Memory] 删除持久化失败:', (e instanceof Error ? e.message : String(e)) || e); }
+    try {
+      saveDb(config);
+    } catch (e: unknown) {
+      // AEX-P2-004 分类：recoverable —— SQLite 删除已生效，快照落盘失败交由下次 saveDb 补齐。
+      logger.error({ event: 'memory.persist_failed', err: e, memoryId: id }, '记忆删除后持久化失败');
+    }
     return { success: true };
   });
 }

@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { getDb } from '../db/client.js';
 import { conversations, messages } from '../db/schema/index.js';
 import { eq } from 'drizzle-orm';
+import { logger } from './logger.js';
 
 // ESM 环境手动声明 __dirname
 const __filename = fileURLToPath(import.meta.url);
@@ -34,7 +35,11 @@ function loadConfigFromDisk(): SyncConfig | null {
     if (existsSync(path)) {
       return JSON.parse(readFileSync(path, 'utf-8'));
     }
-  } catch { /* ignore */ }
+  } catch (e: unknown) {
+    // AEX-P2-004 分类：intentional fallback —— sync-config.json 损坏时视为「未配置云同步」，
+    // 返回 null 让功能整体保持关闭，而不是让后端启动失败。
+    logger.warn({ event: 'sync.config_load_failed', err: e, path }, '云同步配置文件损坏，视为未配置');
+  }
   return null;
 }
 
@@ -63,7 +68,11 @@ export async function ensureDeviceRegistered(sb: SupabaseClient, cfg: SyncConfig
       type: 'desktop',
       last_seen_at: new Date().toISOString(),
     }, { onConflict: 'id' });
-  } catch { /* ignore */ }
+  } catch (e: unknown) {
+    // AEX-P2-004 分类：recoverable —— 设备注册是同步的前置外键步骤，
+    // 网络/RLS 异常时记录并继续，后续 upsert 会自行暴露问题，不阻断调用方。
+    logger.warn({ event: 'sync.device_register_failed', err: e, deviceId: cfg.deviceId }, '云端设备注册失败');
+  }
 }
 
 /** 同步一条对话 + 全部消息到 Supabase */
@@ -104,7 +113,10 @@ export async function syncConversationToSupabase(convId: string, sbOverride?: Su
         created_at: m.createdAt,
       }, { onConflict: 'id' });
     }
-  } catch { /* 同步失败不阻塞主流程 */ }
+  } catch (e: unknown) {
+    // AEX-P2-004 分类：recoverable —— 云同步是可选旁路，失败绝不阻塞本地对话主流程。
+    logger.warn({ event: 'sync.conversation_sync_failed', err: e, convId }, '云同步对话失败，已忽略（本地数据为准）');
+  }
 }
 
 /** 同步单条消息到 Supabase + 更新 conversations_sync */
@@ -137,5 +149,8 @@ export async function syncMessageToSupabase(
       message_count: count,
       updated_at: new Date().toISOString(),
     }).eq('id', convId);
-  } catch { /* 同步失败不阻塞 */ }
+  } catch (e: unknown) {
+    // AEX-P2-004 分类：recoverable —— 同上：消息同步失败不阻塞本地流程。
+    logger.warn({ event: 'sync.message_sync_failed', err: e, convId, messageId: msg.id }, '云同步消息失败，已忽略（本地数据为准）');
+  }
 }

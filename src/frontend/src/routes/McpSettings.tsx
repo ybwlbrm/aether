@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { PageHeader } from '../components/PageHeader';
-import { api, authHeaders } from '../api/client';
+import { api } from '../api/client';
 import { Server, Plus, Trash2, Play, Power, PowerOff, ExternalLink, Terminal, Download, BookOpen, CheckCircle2, XCircle, Eye } from 'lucide-react';
 import { confirm as confirmDialog } from '../components/ui/confirm-dialog';
 import { useAutosaveDraft } from '../hooks/useAutosaveDraft';
@@ -133,12 +133,16 @@ export function McpSettings() {
   const handleImport = async () => {
     setImporting(true);
     setImportResult(null);
-    try {
-      const res = await (await fetch('/api/mcp/import', { method: 'POST', headers: { 'X-Requested-With': 'XMLHttpRequest', ...authHeaders() } })).json();
-      const msg = `✅ 导入成功: ${res.imported?.join(', ') || '无'}` + (res.errors?.length ? `\n❌ 错误: ${res.errors.join(', ')}` : '');
+    // AEX-P1-017：经 api.result 统一契约（原先裸 fetch 绕过鉴权/超时，且把非 2xx 当成功）
+    const res = await api.result.importMcpServers();
+    if (res.ok) {
+      const msg = `✅ 导入成功: ${res.data.imported?.join(', ') || '无'}`
+        + (res.data.errors?.length ? `\n❌ 错误: ${res.data.errors.join(', ')}` : '');
       setImportResult(msg);
       load();
-    } catch (e: unknown) { setImportResult(`❌ 导入失败: ${(e instanceof Error ? e.message : String(e))}`); }
+    } else {
+      setImportResult(`❌ 导入失败: ${res.error.message}`);
+    }
     setImporting(false);
     safeTimeout(() => setImportResult(null), 8000);
   };

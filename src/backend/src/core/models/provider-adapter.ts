@@ -9,8 +9,8 @@ import type { ModelRequest, ModelResponse } from './model-runtime.js'
 import type { StreamChunk, TokenUsage, FinishReason } from '@pacc/shared'
 import { ModelError, RetryExhaustedError } from '../errors/index.js'
 import { streamToComplete } from './model-runtime.js'
-import { createRetryPolicy, extractRetryAfterMs } from './retry-policy.js'
-import { createCircuitBreaker } from './circuit-breaker.js'
+import { createRetryPolicy, extractRetryAfterMs, type RetryPolicy } from './retry-policy.js'
+import { createCircuitBreaker, type CircuitBreaker } from './circuit-breaker.js'
 
 /**
  * Provider adapter interface — implemented by each provider integration.
@@ -104,6 +104,39 @@ export interface FetchTransportOptions {
   apiKey?: string;
   /** Custom fetch implementation (for testing / non-browser envs) */
   fetchImpl?: typeof fetch;
+  /** Retry policy（缺省创建：5 次重试 + jitter） */
+  retryPolicy?: RetryPolicy;
+  /** Circuit breaker（缺省创建：5 次失败熔断 30s） */
+  circuitBreaker?: CircuitBreaker;
+}
+
+/**
+ * 流是否被"取消"（用户 abort / Run cancel）—— 与"流失败"是两种不同的结果：
+ * 取消不是 Provider 故障，既不记熔断成功也不记熔断失败，更不可重试。
+ */
+function isStreamCancelled(error: unknown, signal: AbortSignal | undefined): boolean {
+  if (signal?.aborted) return true;
+  return (
+    typeof error === 'object' &&
+    error !== null &&
+    (error as { name?: unknown }).name === 'AbortError'
+  );
+}
+
+/**
+ * STREAM_CLOSED —— 流被截断/中断的**唯一**错误形态（P0-009）。
+ * 此前截断只写注释不抛错、连接重置裸穿出，导致 retry-policy.ts / execution-retry.ts
+ * 里既有的 STREAM_CLOSED 可重试判定没有任何生产者（死分支）。现在由 provider 层
+ * 显式抛出可重试错误，重试决策交给上层（重放整轮执行，而非在半截内容上重试）。
+ */
+function streamClosedError(request: ModelRequest, message: string, cause?: unknown): ModelError {
+  return new ModelError(message, {
+    provider: request.provider,
+    model: request.model,
+    code: 'STREAM_CLOSED',
+    retryable: true,
+    cause,
+  });
 }
 
 /**
@@ -137,20 +170,6 @@ function buildChatBody(request: ModelRequest): Record<string, unknown> {
   return body;
 }
 
-/** FetchTransportOptions — 增加 Retry/CircuitBreaker 集成（P0-10） */
-export interface FetchTransportOptions {
-  /** Base URL (e.g. 'https://api.openai.com/v1') — the /chat/completions path is appended */
-  baseUrl: string;
-  /** API key (sent as `Authorization: Bearer <key>`) */
-  apiKey?: string;
-  /** Custom fetch implementation (for testing / non-browser envs) */
-  fetchImpl?: typeof fetch;
-  /** Retry policy（缺省创建：5 次重试 + jitter） */
-  retryPolicy?: import('./retry-policy.js').RetryPolicy;
-  /** Circuit breaker（缺省创建：5 次失败熔断 30s） */
-  circuitBreaker?: import('./circuit-breaker.js').CircuitBreaker;
-}
-
 /**
  * Real HTTP transport: POSTs to `{baseUrl}/chat/completions` with the SSE
  * stream enabled and yields the raw response body bytes. This is the wire
@@ -159,6 +178,16 @@ export interface FetchTransportOptions {
  * P0-10 收口：429/5xx 自动重试（指数退避 + jitter + Retry-After 尊重 +
  * abortable sleep），连续失败触发熔断（快速失败，避免拖垮 Provider 查询）。
  * 非 2xx 响应抛出 retryable-flagged ModelError。
+ *
+ * P0-007/008/009 熔断记账边界：
+ * - 本层（响应头之前）：网络错误 / 429 / 5xx / 空 body 重试耗尽 → recordFailure。
+ *   这类失败发生在"还没拿到任何模型输出"时，判定权完全在本层。
+ * - 本层（响应头之后 / 流阶段）：**不记成功**。HTTP 200 只代表 headers accepted，
+ *   EOF 也可能只是断流；只有上层 parseSSEStream 看到 [DONE] / finish_reason 才允许
+ *   recordSuccess。此处若在拿到 200 时就记成功，截断流会把连续失败计数清零，
+ *   熔断阈值永远到不了（CIRCUIT_OPEN 成为死代码）。
+ * - 读流错误（连接重置/流中断）在本层归一为 STREAM_CLOSED 并 recordFailure；
+ *   "流是否真的跑完"由上层判定，两者不重复记账。
  */
 export function createFetchTransport(opts: FetchTransportOptions): Transport {
   const fetchImpl = opts.fetchImpl ?? globalThis.fetch.bind(globalThis);
@@ -197,10 +226,10 @@ export function createFetchTransport(opts: FetchTransportOptions): Transport {
           code: 'NETWORK_ERROR',
           retryable: true,
         })
-        if (retryPolicy.shouldRetry(attempt, netErr)) {
-          const delay = retryPolicy.delayMs(attempt)
+        const netDecision = retryPolicy.decide(attempt, netErr)
+        if (netDecision.retry) {
           attempt += 1
-          await retryPolicy.sleep(delay, signal)
+          await retryPolicy.sleep(netDecision.delayMs, signal)
           continue
         }
         circuitBreaker.recordFailure()
@@ -222,10 +251,10 @@ export function createFetchTransport(opts: FetchTransportOptions): Transport {
         });
         // 熔断只记录可重试的传输级失败（429/5xx）；4xx 属业务错误，不应累积熔断失败。
         const withRetryAfter = Object.assign(err, { retryAfterMs })
-        if (retryPolicy.shouldRetry(attempt, withRetryAfter)) {
-          const delay = retryPolicy.delayMs(attempt, retryAfterMs)
+        const httpDecision = retryPolicy.decide(attempt, withRetryAfter, retryAfterMs)
+        if (httpDecision.retry) {
           attempt += 1
-          await retryPolicy.sleep(delay, signal)
+          await retryPolicy.sleep(httpDecision.delayMs, signal)
           continue
         }
         if (retryable) {
@@ -242,17 +271,18 @@ export function createFetchTransport(opts: FetchTransportOptions): Transport {
           code: 'PROVIDER_UNAVAILABLE',
           retryable: true,
         })
-        if (retryPolicy.shouldRetry(attempt, emptyBodyError)) {
-          const delay = retryPolicy.delayMs(attempt)
+        const emptyDecision = retryPolicy.decide(attempt, emptyBodyError)
+        if (emptyDecision.retry) {
           attempt += 1
-          await retryPolicy.sleep(delay, signal)
+          await retryPolicy.sleep(emptyDecision.delayMs, signal)
           continue
         }
         circuitBreaker.recordFailure()
         throw providerRetryExhausted(request, emptyBodyError, retryPolicy.maxAttempts)
       }
 
-      circuitBreaker.recordSuccess()
+      // §17 / P0-008：headers accepted ≠ 执行成功 —— 刻意不在此处 recordSuccess。
+      // 记账由上层 parseSSEStream 在看到 terminator（[DONE] / finish_reason）后完成。
       const reader = response.body.getReader()
       try {
         for (;;) {
@@ -260,6 +290,18 @@ export function createFetchTransport(opts: FetchTransportOptions): Transport {
           if (done) return;
           yield value;
         }
+      } catch (e: unknown) {
+        // 取消（用户 abort）不是 Provider 故障：原样抛出，不污染熔断计数。
+        if (isStreamCancelled(e, signal)) throw e;
+        // 连接重置 / 流中断 → 计入熔断失败，并抛可重试的 STREAM_CLOSED，
+        // 让 retry-policy / execution-retry 既有的 STREAM_CLOSED 判定有生产者。
+        // 刻意不在本层重试：已经 yield 出部分内容，重放会重复输出（重试决策上移一层）。
+        circuitBreaker.recordFailure();
+        throw streamClosedError(
+          request,
+          `provider stream interrupted: ${e instanceof Error ? e.message : String(e)}`,
+          e,
+        );
       } finally {
         reader.releaseLock();
       }
@@ -298,9 +340,12 @@ export interface OpenAICompatibleAdapterOptions {
    */
   transport?: Transport;
   /** P0-10: 自定义 RetryPolicy（缺省 5 次重试 + jitter） */
-  retryPolicy?: ReturnType<typeof createRetryPolicy>;
-  /** P0-10: 自定义 CircuitBreaker（缺省 5 次失败熔断 30s） */
-  circuitBreaker?: ReturnType<typeof createCircuitBreaker>;
+  retryPolicy?: RetryPolicy;
+  /** P0-10: 自定义 CircuitBreaker（缺省 5 次失败熔断 30s）
+   *  P0-007：必须是 **provider 级** 实例（由 lib/model-runtime-bridge.ts 的
+   *  ProviderRuntimeRegistry 持有并在同一 providerId 的所有请求间复用），
+   *  否则每请求新建熔断器 → consecutiveFailures 永远到不了阈值。 */
+  circuitBreaker?: CircuitBreaker;
   /** Optional mock for testing — if provided, streamMessages yields from mock instead of transport */
   mock?: (request: ModelRequest) => AsyncIterable<StreamChunk>;
   /**
@@ -325,8 +370,8 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
   private readonly transport?: Transport;
   private readonly mock?: (request: ModelRequest) => AsyncIterable<StreamChunk>;
   private readonly allowHttpTransport: boolean;
-  private readonly retryPolicy?: ReturnType<typeof createRetryPolicy>
-  private readonly circuitBreaker?: ReturnType<typeof createCircuitBreaker>
+  private readonly retryPolicy?: RetryPolicy
+  private readonly circuitBreaker?: CircuitBreaker
   private readonly httpTransport?: Transport
 
   constructor(options: OpenAICompatibleAdapterOptions) {
@@ -422,6 +467,15 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
    * 仅按 \n\n 切分 —— 部分 Provider 使用 CRLF 会导致内容积压到 buffer 最后
    * 才大段处理（"看起来流式，实际最后一起出来"）。同时支持多行 data 拼接、
    * event:/id:/retry: 字段、混合 CRLF/LF。
+   *
+   * P0-008/P0-009：流阶段熔断记账与终态判定的**唯一**收口点。五种流结果：
+   * | 结果              | 判定                              | 熔断   | 对外表现                       |
+   * |-------------------|-----------------------------------|--------|------------------------------|
+   * | headers accepted  | HTTP 2xx + 拿到 body              | 不记账 | 继续解析                      |
+   * | stream completed  | 收到 [DONE] 或 finish_reason      | 成功   | finish(normal)                |
+   * | stream truncated  | EOF 无 [DONE] 且无 finish_reason  | 失败   | 抛 STREAM_CLOSED(retryable)   |
+   * | stream parse error| 帧 JSON 非法（终态 error）        | 失败   | finish(MALFORMED_RESPONSE)    |
+   * | stream cancelled  | abort / Run cancel                 | 不记账 | 原样抛出 AbortError           |
    */
   private async *parseSSEStream(
     request: ModelRequest,
@@ -434,6 +488,8 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
     const toolCallBuffers: Map<number, { id: string; name: string; arguments: string }> = new Map();
     const openedBlocks: Map<number, 'text' | 'reasoning' | 'tool-call'> = new Map();
     let finished = false;
+    // 解析出错（malformed JSON）→ 终态按失败记账，不被后续 terminator 覆盖
+    let parseFailed = false;
 
     // Emit a single finish event (only once per stream).
     const finishOnce = function* (reason: FinishReason = { kind: 'stop' }): Generator<StreamChunk> {
@@ -441,6 +497,15 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
         finished = true;
         yield { type: 'finish', reason };
       }
+    };
+
+    /**
+     * 熔断记账（流阶段唯一写入点，每个出口恰好调用一次）：
+     * 只有 stream completed 才记成功；truncated / parse error 记失败。
+     */
+    const recordOutcome = (completed: boolean): void => {
+      if (completed) this.circuitBreaker?.recordSuccess();
+      else this.circuitBreaker?.recordFailure();
     };
 
     const mappedWireChunk = (wireChunk: WireChunk): Generator<StreamChunk, FinishReason | undefined> =>
@@ -459,6 +524,7 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
         }
       } catch (error: unknown) {
         const detail = error instanceof Error ? error.message : String(error)
+        parseFailed = true
         yield* finishOnce({
           kind: 'error',
           message: `malformed provider JSON: ${detail}`,
@@ -483,33 +549,59 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
       yield* handleData(data);
     };
 
-    for await (const chunk of transportStream) {
-      buffer += decoder.decode(chunk, { stream: true });
+    try {
+      for await (const chunk of transportStream) {
+        buffer += decoder.decode(chunk, { stream: true });
 
-      // 标准 SSE 帧边界：\r\n\r\n 或 \n\n（含混合）
-      let boundaryIndex: number;
-      while ((boundaryIndex = findFrameBoundary(buffer)) !== -1) {
-        const frame = buffer.slice(0, boundaryIndex);
-        buffer = buffer.slice(boundaryIndex + (buffer.startsWith('\r\n\r\n', boundaryIndex) ? 4 : 2));
-        if (frame.length > 0) {
-          yield* parseFrame(frame);
-          if (finished) return;
+        // 标准 SSE 帧边界：\r\n\r\n 或 \n\n（含混合）
+        let boundaryIndex: number;
+        while ((boundaryIndex = findFrameBoundary(buffer)) !== -1) {
+          const frame = buffer.slice(0, boundaryIndex);
+          buffer = buffer.slice(boundaryIndex + (buffer.startsWith('\r\n\r\n', boundaryIndex) ? 4 : 2));
+          if (frame.length > 0) {
+            yield* parseFrame(frame);
+            if (finished) {
+              // stream completed（或以 parse error 终态）—— 此刻才允许记成功
+              recordOutcome(!parseFailed);
+              return;
+            }
+          }
         }
       }
+    } catch (error: unknown) {
+      // 流被取消 → 原样抛出，既不记成功也不记失败（不是 Provider 故障）
+      if (isStreamCancelled(error, request.signal)) throw error;
+      // transport 已归类并记账的错误（STREAM_CLOSED / RATE_LIMIT / PROVIDER_UNAVAILABLE /
+      // NETWORK_ERROR / CIRCUIT_OPEN / RetryExhausted）既不重复记账也不重新包装；
+      // 裸错误只可能来自自定义注入的 transport（无 HTTP 层记账），由本层收口。
+      const classified =
+        ModelError.isModelError(error) || error instanceof RetryExhaustedError;
+      if (!classified) this.circuitBreaker?.recordFailure();
+      throw classified
+        ? error
+        : streamClosedError(
+            request,
+            `provider stream failed: ${error instanceof Error ? error.message : String(error)}`,
+            error,
+          );
     }
 
     // Flush any remaining buffer（EOF 尾部，无空行终止）
     if (buffer.trim()) {
       yield* parseFrame(buffer);
-      if (finished) return;
+      if (finished) {
+        recordOutcome(!parseFailed);
+        return;
+      }
     }
 
-    // §17 修复：EOF 未收到 [DONE] 且无 finish_reason → 流被截断（STREAM_CLOSED 语义）。
-    // 不得补发 stop（否则断流会被伪装成正常完成）；streamToComplete 据此判定
-    // finishReason='error' + interrupted=true，上层（execution-loop / orchestration）
-    // 将断流标记为 failed/interrupted 而非 completed。
-    // 正常流已在 handleData / mapWireChunk 中通过 [DONE] 或 finish_reason 触发 finishOnce。
-    return;
+    // P0-009：EOF 未收到 [DONE] 且无 finish_reason → 流被截断（STREAM_CLOSED 语义）。
+    // 旧实现只写注释静默 return：断流被伪装成正常结束，且 retry-policy.ts /
+    // execution-retry.ts 里既有的 STREAM_CLOSED 可重试判定没有任何生产者（死分支）。
+    // 现在显式抛可重试错误 —— 上层据此重试整轮或把 Run 标记 failed/interrupted；
+    // 补发 stop 仍然禁止（否则断流会被伪装成正常完成）。
+    recordOutcome(false);
+    throw streamClosedError(request, 'provider stream truncated: EOF without [DONE] or finish_reason');
   }
 
   /**

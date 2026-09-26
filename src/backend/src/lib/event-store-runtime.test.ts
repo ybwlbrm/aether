@@ -1,5 +1,6 @@
 /**
  * EventStoreRuntime tests (P0-11: critical event write failure must not be swallowed)
+ * AEX-P0-016: 未知 legacy/workflow 事件类型不得被伪造成 run.created
  */
 
 import { describe, it, before, after } from 'node:test';
@@ -11,7 +12,8 @@ import { runMigrations } from '../db/migrate.js';
 import { initDb, getDb } from '../db/client.js';
 import { makeTestConfig } from '../tests/helpers/mock-provider.sse.js';
 import type { BackendConfig } from '../config/index.js';
-import { emitV2Event, resetV2EventRuntime, getV2EventStore, ensureRunRow, finalizeRunTokens } from './event-store-runtime.js';
+import { emitV2Event, resetV2EventRuntime, getV2EventStore, ensureRunRow, finalizeRunTokens, mapWorkflowEventType, UnknownWorkflowEventTypeError } from './event-store-runtime.js';
+import * as eventStoreRuntime from './event-store-runtime.js';
 import { runs } from '../db/schema/index.js';
 import { eq } from 'drizzle-orm';
 
@@ -127,6 +129,36 @@ describe('lib/event-store-runtime', () => {
     assert.throws(
       () => finalizeRunTokens(getDb(), 'run-created', 'completed', {}, undefined),
       /INVALID_RUN_TRANSITION|非法状态转移/,
+    );
+  });
+});
+
+describe('AEX-P0-016 lib/event-store-runtime legacy 映射', () => {
+  it('已登记的 workflow 事件类型按 §57 映射到对应 v2 type', () => {
+    assert.equal(mapWorkflowEventType('workflow.started'), 'run.created');
+    assert.equal(mapWorkflowEventType('workflow.node.started'), 'task.started');
+    assert.equal(mapWorkflowEventType('workflow.node.completed'), 'task.completed');
+    assert.equal(mapWorkflowEventType('workflow.completed'), 'run.completed');
+    assert.equal(mapWorkflowEventType('workflow.failed'), 'run.failed');
+    assert.equal(mapWorkflowEventType('workflow.cancelled'), 'run.cancelled');
+  });
+
+  it('未知 workflow 事件类型抛 UnknownWorkflowEventTypeError（绝不返回 run.created）', () => {
+    assert.throws(
+      () => mapWorkflowEventType('workflow.some-future-event'),
+      (err: unknown) => {
+        assert.ok(err instanceof UnknownWorkflowEventTypeError);
+        assert.equal(err.eventType, 'workflow.some-future-event');
+        return true;
+      },
+    );
+  });
+
+  it('mapEventTypeToV2 死代码已删除（零调用点，禁止保留伪 run.created 映射）', () => {
+    assert.equal(
+      Object.prototype.hasOwnProperty.call(eventStoreRuntime, 'mapEventTypeToV2'),
+      false,
+      'mapEventTypeToV2 必须删除',
     );
   });
 });

@@ -6,6 +6,14 @@ import { RunLifecycleManager } from '../../core/runtime/index.js'
 import { RuntimeError } from '../../core/errors/index.js'
 import { runCancellationRegistry } from '../../lib/run-cancellation-registry.js'
 import { createWorkflowRunInternal } from './store.js'
+import {
+  executeWaveNode,
+  settledNodeResult,
+  toResultRecord,
+  type ExecuteNodeFn,
+  type NodeResultRecord,
+  type WaveNodeResult,
+} from './node-execution.js'
 import type { WorkflowEdge, WorkflowNode } from './types.js'
 
 export { repairOrphanWorkflowRuns } from './store.js'
@@ -19,29 +27,6 @@ type WorkflowRequest = {
     }
   }
 }
-
-type NodeResultRecord = {
-  readonly label: string
-  readonly type: WorkflowNode['type']
-  readonly output: string
-  readonly data?: unknown
-  readonly status: 'completed' | 'failed'
-  readonly error?: string
-}
-
-type WaveNodeResult =
-  | {
-      readonly node: WorkflowNode
-      readonly status: 'completed'
-      readonly output: string
-      readonly data: unknown
-    }
-  | {
-      readonly node: WorkflowNode
-      readonly status: 'failed'
-      readonly output: string
-      readonly error: string
-    }
 
 type WorkflowTerminal =
   | { readonly status: 'completed' }
@@ -61,29 +46,13 @@ type WorkflowRunTerminalUpdate = {
   readonly completedAt: string
 }
 
-type WaveNodeExecution = {
-  readonly node: WorkflowNode
-  readonly config: BackendConfig
-  readonly context: Record<string, unknown>
-  readonly signal: AbortSignal
-  readonly db: WorkflowDatabase
-  readonly runId: string
-  readonly emit: WorkflowEventEmitter
-  readonly executeNode: ExecuteWorkflowOptions['executeNode']
-}
-
 export interface ExecuteWorkflowOptions {
   readonly workflowId: string
   readonly nodes: WorkflowNode[]
   readonly edges: WorkflowEdge[]
   readonly input?: Record<string, unknown>
   readonly config: BackendConfig
-  readonly executeNode: (
-    node: WorkflowNode,
-    config: BackendConfig,
-    context: Record<string, unknown>,
-    signal?: AbortSignal,
-  ) => Promise<{ readonly output: string; readonly data?: unknown; readonly error?: string }>
+  readonly executeNode: ExecuteNodeFn
   readonly signal?: AbortSignal
   readonly db: WorkflowDatabase
   readonly saveDb: (config: BackendConfig) => void
@@ -102,87 +71,6 @@ export interface ExecuteWorkflowResult {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
-}
-
-function failedNode(node: WorkflowNode, output: string, error: string): WaveNodeResult {
-  return { node, status: 'failed', output, error }
-}
-
-function normalizeNodeResult(node: WorkflowNode, value: unknown): WaveNodeResult {
-  if (typeof value === 'string') {
-    return failedNode(node, value, `节点 ${node.id} 返回了未结构化输出`)
-  }
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
-    return failedNode(node, '', `节点 ${node.id} 返回了无效执行结果`)
-  }
-
-  const output = Reflect.get(value, 'output')
-  const data = Reflect.get(value, 'data')
-  const error = Reflect.get(value, 'error')
-  if (typeof output !== 'string') {
-    return failedNode(node, '', `节点 ${node.id} 返回结果缺少字符串 output`)
-  }
-  if (error !== undefined && typeof error !== 'string') {
-    return failedNode(node, output, `节点 ${node.id} 返回了无效 error 标志`)
-  }
-  if (typeof error === 'string' && error.trim() !== '') {
-    return failedNode(node, output, error)
-  }
-  return { node, status: 'completed', output, data }
-}
-
-function toResultRecord(result: WaveNodeResult): NodeResultRecord {
-  if (result.status === 'failed') {
-    return {
-      label: result.node.label,
-      type: result.node.type,
-      output: result.output,
-      status: 'failed',
-      error: result.error,
-    }
-  }
-  return {
-    label: result.node.label,
-    type: result.node.type,
-    output: result.output,
-    data: result.data,
-    status: 'completed',
-  }
-}
-
-async function executeWaveNode(input: WaveNodeExecution): Promise<WaveNodeResult> {
-  const { node } = input
-  try {
-    input.db.update(workflowRuns)
-      .set({ currentNodeId: node.id })
-      .where(eq(workflowRuns.id, input.runId))
-      .run()
-    input.emit('workflow.node.started', {
-      nodeId: node.id,
-      nodeType: node.type,
-      nodeLabel: node.label,
-    })
-    const execution = await input.executeNode(node, input.config, input.context, input.signal)
-    const result = normalizeNodeResult(node, execution)
-    if (result.status === 'completed') {
-      input.emit('workflow.node.completed', {
-        nodeId: node.id,
-        nodeType: node.type,
-        nodeLabel: node.label,
-      })
-    }
-    return result
-  } catch (error: unknown) {
-    return failedNode(node, '', errorMessage(error))
-  }
-}
-
-function settledNodeResult(
-  node: WorkflowNode,
-  settled: PromiseSettledResult<WaveNodeResult>,
-): WaveNodeResult {
-  if (settled.status === 'fulfilled') return settled.value
-  return failedNode(node, '', errorMessage(settled.reason))
 }
 
 function maxParallelism(config: BackendConfig): number {
@@ -321,13 +209,16 @@ export async function executeWorkflow(opts: ExecuteWorkflowOptions): Promise<Exe
         terminal = { status: 'cancelled', error: '工作流执行已取消' }
         break
       }
+      // AEX-P0-016: 客户端断开等同取消，不是失败 —— abort 让同 run 的其他
+      // 订阅者（runCancellationRegistry）也看到取消，终态记 cancelled。
+      if (request.raw.socket?.destroyed === true) {
+        cancellationController.abort()
+        terminal = { status: 'cancelled', error: '客户端已断开连接，工作流执行已取消' }
+        break
+      }
       const failed = waveResults.find((result) => result.status === 'failed')
       if (failed?.status === 'failed') {
         terminal = { status: 'failed', error: `节点 ${failed.node.id} 执行失败: ${failed.error}` }
-        break
-      }
-      if (request.raw.socket?.destroyed) {
-        terminal = { status: 'failed', error: '客户端已断开连接，工作流执行中止' }
         break
       }
 

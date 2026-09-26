@@ -9,7 +9,7 @@ import type { StreamChunk, TokenUsage, FinishReason } from '@pacc/shared';
 import { OpenAICompatibleAdapter, type Transport } from './provider-adapter.js';
 import { ModelError, RetryExhaustedError } from '../errors/index.js';
 import { createRetryPolicy } from './retry-policy.js';
-import { createCircuitBreaker } from './circuit-breaker.js';
+import { createCircuitBreaker, type CircuitBreaker, type CircuitState } from './circuit-breaker.js';
 
 describe('provider-adapter', () => {
   describe('OpenAICompatibleAdapter', () => {
@@ -666,12 +666,15 @@ describe('provider-adapter', () => {
           throw new TypeError('network down');
         }) as typeof fetch;
 
-        // 用 jitter=0 固定退避，注入记录 delayMs 的 retryPolicy
+        // 用 jitter=0 固定退避，注入记录每次重试决策的 retryPolicy。
+        // 观察点用 decide()（transport 的唯一重试入口：判定 + 退避一次拿到，
+        // 结构上排除了 shouldRetry/delayMs 分别调用造成的 attempt 偏移）。
         const p = createRetryPolicy({ baseDelayMs: 50, maxRetries: 3, jitter: 0, maxDelayMs: 5000 });
-        const origDelayMs = p.delayMs.bind(p);
-        (p as { delayMs: (...a: Parameters<typeof p.delayMs>) => number }).delayMs = (attempt: number) => {
-          delays.push(origDelayMs(attempt));
-          return origDelayMs(attempt);
+        const origDecide = p.decide.bind(p);
+        (p as { decide: typeof p.decide }).decide = (attempt, err, retryAfterMs) => {
+          const decision = origDecide(attempt, err, retryAfterMs);
+          delays.push(decision.delayMs);
+          return decision;
         };
 
         const adapter = new OpenAICompatibleAdapter({
@@ -719,6 +722,198 @@ describe('provider-adapter', () => {
         assert.equal(response.model, 'request-model');
         assert.ok(response.id, 'Response 应携带 id');
       });
+    });
+
+    // ── P0-007 / P0-008 / P0-009 ──
+    // provider 级熔断生命周期 + 流结果判定（HTTP success ≠ Model execution success）
+    describe('circuit breaker lifecycle + stream outcome', () => {
+      const encoder = new TextEncoder()
+
+      /**
+       * 熔断记账探针 —— 记录 recordSuccess/recordFailure 的调用顺序与次数。
+       * 真实熔断器（createCircuitBreaker）只暴露计数，这里需要"调用序列"断言：
+       * 记账时机（P0-008）与"只记一次"（P0-009）都必须能被观测。
+       */
+      function createProbeBreaker(failureThreshold = 100): {
+        breaker: CircuitBreaker
+        calls: Array<'success' | 'failure'>
+      } {
+        const calls: Array<'success' | 'failure'> = []
+        let failures = 0
+        let state: CircuitState = 'closed'
+        return {
+          calls,
+          breaker: {
+            get state() { return state },
+            get consecutiveFailures() { return failures },
+            allowRequest: () => state !== 'open',
+            recordSuccess: () => { calls.push('success'); failures = 0 },
+            recordFailure: () => {
+              calls.push('failure')
+              failures += 1
+              if (failures >= failureThreshold) state = 'open'
+            },
+            reset: () => { failures = 0; state = 'closed' },
+          },
+        }
+      }
+
+      const contentFrame = 'data: {"id":"c1","object":"chat.completion.chunk","created":1,"model":"gpt-4","choices":[{"index":0,"delta":{"role":"assistant","content":"只说了一半"},"finish_reason":null}]}'
+      /** 正常流：finish_reason + [DONE]（terminator 到达 → stream completed） */
+      const completePayload = [
+        contentFrame,
+        'data: {"id":"c1","object":"chat.completion.chunk","created":1,"model":"gpt-4","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}',
+        'data: [DONE]',
+      ].join('\n\n') + '\n\n'
+      /** 截断流：只有内容帧，无 finish_reason、无 [DONE]（EOF 断流） */
+      const truncatedPayload = contentFrame + '\n\n'
+
+      const sseOf = (payload: string): Response =>
+        new Response(payload, { status: 200, headers: { 'Content-Type': 'text/event-stream' } })
+
+      /** 已接受响应头、但读到一半连接被重置 */
+      const resettingSse = (): Response => {
+        const stream = new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(encoder.encode(truncatedPayload))
+            controller.error(new TypeError('terminated')) // 模拟 ECONNRESET
+          },
+        })
+        return new Response(stream, { status: 200, headers: { 'Content-Type': 'text/event-stream' } })
+      }
+
+      const httpAdapter = (fetchImpl: typeof fetch, breaker: CircuitBreaker): OpenAICompatibleAdapter =>
+        new OpenAICompatibleAdapter({
+          providerId: 'openai',
+          baseUrl: 'https://api.example.com/v1',
+          apiKey: 'sk-test',
+          fetchImpl,
+          allowHttpTransport: true,
+          circuitBreaker: breaker,
+          retryPolicy: createRetryPolicy({ maxRetries: 0 }),
+        })
+
+      const drain = async (adapter: OpenAICompatibleAdapter, overrides = {}): Promise<void> => {
+        for await (const _chunk of adapter.streamMessages(createRequest(overrides))) void _chunk
+      }
+
+      // ① headers accepted —— 200 只代表响应头被接受，不得在此记成功
+      it('P0-008: recordSuccess 只在流完成后调用（响应头到手不得清零连续失败数）', async () => {
+        const probe = createProbeBreaker()
+        const adapter = httpAdapter((async () => sseOf(completePayload)) as typeof fetch, probe.breaker)
+
+        let callsAtFirstChunk = -1
+        for await (const _chunk of adapter.streamMessages(createRequest())) {
+          if (callsAtFirstChunk < 0) callsAtFirstChunk = probe.calls.length
+          void _chunk
+        }
+
+        assert.equal(callsAtFirstChunk, 0, '响应头到手时不得调用 recordSuccess')
+        assert.deepEqual(probe.calls, ['success'], '流跑到 terminator 才记一次成功')
+      })
+
+      // ② 流中途连接重置 —— read 流错误必须计入熔断失败并抛可重试 STREAM_CLOSED
+      it('P0-009: 读流中途抛错 → recordFailure + 抛可重试的 STREAM_CLOSED', async () => {
+        const probe = createProbeBreaker()
+        const adapter = httpAdapter((async () => resettingSse()) as typeof fetch, probe.breaker)
+
+        await assert.rejects(
+          () => drain(adapter),
+          (error: unknown) => {
+            assert.ok(error instanceof ModelError, `应抛 ModelError，实际 ${String(error)}`)
+            assert.equal(error.code, 'STREAM_CLOSED')
+            assert.equal(error.retryable, true)
+            return true
+          },
+        )
+        assert.deepEqual(probe.calls, ['failure'], '流失败必须计入熔断，且不得先记成功（只记一次）')
+      })
+
+      // ③ 流截断（EOF 无 [DONE] 且无 finish_reason）—— 不得再静默 return
+      it('P0-009: EOF 未收到 [DONE] 且无 finish_reason → 抛 STREAM_CLOSED 并激活既有可重试判定', async () => {
+        const probe = createProbeBreaker()
+        const adapter = httpAdapter((async () => sseOf(truncatedPayload)) as typeof fetch, probe.breaker)
+
+        let thrown: unknown
+        await assert.rejects(
+          () => drain(adapter),
+          (error: unknown) => { thrown = error; return true },
+        )
+
+        assert.ok(thrown instanceof ModelError, `应抛 ModelError，实际 ${String(thrown)}`)
+        assert.equal(thrown.code, 'STREAM_CLOSED')
+        assert.equal(thrown.retryable, true)
+        assert.deepEqual(probe.calls, ['failure'], '截断必须计入熔断失败（headers+EOF 不算成功）')
+        // 断流必须命中 retry-policy 里既有的 STREAM_CLOSED 判定（此前是无生产者的死分支）
+        assert.equal(createRetryPolicy({ maxRetries: 1 }).shouldRetry(0, thrown), true, 'STREAM_CLOSED 必须可重试')
+      })
+
+      // ④ 流解析错误 —— 计入熔断失败，终态保留 MALFORMED_RESPONSE 降级语义（不抛）
+      it('P0-009: 流解析错误 → recordFailure + MALFORMED_RESPONSE 终态（不抛，保留既有降级）', async () => {
+        const probe = createProbeBreaker()
+        const malformed = 'data: not valid json\n\n' + completePayload
+        const adapter = httpAdapter((async () => sseOf(malformed)) as typeof fetch, probe.breaker)
+
+        const chunks: StreamChunk[] = []
+        for await (const chunk of adapter.streamMessages(createRequest())) chunks.push(chunk)
+
+        const finish = chunks.find((c) => c.type === 'finish')
+        assert.ok(finish && finish.type === 'finish')
+        assert.equal(finish.reason.kind, 'error')
+        assert.equal(finish.reason.kind === 'error' ? finish.reason.code : undefined, 'MALFORMED_RESPONSE')
+        assert.deepEqual(probe.calls, ['failure'], '解析失败计入熔断；终态为 error 不得记成功')
+      })
+
+      // ⑤ 流被取消 —— 用户取消不是 Provider 故障，两个方向都不记账
+      it('P0-009: 流被取消（abort）→ 不记成功也不记失败', async () => {
+        const probe = createProbeBreaker()
+        const abort = new AbortController()
+        const fetchImpl = (async () => {
+          const stream = new ReadableStream<Uint8Array>({
+            start(controller) {
+              controller.enqueue(encoder.encode(truncatedPayload))
+              abort.abort() // 取消发生在响应头之后
+              controller.error(new DOMException('Aborted', 'AbortError'))
+            },
+          })
+          return new Response(stream, { status: 200, headers: { 'Content-Type': 'text/event-stream' } })
+        }) as typeof fetch
+        const adapter = httpAdapter(fetchImpl, probe.breaker)
+
+        await assert.rejects(
+          () => drain(adapter, { signal: abort.signal }),
+          (error: unknown) => (error as { name?: string }).name === 'AbortError',
+        )
+        assert.deepEqual(probe.calls, [], '取消不得污染熔断计数（也不得记成功）')
+      })
+
+      // ⑥ 熔断可达性 —— 同一 runtime 内连续流失败达阈值后 CIRCUIT_OPEN（旧实现是死代码）
+      it('P0-007: 同一 runtime 连续流失败达阈值 → CIRCUIT_OPEN（熔断不再是死代码）', async () => {
+        const probe = createProbeBreaker(2)
+        const adapter = httpAdapter((async () => resettingSse()) as typeof fetch, probe.breaker)
+
+        for (const expected of ['STREAM_CLOSED', 'STREAM_CLOSED']) {
+          await assert.rejects(
+            () => drain(adapter),
+            (error: unknown) => {
+              assert.ok(error instanceof ModelError)
+              assert.equal(error.code, expected)
+              return true
+            },
+          )
+        }
+        await assert.rejects(
+          () => drain(adapter),
+          (error: unknown) => {
+            assert.ok(error instanceof ModelError)
+            assert.equal(error.code, 'CIRCUIT_OPEN')
+            assert.equal(error.retryable, false, '熔断开启属快速失败，不应重试')
+            return true
+          },
+        )
+        assert.equal(probe.breaker.state, 'open')
+        assert.equal(probe.breaker.consecutiveFailures, 2)
+      })
     });
   });
 });

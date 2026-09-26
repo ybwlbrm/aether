@@ -6,8 +6,9 @@ import { isSafeFetchUrl } from '../../lib/safe-fetch.js';
 export function registerProviderTestRoutes(app: FastifyInstance, config: BackendConfig): void {
   // ====== Provider Test Connection ======
   app.post('/api/providers/test', { schema: { description: '测试 Provider 连接', tags: ['数据'] } }, async (request) => {
-    const body = request.body as any;
-    const { baseUrl, apiKey } = body;
+    const body = (request.body ?? {}) as Record<string, unknown>;
+    const baseUrl = typeof body.baseUrl === 'string' ? body.baseUrl : '';
+    const apiKey = typeof body.apiKey === 'string' ? body.apiKey : '';
     if (!baseUrl || !apiKey) return { success: false, message: '缺少 Base URL 或 API Key' };
     // SSRF 防护：校验 baseUrl
     if (!isSafeFetchUrl(baseUrl)) {
