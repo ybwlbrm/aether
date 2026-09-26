@@ -1,7 +1,7 @@
 /**
  * Aether 2.0 — v2 AgentEvent Protocol
  *
- * Strict discriminated union with 37 event types, versioned BaseEvent,
+ * Strict discriminated union with 44 event types, versioned BaseEvent,
  * and explicit payload fields per event category.
  */
 
@@ -144,12 +144,73 @@ export interface ToolEventPayloadV2 extends ToolEventPayload {
 export interface TokenUsagePayload {
   inputTokens: number;
   outputTokens: number;
-  totalTokens: number;
+  totalTokens: number
   /** 模型名称（可选） */
-  model?: string;
+  model?: string
 }
 
-/** 37 个具体事件类型接口 */
+/** Retry 触发方式 */
+export type RetryType = 'automatic' | 'manual'
+
+/** Retry 所在层级 */
+export type RetryLayer = 'provider' | 'task' | 'tool'
+
+/** Attempt/Retry 事件统一载荷 */
+export interface RetryEventPayload {
+  runId: string
+  taskId: string
+  attempt: number
+  maxAttempts: number
+  retryType: RetryType
+  retryLayer: RetryLayer
+  reason?: string
+  errorCode?: string
+  statusCode?: number
+  delayMs?: number
+  nextRetryAt?: string
+}
+
+/** Attempt 开始 */
+export interface AttemptStartedEvent extends BaseEvent {
+  type: 'attempt.started'
+  payload: RetryEventPayload
+}
+
+/** Retry 已安排 */
+export interface RetryScheduledEvent extends BaseEvent {
+  type: 'retry.scheduled'
+  payload: RetryEventPayload & {
+    reason: string
+    delayMs: number
+    nextRetryAt: string
+  }
+}
+
+/** Retry 开始 */
+export interface RetryStartedEvent extends BaseEvent {
+  type: 'retry.started'
+  payload: RetryEventPayload
+}
+
+/** Retry 成功完成 */
+export interface RetryCompletedEvent extends BaseEvent {
+  type: 'retry.completed'
+  payload: RetryEventPayload
+}
+
+/** Retry 失败 */
+export interface RetryFailedEvent extends BaseEvent {
+  type: 'retry.failed'
+  payload: RetryEventPayload & { reason: string }
+}
+
+/** Retry 耗尽 */
+export interface RetryExhaustedEvent extends BaseEvent {
+  type: 'retry.exhausted'
+  payload: RetryEventPayload & { reason: string }
+}
+
+/** 44 个具体事件类型接口 */
 
 // ── Run 生命周期 (8) ──────────────────────────────────────────────
 export interface RunCreatedEvent extends BaseEvent {
@@ -349,7 +410,7 @@ export interface TokenUsageEvent extends BaseEvent {
   payload: TokenUsagePayload;
 }
 
-/** 37 事件类型的判别联合 */
+/** 44 事件类型的判别联合 */
 export type AgentEvent =
   | RunCreatedEvent
   | RunStartedEvent
@@ -388,9 +449,15 @@ export type AgentEvent =
   | ToolCompletedEvent
   | ToolErrorEvent
   | ToolRetryEvent
-  | TokenUsageEvent;
+  | TokenUsageEvent
+  | AttemptStartedEvent
+  | RetryScheduledEvent
+  | RetryStartedEvent
+  | RetryCompletedEvent
+  | RetryFailedEvent
+  | RetryExhaustedEvent
 
-/** 37 个 dot-notation 类型判别字面量（按规范顺序） */
+/** 44 个 dot-notation 类型判别字面量（按规范顺序） */
 export const AGENT_EVENT_TYPES: readonly AgentEvent['type'][] = [
   // Run (8)
   'run.created',
@@ -436,7 +503,14 @@ export const AGENT_EVENT_TYPES: readonly AgentEvent['type'][] = [
   'tool.retry',
   // Token (1)
   'token.usage',
-] as const;
+  // Attempt/Retry (6)
+  'attempt.started',
+  'retry.scheduled',
+  'retry.started',
+  'retry.completed',
+  'retry.failed',
+  'retry.exhausted',
+] as const
 
 /** 类型守卫：检查对象是否为合法的 AgentEvent */
 export function isAgentEvent(value: unknown): value is AgentEvent {

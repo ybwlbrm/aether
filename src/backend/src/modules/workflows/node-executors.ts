@@ -1,4 +1,4 @@
-import type { WorkflowNode } from './types.js';
+import type { NodeExecutionResult, WorkflowNode } from './types.js';
 import type { BackendConfig } from '../../config/index.js';
 import { getProviderById, getProviderByCapability } from '../../lib/provider.js';
 import { buildModelRuntime } from '../../core/models/index.js';
@@ -14,24 +14,59 @@ import { resolve } from 'node:path';
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 
+function nodeFailure(output: string): NodeExecutionResult {
+  return { output, error: output }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function recordItems(value: unknown): Record<string, unknown>[] {
+  return Array.isArray(value) ? value.filter(isRecord) : []
+}
+
+function mediaUrlFromResponse(value: unknown): string {
+  if (!isRecord(value)) return ''
+  const directUrl = value['url']
+  if (typeof directUrl === 'string') return directUrl
+  const first = recordItems(value['data'])[0]
+  const nestedUrl = first?.['url']
+  return typeof nestedUrl === 'string' ? nestedUrl : ''
+}
+
+type PptxWriter = {
+  write(format: 'nodebuffer'): Promise<Buffer>
+}
+
+function isPptxWriter(value: unknown): value is PptxWriter {
+  return isRecord(value) && typeof value['write'] === 'function'
+}
+
+function stringField(value: Record<string, unknown>, key: string): string {
+  const field = value[key]
+  return typeof field === 'string' ? field : ''
+}
+
 /** 执行单个节点，返回该节点的输出 */
 export async function executeNode(
   node: WorkflowNode,
   config: BackendConfig,
   context: Record<string, unknown>,
-): Promise<{ output: string; data?: unknown }> {
+  signal?: AbortSignal,
+): Promise<NodeExecutionResult> {
   const cfg = node.config || {};
   switch (node.type) {
     case 'tool': {
       // 工具节点：调用文件工具（executeFileTool）
       const name = String(cfg.name || '');
-      if (!name) return { output: '工具节点缺少 name 配置' };
+      if (!name) return nodeFailure('工具节点缺少 name 配置')
       const settings = await getSettings();
       const allowedDirs = Array.isArray(settings.allowedDirs) && settings.allowedDirs.length > 0
         ? settings.allowedDirs
         : [process.cwd()];
       const defaultDir = settings.defaultDir || allowedDirs[0] || process.cwd();
-      const args = (cfg.args && typeof cfg.args === 'object' ? cfg.args : {}) as Record<string, unknown>;
+      const args = isRecord(cfg.args) ? cfg.args : {};
       // 支持 {{prev.<nodeId>}} 模板引用上游输出
       const resolvedArgs: Record<string, unknown> = {};
       for (const [k, v] of Object.entries(args)) {
@@ -47,7 +82,7 @@ export async function executeNode(
       // P0-7 修复：executeFileTool 是 async 函数，需 await —
       // 原代码未 await，output 是 Promise 对象而非文件内容，破坏下游节点引用
       const output = await executeFileTool(name, resolvedArgs, allowedDirs, defaultDir, settings.permissionLevel);
-      return { output };
+      return { output }
     }
     case 'agent': {
       // Agent 节点：调用 AI（chat/completions）
@@ -56,10 +91,10 @@ export async function executeNode(
       const model = cfg.model ? String(cfg.model) : undefined;
       let provider = providerId ? getProviderById(providerId, config.encryptionKey) : null;
       if (!provider) provider = getProviderByCapability('text', config.encryptionKey);
-      if (!provider) return { output: '未配置 AI Provider，无法执行 Agent 节点' };
+      if (!provider) return nodeFailure('未配置 AI Provider，无法执行 Agent 节点')
       // SSRF 防护：校验 provider.baseUrl
       if (!provider.baseUrl || !isSafeFetchUrl(provider.baseUrl)) {
-        return { output: '安全限制：Provider baseUrl 存在 SSRF 风险（链路本地/元数据地址或非 http(s) 协议）' };
+        return nodeFailure('安全限制：Provider baseUrl 存在 SSRF 风险（链路本地/元数据地址或非 http(s) 协议）')
       }
       try {
         // P0-12（§六十四）：业务层经 ModelRuntime → ProviderAdapter → HTTP，
@@ -71,25 +106,26 @@ export async function executeNode(
           model: model || provider.defaultModel,
           messages: [{ role: 'user', content: prompt }],
           maxTokens: Number(cfg.maxTokens || 2048),
+          signal,
         });
         const text = response.content.trim();
         return { output: text || '(空回复)' };
       } catch (e: unknown) {
         const status = e instanceof ModelError && e.statusCode !== undefined ? ` (${e.statusCode})` : '';
         const message = e instanceof Error ? e.message : String(e);
-        return { output: `AI 调用失败${status}: ${message.slice(0, 300)}` };
+        return nodeFailure(`AI 调用失败${status}: ${message.slice(0, 300)}`)
       }
     }
     case 'media': {
       // 媒体节点：调用 AI 生成 API
       const prompt = String(cfg.prompt || '');
       const mediaType = String(cfg.type || 'image');
-      if (!prompt) return { output: '媒体节点缺少 prompt 配置' };
+      if (!prompt) return nodeFailure('媒体节点缺少 prompt 配置')
       const provider = getProviderByCapability(mediaType === 'video' ? 'video' : 'image', config.encryptionKey);
-      if (!provider?.apiKey) return { output: '未配置 AI Provider，无法生成媒体' };
+      if (!provider?.apiKey) return nodeFailure('未配置 AI Provider，无法生成媒体')
       // SSRF 防护：校验 provider.baseUrl
       if (!provider.baseUrl || !isSafeFetchUrl(provider.baseUrl)) {
-        return { output: '安全限制：Provider baseUrl 存在 SSRF 风险（链路本地/元数据地址或非 http(s) 协议）' };
+        return nodeFailure('安全限制：Provider baseUrl 存在 SSRF 风险（链路本地/元数据地址或非 http(s) 协议）')
       }
       try {
         const baseUrl = provider.baseUrl?.replace(/\/+$/, '') || '';
@@ -107,17 +143,19 @@ export async function executeNode(
           method: 'POST',
           headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${provider.apiKey}` },
           body: JSON.stringify(apiBody),
-          signal: AbortSignal.timeout(120000),
+          signal: signal
+            ? AbortSignal.any([signal, AbortSignal.timeout(120000)])
+            : AbortSignal.timeout(120000),
         });
         if (!res.ok) {
           const errText = await res.text().catch(() => '');
-          return { output: `${mediaType} 生成失败 (${res.status}): ${errText.slice(0, 200)}` };
+          return nodeFailure(`${mediaType} 生成失败 (${res.status}): ${errText.slice(0, 200)}`)
         }
-        const data = await res.json() as any;
-        const imageUrl = data?.data?.[0]?.url || data?.url || '';
+        const data: unknown = await res.json()
+        const imageUrl = mediaUrlFromResponse(data)
         return { output: `${mediaType === 'video' ? '视频' : '图片'}生成成功: ${imageUrl ? imageUrl.slice(0, 100) : prompt.slice(0, 50)}`, data: { url: imageUrl } };
       } catch (e: unknown) {
-        return { output: `媒体生成异常: ${e instanceof Error ? e.message : String(e)}` };
+        return nodeFailure(`媒体生成异常: ${e instanceof Error ? e.message : String(e)}`)
       }
     }
     case 'document': {
@@ -125,10 +163,10 @@ export async function executeNode(
       const title = String(cfg.title || '未命名文档');
       const kind = String(cfg.kind || 'doc');
       const provider = getProviderByCapability('text', config.encryptionKey);
-      if (!provider?.apiKey) return { output: '未配置 AI Provider，无法生成文档' };
+      if (!provider?.apiKey) return nodeFailure('未配置 AI Provider，无法生成文档')
       // SSRF 防护：校验 provider.baseUrl
       if (!provider.baseUrl || !isSafeFetchUrl(provider.baseUrl)) {
-        return { output: '安全限制：Provider baseUrl 存在 SSRF 风险（链路本地/元数据地址或非 http(s) 协议）' };
+        return nodeFailure('安全限制：Provider baseUrl 存在 SSRF 风险（链路本地/元数据地址或非 http(s) 协议）')
       }
       try {
         const model = String(cfg.model || provider.defaultModel || 'gpt-4o');
@@ -146,11 +184,12 @@ export async function executeNode(
             systemPrompt,
             messages: [{ role: 'user', content: `文档标题: ${title}` }],
             maxTokens: 2048,
+            signal,
           });
           text = response.content.trim();
         } catch (aiErr: unknown) {
           const status = aiErr instanceof ModelError && aiErr.statusCode !== undefined ? ` (${aiErr.statusCode})` : '';
-          return { output: `文档生成失败${status}` };
+          return nodeFailure(`文档生成失败${status}`)
         }
         // 解析 AI 输出并创建实际文件
         const docDir = resolve(config.dataDir, 'documents');
@@ -163,25 +202,28 @@ export async function executeNode(
             pptx.layout = 'LAYOUT_16x9';
             pptx.author = 'AI Workflow';
             pptx.title = title;
-            const parsed = extractJson(text);
-            const slides = parsed?.slides || [{ title, content: text }];
-            slides.forEach((item: any, i: number) => {
+            const parsed: unknown = extractJson(text);
+            const parsedSlides = isRecord(parsed) ? recordItems(parsed['slides']) : [];
+            const slides = parsedSlides.length > 0 ? parsedSlides : [{ title, content: text }];
+            slides.forEach((item, i) => {
               const slide = pptx.addSlide();
               slide.background = { color: 'F3F4F6' };
-              slide.addText(item.title || `第 ${i + 1} 页`, { x: 0.5, y: 0.4, w: 9, h: 0.9, fontSize: i === 0 ? 36 : 28, bold: true, color: '1F2937', fontFace: 'Microsoft YaHei' });
-              slide.addText(item.content || '', { x: 0.6, y: 1.5, w: 8.8, h: 4.9, fontSize: i === 0 ? 20 : 16, color: '374151', fontFace: 'Microsoft YaHei', valign: 'top' });
+              slide.addText(stringField(item, 'title') || `第 ${i + 1} 页`, { x: 0.5, y: 0.4, w: 9, h: 0.9, fontSize: i === 0 ? 36 : 28, bold: true, color: '1F2937', fontFace: 'Microsoft YaHei' });
+              slide.addText(stringField(item, 'content'), { x: 0.6, y: 1.5, w: 8.8, h: 4.9, fontSize: i === 0 ? 20 : 16, color: '374151', fontFace: 'Microsoft YaHei', valign: 'top' });
             });
-            const buffer = await (pptx as unknown as { write(format: 'nodebuffer'): Promise<Buffer> }).write('nodebuffer');
+            if (!isPptxWriter(pptx)) return nodeFailure('PPTX writer 未实现 nodebuffer 输出')
+            const buffer = await pptx.write('nodebuffer');
             writeFileSync(filePath, buffer);
           } else {
             const { Document, Packer, Paragraph, TextRun, HeadingLevel } = await getDocx();
             const children: InstanceType<typeof Paragraph>[] = [];
             children.push(new Paragraph({ text: title, heading: HeadingLevel.TITLE, spacing: { after: 300 } }));
-            const parsed = extractJson(text);
-            const sections = parsed?.sections || [{ heading: title, body: text }];
-            sections.forEach((section: any) => {
-              children.push(new Paragraph({ text: section.heading || '章节', heading: HeadingLevel.HEADING_1, spacing: { before: 240, after: 120 } }));
-              const body = section.body || '';
+            const parsed: unknown = extractJson(text);
+            const parsedSections = isRecord(parsed) ? recordItems(parsed['sections']) : [];
+            const sections = parsedSections.length > 0 ? parsedSections : [{ heading: title, body: text }];
+            sections.forEach((section) => {
+              children.push(new Paragraph({ text: stringField(section, 'heading') || '章节', heading: HeadingLevel.HEADING_1, spacing: { before: 240, after: 120 } }));
+              const body = stringField(section, 'body');
               body.split('\n').forEach((line: string) => {
                 const trimmed = line.trim();
                 if (!trimmed) return;
@@ -193,17 +235,17 @@ export async function executeNode(
             writeFileSync(filePath, buffer);
           }
           return { output: `${kind === 'ppt' ? 'PPT' : '文档'}生成成功: ${title}`, data: { path: filePath } };
-        } catch (fileErr) {
-          return { output: `文档文件创建失败: ${fileErr instanceof Error ? fileErr.message : String(fileErr)}` };
+        } catch (fileErr: unknown) {
+          return nodeFailure(`文档文件创建失败: ${fileErr instanceof Error ? fileErr.message : String(fileErr)}`)
         }
       } catch (e: unknown) {
-        return { output: `文档生成异常: ${e instanceof Error ? e.message : String(e)}` };
+        return nodeFailure(`文档生成异常: ${e instanceof Error ? e.message : String(e)}`)
       }
     }
     case 'condition': {
       // 条件节点（WF-001 / P0-28）：13 种操作符安全求值（无 eval）
       // 优先使用 operator 字段；兼容旧 expression 字段（truthy/equals/contains）
-      const op = String((cfg as { operator?: unknown }).operator || cfg.expression || 'truthy');
+      const op = String(cfg['operator'] || cfg['expression'] || 'truthy');
       const value: unknown = cfg.value;
       const compare: unknown = cfg.compare;
       const result = evaluateCondition(op, value, compare);
@@ -213,19 +255,19 @@ export async function executeNode(
       // 系统命令节点：执行 shell 命令（如音量控制、打开程序等）
       // 使用 lib/command.ts 的 executeCommand（spawn + shell:false，内建命令原生实现）
       const cmd = String(cfg.command || '');
-      if (!cmd) return { output: '系统节点缺少 command 配置' };
+      if (!cmd) return nodeFailure('系统节点缺少 command 配置')
       try {
         const settings = await getSettings();
         const permLevel = settings.permissionLevel ?? 2;
         const allowedDirs = settings.allowedDirs || [];
         const defaultDir = settings.defaultDir || allowedDirs[0] || process.cwd();
-        const output = await executeCommand(cmd, defaultDir, 30000, allowedDirs, permLevel, defaultDir);
-        return { output };
+        const output = await executeCommand(cmd, defaultDir, 30000, allowedDirs, permLevel, defaultDir, signal);
+        return { output }
       } catch (e: unknown) {
-        return { output: `系统命令执行异常: ${e instanceof Error ? e.message : String(e)}` };
+        return nodeFailure(`系统命令执行异常: ${e instanceof Error ? e.message : String(e)}`)
       }
     }
     default:
-      return { output: `未知节点类型: ${node.type}` };
+      return nodeFailure(`未知节点类型: ${node.type}`)
   }
 }

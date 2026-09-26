@@ -1,4 +1,10 @@
 import type { StreamChunk } from '@pacc/shared';
+import type { BackendConfig } from '../../config/index.js';
+import type { EventBus } from '../../lib/event-bus/index.js';
+import type { SQLJsDatabase } from 'drizzle-orm/sql-js';
+import * as schema from '../../db/schema/index.js';
+import type { AgentDef } from './agent-definitions.js';
+import type { AgentLimitsLike } from '../../core/runtime/execution-loop.js';
 import { buildModelRuntime, type ModelRequest } from '../../core/models/index.js';
 import { buildChatRequestBody, parseToolArgsSafe } from '../../lib/stream-translate.js';
 import { buildToolPayload } from '@pacc/shared';
@@ -18,25 +24,57 @@ import { createProductionToolExecutor, type ProductionToolExecutor } from '../..
 import { budgetFromAgentLimits } from '../../core/runtime/execution-loop.js';
 // 统一 ExecutionLoop：唯一生产循环控制器（第四部分：ToolLoop 收口为薄 wrapper，无第二套循环）
 import { runExecutionLoop, type ExecutionLoopDeps, type ExecutionBudget } from '../../core/runtime/execution-loop.js';
+import { persistAssistantToolCallMessage, persistToolResultMessage } from '../../lib/message-history.js';
+
+type AgentWithLimits = AgentDef & {
+  readonly limits?: AgentLimitsLike
+}
+
+type FunctionTool = {
+  readonly type: 'function'
+  readonly function: {
+    readonly name: string
+    readonly description?: string
+    readonly parameters?: unknown
+  }
+}
+
+type McpTool = {
+  readonly name: string
+  readonly description?: string
+  readonly inputSchema: unknown
+  readonly serverName: string
+}
+
+type ToolLoopBody = {
+  readonly conversationId?: string
+  readonly loop?: boolean
+}
+
+type AgentSettings = {
+  readonly permissionLevel?: number
+}
+
+type Db = SQLJsDatabase<typeof schema>
 
 export interface ToolLoopContext {
-  agent: any;
+  agent: AgentWithLimits;
   ep: { baseUrl: string; apiKey: string; model: string };
-  agentMessages: any[];
-  toolListForThisAgent: any[];
-  allTools: any[];
-  mcpTools: any[];
-  agentSettings: any;
+  agentMessages: Array<Record<string, unknown>>;
+  toolListForThisAgent: FunctionTool[];
+  allTools: FunctionTool[];
+  mcpTools: McpTool[];
+  agentSettings: AgentSettings;
   allowedDirs: string[];
   defaultDir: string;
-  body: any;
+  body: ToolLoopBody;
   convId: string;
   runTaskId: string;
   clientAbort: AbortController;
   sseSend: (event: string, payload: string) => void;
-  eventBus: any;
-  db: any;
-  config: any;
+  eventBus: EventBus;
+  db: Db;
+  config: BackendConfig;
   customPrompts: Map<string, string>;
   otherAgentsInfo: string;
   imageHint: string;
@@ -59,6 +97,14 @@ export interface ToolLoopResult {
   interrupted?: boolean;
 }
 
+const FORCE_SUMMARY_PROMPT = '请基于上面所有工具执行的结果，给出完整的总结与最终答复。如果任务还没完成，请继续说明还需要做什么。'
+
+export function buildForceSummaryMessages(
+  messages: readonly Record<string, unknown>[],
+): Array<Record<string, unknown>> {
+  return [...messages, { role: 'user', content: FORCE_SUMMARY_PROMPT }]
+}
+
 /**
  * 超级 Chat 子 Agent 工具循环。
  *
@@ -72,6 +118,7 @@ export async function runAgentToolLoop(ctx: ToolLoopContext): Promise<ToolLoopRe
   let agentTokens = 0;
   let lastToolResult = '';
   let toolCallCount = 0;
+  let executionMessages: Array<Record<string, unknown>> = []
 
   // §30/§31 收口：预算统一来源 —— AgentDefinition limits → budgetFromAgentLimits
   const agentLimits = (ctx.agent as { limits?: { maxTurns?: number; maxToolCalls?: number; maxTimeMs?: number; maxTokens?: number } } | undefined)?.limits;
@@ -80,11 +127,16 @@ export async function runAgentToolLoop(ctx: ToolLoopContext): Promise<ToolLoopRe
   // P0-01 收口：统一生产工具执行器（PolicyEngine 唯一裁决 + Approval 完整绑定 + Timeout + Cancel）
   const productionExecutor: ProductionToolExecutor = createProductionToolExecutor({
     mcpTools: ctx.mcpTools,
-    getMcpServers: () => ctx.db.select().from(mcpServers).all() as any[],
+     getMcpServers: () => ctx.db.select().from(mcpServers).all().map((server) => ({
+       ...server,
+       timeout: server.timeout ?? 5000,
+     })),
+
     allowedDirs: ctx.allowedDirs,
     permissionLevel: ctx.agentSettings.permissionLevel ?? 2,
     defaultDir: ctx.defaultDir,
-    sessionId: (ctx.body.conversationId as string | undefined) ?? 'anonymous',
+     sessionId: ctx.body.conversationId ?? 'anonymous',
+
     runId: ctx.runTaskId,
     taskId: ctx.runTaskId,
     agentId: ctx.agent.id,
@@ -119,29 +171,36 @@ export async function runAgentToolLoop(ctx: ToolLoopContext): Promise<ToolLoopRe
 
   // ExecutionLoopDeps：唯一循环控制器的依赖注入（第四部分收口）
   const deps: ExecutionLoopDeps = {
+    onAssistantToolCalls: (message) => {
+      persistAssistantToolCallMessage(ctx.db, ctx.convId, message)
+    },
     model: runtime,
     hasTools: ctx.toolListForThisAgent.length > 0,
-    buildRequest: (msgs, _turn): ModelRequest => ({
-      provider: providerConfig.id,
-      model: ctx.ep.model,
-      messages: msgs,
-      tools: ctx.toolListForThisAgent.map(t => ({
-        type: 'function' as const,
-        function: {
-          name: t.function.name,
-          description: t.function.description,
-          parameters: t.function.parameters,
-        },
-      })),
-      maxTokens: 4096,
-      signal: ctx.clientAbort.signal,
-    }),
+    buildRequest: (msgs, _turn): ModelRequest => {
+      executionMessages = [...msgs]
+      return {
+        provider: providerConfig.id,
+        model: ctx.ep.model,
+        messages: msgs,
+        tools: ctx.toolListForThisAgent.map(t => ({
+          type: 'function' as const,
+          function: {
+            name: t.function.name,
+            description: t.function.description,
+            parameters: t.function.parameters,
+          },
+        })),
+        maxTokens: 4096,
+        signal: ctx.clientAbort.signal,
+      }
+    },
     executeTool: async (tool, _turn): Promise<string> => {
       // 工具执行副作用：SSE tool-call/tool-result、eventBus tool.started/completed
       const funcName = tool.name;
       // parseToolArgsSafe：非法 JSON 降级为 {ok:false}，走工具降级路径（不炸流）
       const parsed = parseToolArgsSafe(tool.arguments);
-      let args: any = parsed.args;
+       const args = parsed.args
+
       if (!parsed.ok) {
         const errMsg = `工具参数不是合法 JSON: ${String(tool.arguments || '').slice(0, 500)}`;
         ctx.sseSend('tool-call', JSON.stringify({ name: funcName, arguments: {}, id: tool.id }));
@@ -157,6 +216,7 @@ export async function runAgentToolLoop(ctx: ToolLoopContext): Promise<ToolLoopRe
             parentEventId: undefined,
           });
         }
+        persistToolResultMessage(ctx.db, ctx.convId, tool.id, funcName, String(tool.arguments || ''), errMsg)
         return errMsg;
       }
 
@@ -194,6 +254,7 @@ export async function runAgentToolLoop(ctx: ToolLoopContext): Promise<ToolLoopRe
         }
         ctx.sseSend('tool-call', JSON.stringify({ name: funcName, arguments: args, id: tool.id }));
         ctx.sseSend('tool-result', JSON.stringify({ name: funcName, result: result.slice(0, 500), id: tool.id }));
+        persistToolResultMessage(ctx.db, ctx.convId, tool.id, funcName, tool.arguments, `错误: ${errMsg}`)
         return `错误: ${errMsg}`;
       }
 
@@ -214,6 +275,7 @@ export async function runAgentToolLoop(ctx: ToolLoopContext): Promise<ToolLoopRe
           parentEventId: toolStarted.eventId,
         });
       }
+      persistToolResultMessage(ctx.db, ctx.convId, tool.id, funcName, tool.arguments, result)
       return result.slice(0, 50000);
     },
     // 流式 chunk 转发：SSE 实时输出 + 事件总线（进入统一 Loop 不丢失实时输出）
@@ -252,11 +314,13 @@ export async function runAgentToolLoop(ctx: ToolLoopContext): Promise<ToolLoopRe
   };
 
   // inbox 指令（steer/followup）：运行中用户补充的指令 → 注入为初始消息尾部（Loop 启动前读取一次）
-  const convKey = (ctx.body.conversationId as string | undefined) ?? 'anonymous';
+   const convKey = ctx.body.conversationId ?? 'anonymous'
+
   const directives = drainDirectives(convKey);
   for (const d of directives) {
     ctx.agentMessages.push({ role: 'user', content: `[补充指令] ${d.text}` });
   }
+  executionMessages = [...ctx.agentMessages]
 
   // 唯一生产循环控制器（第四部分：ToolLoop 收口）
   const executionBudget: ExecutionBudget = {
@@ -275,21 +339,28 @@ export async function runAgentToolLoop(ctx: ToolLoopContext): Promise<ToolLoopRe
   agentReply = result.content;
   agentTokens = result.usage.cumulativeTotalTokens;
   toolCallCount = result.toolCallCount;
-  // §16/§17 收口：流中断/失败不得伪装成功 —— 即使已有部分内容，也必须标记 interrupted，
-  // 由上层（orchestration）据此发 agent.error 而非 agent.completed。
-  const loopInterrupted = result.interrupted === true || result.state === 'failed';
+   // §16/§17 收口：任何非 completed 终态都不得继续走成功总结。
+   const loopInterrupted = result.state !== 'completed'
+     || result.interrupted === true
+     || result.finishReason === 'error'
 
-  // 去重：若 AI 回复原样复述了工具执行结果，替换为简短提示（避免白字+绿框重复显示）
-  const dedupReplacement = dedupToolResultReplacement(agentReply, lastToolResult);
-  if (dedupReplacement) {
-    agentReply = dedupReplacement;
-  }
+   if (loopInterrupted) {
+     if (!agentReply) {
+       agentReply = result.state === 'cancelled'
+         ? '用户已停止任务'
+         : result.finishReason === 'error'
+           ? 'AI 执行失败'
+           : '⚠️ 响应流中断（未收到完整结束标记）'
+     }
+     return { agentReply, agentTokens, lastToolResult, toolCallCount, interrupted: true }
+   }
 
-  // 流中断时不走"强制总结"（强制总结会掩盖中断事实），直接标记 interrupted
-  if (loopInterrupted) {
-    if (!agentReply) agentReply = '⚠️ 响应流中断（未收到完整结束标记）';
-    return { agentReply, agentTokens, lastToolResult, toolCallCount, interrupted: true };
-  }
+   // 去重：若 AI 回复原样复述了工具执行结果，替换为简短提示（避免白字+绿框重复显示）
+   const dedupReplacement = dedupToolResultReplacement(agentReply, lastToolResult)
+   if (dedupReplacement) {
+     agentReply = dedupReplacement
+   }
+
 
   // 核心修复：工具循环结束后，若 agent 一直调工具没给文本总结（agentReply 为空），
   // 追加一轮「强制总结」调用，让 AI 基于全部工具结果给出完整总结，而不是填占位符
@@ -298,7 +369,7 @@ export async function runAgentToolLoop(ctx: ToolLoopContext): Promise<ToolLoopRe
       const summaryRequest: ModelRequest = {
         provider: providerConfig.id,
         model: ctx.ep.model,
-        messages: [...ctx.agentMessages, { role: 'user', content: '请基于上面所有工具执行的结果，给出完整的总结与最终答复。如果任务还没完成，请继续说明还需要做什么。' }],
+         messages: buildForceSummaryMessages(executionMessages),
         tools: ctx.toolListForThisAgent.map(t => ({
           type: 'function' as const,
           function: {

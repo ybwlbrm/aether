@@ -5,20 +5,48 @@
  * Pure TypeScript only.
  */
 
-import { RuntimeError, RuntimeErrorOptions } from './runtime-error.js';
-import { ModelError } from './model-error.js';
+import { RuntimeError } from './runtime-error.js'
+import type { RuntimeErrorOptions } from './runtime-error.js'
+import { ModelError } from './model-error.js'
 
 export interface RetryErrorOptions extends Omit<RuntimeErrorOptions, 'code'> {
   /** Current attempt number (1-indexed) */
-  attempt: number;
+  attempt: number
   /** Maximum number of attempts allowed */
-  maxAttempts: number;
+  maxAttempts: number
   /** Backoff in milliseconds before next retry */
-  backoffMs: number;
+  backoffMs: number
   /** Override the default error code */
-  code?: string;
+  code?: string
   /** Override retryable (default: true for RetryError, false for RetryExhaustedError) */
-  retryable?: boolean;
+  retryable?: boolean
+}
+
+export interface RetryLastErrorJSON {
+  name: string
+  message: string
+  code?: string
+  statusCode?: number
+}
+
+export type RetryExhaustedErrorOptions = Omit<RetryErrorOptions, 'attempt' | 'retryable' | 'backoffMs'> & {
+  /** The final underlying failure that caused retries to stop. */
+  lastError?: unknown
+  /** Backoff metadata; terminal errors default to zero. */
+  backoffMs?: number
+}
+
+function serializeLastError(value: unknown): RetryLastErrorJSON | undefined {
+  if (value === null || value === undefined) return undefined
+  if (typeof value !== 'object') {
+    return { name: 'Error', message: String(value) }
+  }
+  const record = value as Record<string, unknown>
+  const message = typeof record.message === 'string' ? record.message : String(value)
+  const name = typeof record.name === 'string' ? record.name : 'Error'
+  const code = typeof record.code === 'string' ? record.code : undefined
+  const statusCode = typeof record.statusCode === 'number' ? record.statusCode : undefined
+  return { name, message, code, statusCode }
 }
 
 /**
@@ -98,35 +126,40 @@ export class RetryError extends RuntimeError {
  * ```
  */
 export class RetryExhaustedError extends RetryError {
-  constructor(message: string, options: Omit<RetryErrorOptions, 'attempt'>) {
+  public readonly lastError: unknown
+
+  constructor(message: string, options: RetryExhaustedErrorOptions) {
     super(message, {
       ...options,
       attempt: options.maxAttempts,
-      retryable: false, // RetryExhaustedError is NOT retryable
-    });
+      backoffMs: options.backoffMs ?? 0,
+      retryable: false,
+      cause: options.cause ?? options.lastError,
+    })
 
-    this.name = 'RetryExhaustedError';
-
-    Object.setPrototypeOf(this, RetryExhaustedError.prototype);
+    this.name = 'RetryExhaustedError'
+    this.lastError = options.lastError ?? options.cause
+    Object.setPrototypeOf(this, RetryExhaustedError.prototype)
   }
 
   /**
    * Returns a plain, JSON-serializable object representation.
    */
   override toJSON() {
-    const base = super.toJSON();
+    const base = super.toJSON()
     return {
       ...base,
       name: this.name,
       exhausted: true,
-    };
+      lastError: serializeLastError(this.lastError),
+    }
   }
 
   /**
    * Type guard to check if a value is a RetryExhaustedError.
    */
   static isRetryExhaustedError(value: unknown): value is RetryExhaustedError {
-    return value instanceof RetryExhaustedError;
+    return value instanceof RetryExhaustedError
   }
 }
 

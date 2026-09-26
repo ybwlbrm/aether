@@ -4,12 +4,15 @@ import {
   sendCommand,
   cancelCommand,
   subscribeMessages,
+  subscribeRemoteCommandStatus,
+  createClientCommandId,
   getSyncState,
   onSyncStateChange,
   type SendResult,
   type LocalMessageState,
 } from '../api/supabase';
-import { mergeMessages, hasAssistantAfter, type ChatMessage } from '../lib/message-store';
+import { mergeMessages, replaceOptimistic, resolveChatCompletion, type ChatMessage } from '../lib/message-store'
+import { getRemainingCommandTimeoutMs, matchesRemoteCommandReference, type RemoteCommandSnapshot } from '../lib/remote-command'
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import {
@@ -154,8 +157,10 @@ function safeParse(json?: string | null): ParsedToolResult | null {
 
 // 本地发送状态附加在乐观消息上（不落库，仅 UI 展示）
 interface LocalMeta {
-  localState?: LocalMessageState;
-  localError?: string;
+  localState?: LocalMessageState
+  localError?: string
+  localClientCommandId?: string
+  localCommandPayload?: string
 }
 
 type ViewMessage = ChatMessage & LocalMeta;
@@ -178,7 +183,10 @@ type ExecutionPhase =
   | 'failed'
   | 'timeout'
   | 'cancelling'
+  | 'cancel_timeout'
   | 'cancelled';
+
+const CANCEL_CONFIRM_TIMEOUT_MS = 15_000
 
 export default function MessageView({ conversationId, conversationTitle, onBack }: Props) {
   const [messages, setMessages] = useState<ViewMessage[]>([]);
@@ -208,19 +216,190 @@ export default function MessageView({ conversationId, conversationTitle, onBack 
   const reasoningBarRef = useRef<HTMLDivElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  // 当前请求绑定（§14/§16：timeout 与完成判断绑定当前 command，旧定时器不影响新命令）
-  const activeCommandIdRef = useRef<string | null>(null);
-  const latestUserMsgAtRef = useRef<string | null>(null);
+  const cancelTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // 当前请求绑定（timeout 与终态结算均绑定当前 command，旧事件不影响新命令）
+  const activeCommandIdRef = useRef<string | null>(null)
+  const activeClientCommandIdRef = useRef<string | null>(null)
+  const [activeCommandId, setActiveCommandId] = useState<string | null>(null)
+  const [activeClientCommandId, setActiveClientCommandId] = useState<string | null>(null)
+  const operationIdRef = useRef(0)
+  const mountedRef = useRef(true)
+  const sendInFlightRef = useRef(false)
+  const stopRequestedRef = useRef(false)
+  const commandDeadlineRef = useRef<number | null>(null)
+  const phaseRef = useRef<ExecutionPhase>('idle')
+  const latestUserMsgAtRef = useRef<string | null>(null)
   const nearBottomRef = useRef(true);
   const [showJump, setShowJump] = useState(false);
   const [newWhileAway, setNewWhileAway] = useState(false);
   // 发送中用户消息 id（§8：离线入队不删除，用于重发定位）
   const sendingUserMsgRef = useRef<string | null>(null);
-  // 最新消息列表引用（subscribeMessages 回调中用于 §14 完成判断，避免闭包旧值）
-  const messagesRef = useRef<ViewMessage[]>([]);
-  useEffect(() => { messagesRef.current = messages; }, [messages]);
 
-  const phaseIsActive = ['sending', 'queued', 'waiting', 'processing', 'streaming', 'cancelling'].includes(phase);
+  const phaseIsActive = ['sending', 'queued', 'waiting', 'processing', 'streaming', 'timeout', 'cancelling', 'cancel_timeout'].includes(phase)
+
+  useEffect(() => {
+    phaseRef.current = phase
+  }, [phase])
+
+  const appendSystemMessage = useCallback((content: string) => {
+    setMessages((previous) => [...previous, {
+      id: `system-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+      role: 'system',
+      content,
+      created_at: new Date().toISOString(),
+    }]);
+  }, []);
+
+  const clearCommandTimers = useCallback(() => {
+    if (timeoutRef.current) clearTimeout(timeoutRef.current);
+    if (cancelTimeoutRef.current) clearTimeout(cancelTimeoutRef.current);
+    timeoutRef.current = null;
+    cancelTimeoutRef.current = null;
+  }, []);
+
+  const updatePhase = useCallback((next: ExecutionPhase) => {
+    phaseRef.current = next
+    setPhase(next)
+  }, [])
+
+  const resetCommandBinding = useCallback(() => {
+    activeCommandIdRef.current = null
+    activeClientCommandIdRef.current = null
+    setActiveCommandId(null)
+    setActiveClientCommandId(null)
+    commandDeadlineRef.current = null
+    stopRequestedRef.current = false
+  }, [])
+
+  const armCommandTimeout = useCallback((operationId: number) => {
+    if (timeoutRef.current) clearTimeout(timeoutRef.current)
+    const deadline = commandDeadlineRef.current
+    if (deadline === null) return
+    const delay = getRemainingCommandTimeoutMs(deadline, Date.now())
+    timeoutRef.current = setTimeout(() => {
+      timeoutRef.current = null
+      if (!mountedRef.current || operationIdRef.current !== operationId) return
+      const current = phaseRef.current
+      if (['cancelling', 'cancel_timeout', 'completed', 'failed', 'cancelled'].includes(current)) return
+      const hasCommand = activeCommandIdRef.current ?? activeClientCommandIdRef.current
+      if (!hasCommand) return
+      updatePhase('timeout')
+      appendSystemMessage('等待桌面端响应超时，请检查 Aether 桌面端是否运行')
+    }, delay)
+  }, [appendSystemMessage, updatePhase])
+
+  const requestCancellation = useCallback(async (clientCommandId: string, operationId: number) => {
+    if (!mountedRef.current || operationIdRef.current !== operationId) return
+    if (activeClientCommandIdRef.current !== clientCommandId) return
+    if (cancelTimeoutRef.current) return
+
+    clearCommandTimers()
+    updatePhase('cancelling')
+    setLiveReasoning('')
+    cancelTimeoutRef.current = setTimeout(() => {
+      cancelTimeoutRef.current = null
+      if (!mountedRef.current || operationIdRef.current !== operationId) return
+      updatePhase('cancel_timeout')
+      appendSystemMessage('停止请求已发送，但等待桌面端确认超时')
+    }, CANCEL_CONFIRM_TIMEOUT_MS)
+
+    const result = await cancelCommand(conversationId, clientCommandId)
+    if (!mountedRef.current || operationIdRef.current !== operationId) return
+    if (activeClientCommandIdRef.current !== clientCommandId) return
+
+    if (result.status === 'cancelled_locally') {
+      clearCommandTimers()
+      operationIdRef.current += 1
+      sendInFlightRef.current = false
+      resetCommandBinding()
+      updatePhase('cancelled')
+      appendSystemMessage('已取消尚未发送的本地命令')
+      return
+    }
+    if (result.status === 'failed') {
+      clearCommandTimers()
+      if (sendInFlightRef.current) {
+        appendSystemMessage('停止请求等待发送完成，提交后将继续停止')
+        return
+      }
+      updatePhase(activeCommandIdRef.current ? 'waiting' : 'queued')
+      armCommandTimeout(operationId)
+      appendSystemMessage(`停止失败：${result.message}，原命令仍保持等待终态`)
+    }
+  }, [appendSystemMessage, armCommandTimeout, clearCommandTimers, conversationId, resetCommandBinding, updatePhase])
+
+  const mergeServerMessages = useCallback((existing: ViewMessage[], incoming: ViewMessage[]) => {
+    const optimisticId = sendingUserMsgRef.current;
+    const latestUserAt = latestUserMsgAtRef.current;
+    if (!optimisticId || !latestUserAt) return mergeMessages(existing, incoming);
+
+    const serverUserMessage = incoming.find((message) =>
+      message.role === 'user'
+      && !message.id.startsWith('temp-')
+      && new Date(message.created_at).getTime() >= new Date(latestUserAt).getTime()
+    );
+    if (!serverUserMessage) return mergeMessages(existing, incoming);
+
+    sendingUserMsgRef.current = null;
+    const remaining = incoming.filter((message) => message.id !== serverUserMessage.id);
+    return mergeMessages(replaceOptimistic(existing, serverUserMessage), remaining);
+  }, []);
+
+  const settleRemoteCommand = useCallback((snapshot: RemoteCommandSnapshot) => {
+    const currentClientId = activeClientCommandIdRef.current
+    const currentReference = currentClientId && activeCommandIdRef.current === currentClientId
+      ? { serverId: null, clientCommandId: currentClientId }
+      : { serverId: activeCommandIdRef.current, clientCommandId: currentClientId }
+    if (!matchesRemoteCommandReference(snapshot, currentReference)) return
+
+    if (activeCommandIdRef.current !== snapshot.id) {
+      activeCommandIdRef.current = snapshot.id
+      setActiveCommandId(snapshot.id)
+    }
+    const completion = resolveChatCompletion({
+      kind: 'remote_command_status',
+      status: snapshot.status,
+    })
+    if (completion.kind === 'busy') {
+      if (phaseRef.current === 'queued') {
+        phaseRef.current = 'waiting'
+        setPhase('waiting')
+      }
+      return
+    }
+
+    clearCommandTimers()
+    setLiveReasoning('')
+    operationIdRef.current += 1
+    sendInFlightRef.current = false
+    stopRequestedRef.current = false
+    commandDeadlineRef.current = null
+    activeCommandIdRef.current = null
+    activeClientCommandIdRef.current = null
+    setActiveCommandId(null)
+    setActiveClientCommandId(null)
+
+    switch (completion.kind) {
+      case 'completed':
+        phaseRef.current = 'completed'
+        setPhase('completed')
+        return
+      case 'cancelled':
+        phaseRef.current = 'cancelled'
+        setPhase('cancelled')
+        appendSystemMessage('桌面端已确认停止当前任务')
+        return
+      case 'failed':
+        phaseRef.current = 'failed'
+        setPhase('failed')
+        appendSystemMessage(snapshot.error ?? '桌面端命令执行失败')
+        return
+      default: {
+        const unreachable: never = completion
+        return unreachable
+      }
+    }
+  }, [appendSystemMessage, clearCommandTimers])
 
   // ========== 历史加载（§25 分页：最近 N 条 + 向上加载更早） ==========
   const loadMessages = useCallback(async () => {
@@ -232,7 +411,7 @@ export default function MessageView({ conversationId, conversationTitle, onBack 
         return;
       }
       const data = (res.data ?? []) as ViewMessage[];
-      setMessages((prev) => mergeMessages(prev, data));
+      setMessages((prev) => mergeServerMessages(prev, data));
       setHasMoreOlder(data.length >= 100);
       setLoadError(null);
     } catch (e) {
@@ -240,7 +419,7 @@ export default function MessageView({ conversationId, conversationTitle, onBack 
     } finally {
       setLoading(false);
     }
-  }, [conversationId]);
+  }, [conversationId, mergeServerMessages]);
 
   // 向上滚动加载更早消息（§25）
   const loadOlder = useCallback(async () => {
@@ -257,7 +436,7 @@ export default function MessageView({ conversationId, conversationTitle, onBack 
     loadMessages();
     // §11 Realtime + Fetch 竞态：先建立 Realtime 再获取历史，merge 由 mergeMessages 统一处理
     const unsub = subscribeMessages(conversationId, (newMsg: ChatMessage) => {
-      setMessages((prev) => mergeMessages(prev, [newMsg as ViewMessage]));
+      setMessages((prev) => mergeServerMessages(prev, [newMsg as ViewMessage]));
       // 从 tool_results 提取 reasoning 更新思考横条
       if (newMsg.tool_results) {
         try {
@@ -270,47 +449,43 @@ export default function MessageView({ conversationId, conversationTitle, onBack 
           }
         } catch { /* ignore */ }
       }
-      // §14：仅当新 assistant 晚于本次用户消息才判定完成
-      if (newMsg.role === 'assistant' && latestUserMsgAtRef.current) {
-        if (hasAssistantAfter(messagesRef.current.concat([newMsg as ViewMessage]), latestUserMsgAtRef.current)) {
-          setPhase((p) => (p === 'cancelling' ? 'cancelled' : 'completed'));
-          if (timeoutRef.current) { clearTimeout(timeoutRef.current); timeoutRef.current = null; }
-          setLiveReasoning('');
-          activeCommandIdRef.current = null;
-        }
-      }
     });
     return unsub;
-  }, [conversationId, loadMessages]);
+  }, [conversationId, loadMessages, mergeServerMessages]);
 
-  // 轮询兜底（P0-A08）
+  // 消息轮询兜底（P0-A08，仅同步流式内容）
   useEffect(() => {
     return onSyncStateChange((s) => setSyncStatus(s.status));
   }, []);
 
   useEffect(() => {
-    if (!conversationId) return;
-    if (syncStatus === 'connected') return; // Realtime 正常 → 不启动轮询
-    let cancelled = false;
-    const interval = setInterval(async () => {
-      if (cancelled) return;
+    if (!activeCommandId || !activeClientCommandId) return
+    const reference = activeCommandId === activeClientCommandId
+      ? { serverId: null, clientCommandId: activeClientCommandId }
+      : { serverId: activeCommandId, clientCommandId: activeClientCommandId }
+    return subscribeRemoteCommandStatus(reference, settleRemoteCommand)
+  }, [activeClientCommandId, activeCommandId, settleRemoteCommand])
+
+  useEffect(() => {
+    if (!conversationId) return
+    if (syncStatus === 'connected') return
+    let cancelled = false
+    let requestInFlight = false
+    const pollMessages = async () => {
+      if (cancelled || requestInFlight) return
+      requestInFlight = true
       try {
-        const res = await getMessages(conversationId, { limit: 100 });
-        if (cancelled || res.error) return;
-        const data = (res.data ?? []) as ViewMessage[];
-        setMessages((prev) => mergeMessages(prev, data));
-        // §14：完成判断绑定当前请求
-        if (latestUserMsgAtRef.current) {
-          if (hasAssistantAfter(messagesRef.current.concat(data), latestUserMsgAtRef.current)) {
-            setPhase((p) => (p === 'cancelling' ? 'cancelled' : 'completed'));
-            if (timeoutRef.current) { clearTimeout(timeoutRef.current); timeoutRef.current = null; }
-            setLiveReasoning('');
-          }
-        }
-      } catch { /* 忽略网络错误 */ }
-    }, 2000);
-    return () => { cancelled = true; clearInterval(interval); };
-  }, [conversationId, syncStatus]);
+        const res = await getMessages(conversationId, { limit: 100 })
+        if (cancelled || res.error) return
+        const data = (res.data ?? []) as ViewMessage[]
+        setMessages((prev) => mergeServerMessages(prev, data))
+      } catch { /* 忽略网络错误 */ } finally {
+        requestInFlight = false
+      }
+    }
+    const interval = setInterval(() => { void pollMessages() }, 2000)
+    return () => { cancelled = true; clearInterval(interval) }
+  }, [conversationId, mergeServerMessages, syncStatus])
 
   // §8.4 条件跟随滚动
   const onScroll = () => {
@@ -340,13 +515,16 @@ export default function MessageView({ conversationId, conversationTitle, onBack 
     }
   }, [messages, phaseIsActive]);
 
-  // P1 修复：组件卸载时清理 pending 超时定时器
+  // 卸载时使异步发送/取消结果失效并清理定时器
   useEffect(() => {
+    mountedRef.current = true
     return () => {
-      if (timeoutRef.current) clearTimeout(timeoutRef.current);
-      timeoutRef.current = null;
-    };
-  }, []);
+      mountedRef.current = false
+      operationIdRef.current += 1
+      sendInFlightRef.current = false
+      clearCommandTimers()
+    }
+  }, [clearCommandTimers])
 
   // 加载提示词模板
   useEffect(() => {
@@ -399,117 +577,213 @@ export default function MessageView({ conversationId, conversationTitle, onBack 
 
   // ========== 发送（§7/§8/§9/§15/§18） ==========
   const handleSend = async () => {
-    const text = input.trim();
-    if (!text || phaseIsActive) return;
-    setInput('');
-    setPhase('sending');
-    activeCommandIdRef.current = null;
-    latestUserMsgAtRef.current = null;
+    const text = input.trim()
+    if (!text || phaseIsActive || sendInFlightRef.current) return
+
+    const operationId = operationIdRef.current + 1
+    operationIdRef.current = operationId
+    sendInFlightRef.current = true
+    stopRequestedRef.current = false
+    clearCommandTimers()
+    resetCommandBinding()
+    commandDeadlineRef.current = Date.now() + 300_000
+    updatePhase('sending')
+    setInput('')
+    latestUserMsgAtRef.current = null
+
+    const clientCommandId = createClientCommandId()
+    activeClientCommandIdRef.current = clientCommandId
+    setActiveClientCommandId(clientCommandId)
 
     // 构建消息内容：文字 + 图片 + 文件（§ 附件管道）
-    let content = text;
+    let content = text
     if (imageAttachments.length > 0) {
-      content += '\n\n' + imageAttachments.map((url) => `![image](${url})`).join('\n');
-      setImageAttachments([]);
+      content += '\n\n' + imageAttachments.map((url) => `![image](${url})`).join('\n')
+      setImageAttachments([])
     }
     if (fileAttachments.length > 0) {
-      content += '\n\n' + fileAttachments.map((f) => `[上传文件: ${f.name}](${f.dataUrl})`).join('\n');
-      setFileAttachments([]);
+      content += '\n\n' + fileAttachments.map((f) => `[上传文件: ${f.name}](${f.dataUrl})`).join('\n')
+      setFileAttachments([])
     }
 
     // 乐观添加用户消息（§8：无论结果如何都不删除，只更新状态）
-    const tempId = `temp-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+    const tempId = `temp-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`
     const optimisticMsg: ViewMessage = {
-      id: tempId, role: 'user', content: text, created_at: new Date().toISOString(),
+      id: tempId,
+      role: 'user',
+      content: text,
+      created_at: new Date().toISOString(),
       localState: 'sending',
-    };
-    setMessages((prev) => [...prev, optimisticMsg]);
-    sendingUserMsgRef.current = tempId;
-    latestUserMsgAtRef.current = optimisticMsg.created_at;
-
-    const contentWithMeta = `[mode=${mode}][level=${permissionLevel}][deep=${deepThinking}][web=${webSearch}][loop=${loopMode}] ${content}`.trim();
-    const result: SendResult = await sendCommand(contentWithMeta, conversationId);
-
-    if (result.status === 'sent') {
-      activeCommandIdRef.current = result.commandId;
-      setPhase('waiting');
-      // 乐观消息状态 → sent（等待真实回包替换）
-      setMessages((prev) => prev.map((m) => (m.id === tempId ? { ...m, localState: 'sent' as const } : m)));
-    } else if (result.status === 'queued') {
-      // §8/§9：离线入队不是失败，保留消息并显示"等待连接"
-      setPhase('queued');
-      setMessages((prev) => prev.map((m) => (m.id === tempId ? { ...m, localState: 'queued' as const } : m)));
-    } else {
-      // 真正失败：保留消息并标记 failed，提供重发入口（§9）
-      setPhase('failed');
-      setMessages((prev) => prev.map((m) => (m.id === tempId ? { ...m, localState: 'failed' as const, localError: result.message } : m)));
+      localClientCommandId: clientCommandId,
+      localCommandPayload: content,
     }
+    setMessages((prev) => [...prev, optimisticMsg])
+    sendingUserMsgRef.current = tempId
+    latestUserMsgAtRef.current = optimisticMsg.created_at
 
-    // §16：timeout 绑定当前 command（插入 system 角色，不伪装 AI 回复）
-    if (timeoutRef.current) clearTimeout(timeoutRef.current);
-    timeoutRef.current = setTimeout(() => {
-      const cmdId = activeCommandIdRef.current;
-      if (!cmdId) return; // 已结算（completed/cancelled）或未成功发送 → 不插入超时
-      setPhase((p) => {
-        if (p === 'cancelling') return p;
-        if (['completed', 'cancelled', 'failed'].includes(p)) return p;
-        setMessages((prev) => [...prev, {
-          id: `timeout-${Date.now()}`,
-          role: 'system',
-          content: '等待桌面端响应超时，请检查 Aether 桌面端是否运行',
-          created_at: new Date().toISOString(),
-        }]);
-        return 'timeout';
-      });
-    }, 300000); // 5分钟
-  };
+    const contentWithMeta = `[mode=${mode}][level=${permissionLevel}][deep=${deepThinking}][web=${webSearch}][loop=${loopMode}] ${content}`.trim()
+    try {
+      const result: SendResult = await sendCommand(contentWithMeta, conversationId, clientCommandId)
+      if (!mountedRef.current || operationIdRef.current !== operationId) return
+
+      if (result.status === 'sent') {
+        activeCommandIdRef.current = result.commandId
+        setActiveCommandId(result.commandId)
+        setMessages((prev) => prev.map((message) => message.id === tempId ? {
+          ...message,
+          localState: 'sent' as const,
+          localClientCommandId: result.clientCommandId,
+        } : message))
+        if (stopRequestedRef.current) {
+          sendInFlightRef.current = false
+          if (!cancelTimeoutRef.current) void requestCancellation(result.clientCommandId, operationId)
+          return
+        }
+        updatePhase('waiting')
+        armCommandTimeout(operationId)
+      } else if (result.status === 'queued') {
+        activeCommandIdRef.current = result.commandId
+        setActiveCommandId(result.commandId)
+        setMessages((prev) => prev.map((message) => message.id === tempId ? {
+          ...message,
+          localState: 'queued' as const,
+          localClientCommandId: result.clientCommandId,
+        } : message))
+        if (stopRequestedRef.current) {
+          sendInFlightRef.current = false
+          if (!cancelTimeoutRef.current) void requestCancellation(result.clientCommandId, operationId)
+          return
+        }
+        updatePhase('queued')
+        armCommandTimeout(operationId)
+      } else {
+        resetCommandBinding()
+        updatePhase('failed')
+        setMessages((prev) => prev.map((message) => message.id === tempId ? {
+          ...message,
+          localState: 'failed' as const,
+          localError: result.message,
+          localClientCommandId: result.clientCommandId ?? clientCommandId,
+          localCommandPayload: content,
+        } : message))
+      }
+    } catch (error: unknown) {
+      if (!mountedRef.current || operationIdRef.current !== operationId) return
+      resetCommandBinding()
+      updatePhase('failed')
+      setMessages((prev) => prev.map((message) => message.id === tempId ? {
+        ...message,
+        localState: 'failed' as const,
+        localError: error instanceof Error ? error.message : '发送失败',
+        localClientCommandId: clientCommandId,
+        localCommandPayload: content,
+      } : message))
+    } finally {
+      if (operationIdRef.current === operationId) sendInFlightRef.current = false
+    }
+  }
 
   // 重发失败消息（§9）
   const handleResend = async (msg: ViewMessage) => {
-    const text = msg.content;
-    setMessages((prev) => prev.map((m) => (m.id === msg.id ? { ...m, localState: 'sending' as const, localError: undefined } : m)));
-    setPhase('sending');
-    latestUserMsgAtRef.current = msg.created_at;
-    const contentWithMeta = `[mode=${mode}][level=${permissionLevel}][deep=${deepThinking}][web=${webSearch}][loop=${loopMode}] ${text}`.trim();
-    const result = await sendCommand(contentWithMeta, conversationId);
-    if (result.status === 'sent') {
-      activeCommandIdRef.current = result.commandId;
-      setPhase('waiting');
-      setMessages((prev) => prev.map((m) => (m.id === msg.id ? { ...m, localState: 'sent' as const } : m)));
-    } else if (result.status === 'queued') {
-      setPhase('queued');
-      setMessages((prev) => prev.map((m) => (m.id === msg.id ? { ...m, localState: 'queued' as const } : m)));
-    } else {
-      setPhase('failed');
-      setMessages((prev) => prev.map((m) => (m.id === msg.id ? { ...m, localState: 'failed' as const, localError: result.message } : m)));
+    if (phaseIsActive || sendInFlightRef.current) return
+
+    const operationId = operationIdRef.current + 1
+    operationIdRef.current = operationId
+    sendInFlightRef.current = true
+    stopRequestedRef.current = false
+    clearCommandTimers()
+    resetCommandBinding()
+    commandDeadlineRef.current = Date.now() + 300_000
+    updatePhase('sending')
+    const clientCommandId = createClientCommandId()
+    const text = msg.localCommandPayload ?? msg.content
+    activeClientCommandIdRef.current = clientCommandId
+    setActiveClientCommandId(clientCommandId)
+    setMessages((prev) => prev.map((message) => message.id === msg.id ? {
+      ...message,
+      localState: 'sending' as const,
+      localError: undefined,
+      localClientCommandId: clientCommandId,
+      localCommandPayload: text,
+    } : message))
+    latestUserMsgAtRef.current = msg.created_at
+    const contentWithMeta = `[mode=${mode}][level=${permissionLevel}][deep=${deepThinking}][web=${webSearch}][loop=${loopMode}] ${text}`.trim()
+    try {
+      const result = await sendCommand(contentWithMeta, conversationId, clientCommandId)
+      if (!mountedRef.current || operationIdRef.current !== operationId) return
+
+      if (result.status === 'sent') {
+        activeCommandIdRef.current = result.commandId
+        setActiveCommandId(result.commandId)
+        setMessages((prev) => prev.map((message) => message.id === msg.id ? {
+          ...message,
+          localState: 'sent' as const,
+          localClientCommandId: result.clientCommandId,
+        } : message))
+        if (stopRequestedRef.current) {
+          sendInFlightRef.current = false
+          if (!cancelTimeoutRef.current) void requestCancellation(result.clientCommandId, operationId)
+          return
+        }
+        updatePhase('waiting')
+        armCommandTimeout(operationId)
+      } else if (result.status === 'queued') {
+        activeCommandIdRef.current = result.commandId
+        setActiveCommandId(result.commandId)
+        setMessages((prev) => prev.map((message) => message.id === msg.id ? {
+          ...message,
+          localState: 'queued' as const,
+          localClientCommandId: result.clientCommandId,
+        } : message))
+        if (stopRequestedRef.current) {
+          sendInFlightRef.current = false
+          if (!cancelTimeoutRef.current) void requestCancellation(result.clientCommandId, operationId)
+          return
+        }
+        updatePhase('queued')
+        armCommandTimeout(operationId)
+      } else {
+        resetCommandBinding()
+        updatePhase('failed')
+        setMessages((prev) => prev.map((message) => message.id === msg.id ? {
+          ...message,
+          localState: 'failed' as const,
+          localError: result.message,
+          localClientCommandId: result.clientCommandId ?? clientCommandId,
+          localCommandPayload: text,
+        } : message))
+      }
+    } catch (error: unknown) {
+      if (!mountedRef.current || operationIdRef.current !== operationId) return
+      resetCommandBinding()
+      updatePhase('failed')
+      setMessages((prev) => prev.map((message) => message.id === msg.id ? {
+        ...message,
+        localState: 'failed' as const,
+        localError: error instanceof Error ? error.message : '发送失败',
+        localClientCommandId: clientCommandId,
+        localCommandPayload: text,
+      } : message))
+    } finally {
+      if (operationIdRef.current === operationId) sendInFlightRef.current = false
     }
-  };
+  }
 
   // §18/§15.1 收口：停止执行 —— 不只改本地 UI 状态，必须真正取消后端 Run。
   // Mobile Stop → cancel API（remote_commands /cancel 命令）→ 桌面端 RunCancellationRegistry
   // → AbortSignal → runExecutionLoop state='cancelled' → run.cancelled 终态事件 → Mobile terminal state。
-  const handleStop = () => {
-    if (!['sending', 'queued', 'waiting', 'processing', 'streaming'].includes(phase)) return;
-    setPhase((p) => {
-      if (!['sending', 'queued', 'waiting', 'processing', 'streaming'].includes(p)) return p;
-      return 'cancelling';
-    });
-    // 停止即视为当前请求已结算（不伪造桌面端已取消，但 UI 明确告知）
-    if (timeoutRef.current) { clearTimeout(timeoutRef.current); timeoutRef.current = null; }
-    activeCommandIdRef.current = null;
-    setLiveReasoning('');
-    // §15.1：向桌面端发送真正的取消命令（取消信号，桌面端据此中止 Run 执行流）
-    void cancelCommand(conversationId, `cancel-${Date.now()}`);
-    setTimeout(() => {
-      setPhase((p) => (p === 'cancelling' ? 'cancelled' : p));
-      setMessages((prev) => [...prev, {
-        id: `cancel-${Date.now()}`,
-        role: 'system',
-        content: '已停止当前任务（已通知桌面端取消执行）',
-        created_at: new Date().toISOString(),
-      }]);
-    }, 300);
-  };
+  const handleStop = async () => {
+    if (!['sending', 'queued', 'waiting', 'processing', 'streaming', 'timeout', 'cancel_timeout'].includes(phase)) return
+    const clientCommandId = activeClientCommandIdRef.current
+    if (!clientCommandId) {
+      updatePhase(activeCommandIdRef.current ? 'waiting' : 'queued')
+      appendSystemMessage('停止请求尚未绑定，当前命令继续等待终态')
+      return
+    }
+
+    stopRequestedRef.current = true
+    await requestCancellation(clientCommandId, operationIdRef.current)
+  }
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -587,7 +861,7 @@ export default function MessageView({ conversationId, conversationTitle, onBack 
         localBadge = (
           <span className="msg-local-badge failed">
             发送失败
-            <button className="msg-resend-btn" onClick={() => handleResend(msg)} aria-label="重新发送">
+            <button className="msg-resend-btn" onClick={() => handleResend(msg)} disabled={phaseIsActive} aria-label="重新发送">
               <RefreshCw size={12} />
             </button>
           </span>
@@ -644,7 +918,10 @@ export default function MessageView({ conversationId, conversationTitle, onBack 
 
   const subtitle = phase === 'sending' ? 'Aether 工作站 · 正在发送'
     : phase === 'queued' ? 'Aether 工作站 · 等待连接'
-    : phase === 'processing' || phase === 'streaming' || phase === 'waiting' || phase === 'cancelling' ? 'Aether 工作站 · 正在工作'
+    : phase === 'timeout' ? 'Aether 工作站 · 等待终态超时'
+    : phase === 'cancelling' ? 'Aether 工作站 · 正在停止'
+    : phase === 'cancel_timeout' ? 'Aether 工作站 · 停止确认超时'
+    : phase === 'processing' || phase === 'streaming' || phase === 'waiting' ? 'Aether 工作站 · 正在工作'
     : phase === 'failed' ? 'Aether 工作站 · 发送失败'
     : online ? 'Aether 工作站 · 已同步' : 'Aether 工作站 · 连接中断';
 
@@ -697,7 +974,7 @@ export default function MessageView({ conversationId, conversationTitle, onBack 
               <span className="msg-asst-name">Aether</span>
             </div>
             <div className="msg-content">
-              <span>{phase === 'queued' ? '等待连接…' : phase === 'cancelling' ? '正在停止…' : '正在处理…'}</span>
+              <span>{phase === 'queued' ? '等待连接…' : phase === 'cancelling' ? '正在停止…' : phase === 'cancel_timeout' ? '等待停止确认…' : '正在处理…'}</span>
               <span className="stream-indicator" />
             </div>
           </div>
@@ -764,7 +1041,7 @@ export default function MessageView({ conversationId, conversationTitle, onBack 
               disabled={phaseIsActive}
             />
             {phaseIsActive ? (
-              <button className="send-btn stop" onClick={handleStop} aria-label="停止" title="停止">
+              <button className="send-btn stop" onClick={() => void handleStop()} aria-label="停止" title="停止">
                 <Square size={16} />
               </button>
             ) : (

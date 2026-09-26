@@ -32,6 +32,8 @@ export {
   RetryError,
   RetryExhaustedError,
   type RetryErrorOptions,
+  type RetryExhaustedErrorOptions,
+  type RetryLastErrorJSON,
   isRetryable,
 } from './retry-error.js';
 

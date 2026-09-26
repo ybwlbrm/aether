@@ -22,7 +22,9 @@ import {
   type ExecutionLoopDeps,
   type ExecutionTool,
 } from './execution-loop.js';
-import type { ModelRequest, ModelResponse, ModelRuntime } from '../models/model-runtime.js';
+import type { ModelRequest, ModelResponse, ModelRuntime } from '../models/model-runtime.js'
+import { ToolError } from '../errors/index.js'
+import type { StreamChunk } from '@pacc/shared'
 
 /** 可编程 ModelRuntime mock：按序号返回预设响应 */
 function mockModel(responses: Array<Partial<ModelResponse>>): ModelRuntime & { calls: number } {
@@ -77,6 +79,126 @@ describe('core/runtime/execution-loop', () => {
     assert.equal(result.turnsUsed, 2);
     assert.equal(result.toolCallCount, 1);
   });
+
+  it('B2: hasTools=false 收到 tool_calls 不标 completed', async () => {
+    // Given
+    const model = mockModel([{
+      toolCalls: [toolCall('get_weather')],
+      finishReason: 'tool_calls',
+    }])
+    const events: Array<{ type: string; payload: Record<string, unknown> }> = []
+
+    // When
+    const result = await runExecutionLoop({
+      ...depsFor(model),
+      hasTools: false,
+      onEvent: (type, payload) => events.push({ type, payload }),
+    }, [], { loop: false })
+
+    // Then
+    assert.equal(result.state, 'failed')
+    const failure = events.find(({ type }) => type === 'execution.failed')
+    assert.match(String(failure?.payload.error), /get_weather/)
+  })
+
+  it('tool call 消息链回归', async () => {
+    const model = mockModel([
+      {
+        toolCalls: [{
+          id: 'call-weather',
+          name: 'get_weather',
+          arguments: '{"city":"杭州"}',
+        }],
+        finishReason: 'tool_calls',
+      },
+      { content: '天气晴，25°C', finishReason: 'stop' },
+    ])
+    const messagesByTurn: Array<Array<Record<string, unknown>>> = []
+    const executedTools: ExecutionTool[] = []
+
+    const result = await runExecutionLoop(
+      {
+        ...depsFor(model, async (tool) => {
+          executedTools.push(tool)
+          return '晴，25°C'
+        }),
+        buildRequest: (messages) => {
+          messagesByTurn.push([...messages])
+          return { provider: 'mock', model: 'm', messages: [...messages] }
+        },
+      },
+      [],
+      { loop: false },
+    )
+
+    assert.equal(result.state, 'completed')
+    assert.deepEqual(executedTools, [{
+      name: 'get_weather',
+      arguments: '{"city":"杭州"}',
+      id: 'call-weather',
+    }])
+    assert.deepEqual(messagesByTurn[1], [
+      {
+        role: 'assistant',
+        content: '',
+        tool_calls: [{
+          id: 'call-weather',
+          type: 'function',
+          function: {
+            name: 'get_weather',
+            arguments: '{"city":"杭州"}',
+          },
+        }],
+      },
+      {
+        role: 'tool',
+        tool_call_id: 'call-weather',
+        content: '晴，25°C',
+      },
+    ])
+  })
+
+  it('max-tokens 不标完成', async () => {
+    const model = mockModel([
+      { content: '回答因 token 上限被截断', finishReason: 'max-tokens' },
+    ])
+
+    const result = await runExecutionLoop(depsFor(model), [], { loop: false })
+
+    assert.equal(result.state, 'interrupted')
+    assert.equal(result.interrupted, true)
+    assert.equal(result.content, '回答因 token 上限被截断')
+  })
+
+  it('工具失败状态真实', async () => {
+    const model = mockModel([
+      { toolCalls: [toolCall('failing_tool')], finishReason: 'tool_calls' },
+      { content: '已记录工具失败', finishReason: 'stop' },
+    ])
+    const messagesByTurn: Array<Array<Record<string, unknown>>> = []
+    const events: Array<{ type: string; payload: Record<string, unknown> }> = []
+
+    const result = await runExecutionLoop(
+      {
+        ...depsFor(model, async () => {
+          throw new Error('工具炸了')
+        }),
+        buildRequest: (messages) => {
+          messagesByTurn.push([...messages])
+          return { provider: 'mock', model: 'm', messages: [...messages] }
+        },
+        onEvent: (type, payload) => events.push({ type, payload }),
+      },
+      [],
+      { loop: false },
+    )
+
+    const toolEvent = events.find(({ type }) => type === 'execution.tool_completed')
+    assert.equal(toolEvent?.payload.status, 'failed', '工具异常事件不得标记 completed')
+    assert.equal(messagesByTurn[1]?.[1]?.content, '[tool_error] 工具炸了')
+    assert.equal(result.state, 'completed')
+    assert.equal(result.content, '已记录工具失败')
+  })
 
   it('Normal: 模型直接给出最终回答（无工具）即结束，不自动重新问模型', async () => {
     const model = mockModel([{ content: '直接回答', finishReason: 'stop' }]);
@@ -138,6 +260,98 @@ describe('core/runtime/execution-loop', () => {
     assert.equal(result.state, 'cancelled');
     assert.equal(result.budgetExceeded, 'cancelled');
   });
+
+  it('取消复查: 模型返回后（不协作）signal 中止 → cancelled', async () => {
+    const ac = new AbortController();
+    // 模拟不协作模型：忽略 request.signal，正常 resolve 后才被外部中止。
+    // 若 execution-loop 缺少模型返回后的取消复查，该结果会被当作正常完成。
+    const nonCooperative: ModelRuntime = {
+      async complete(): Promise<ModelResponse> {
+        ac.abort();
+        return { content: '本应返回', finishReason: 'stop' } as ModelResponse;
+      },
+      async *stream(): AsyncIterable<StreamChunk> { return; },
+    };
+    const result = await runExecutionLoop(depsFor(nonCooperative), [], { loop: true, signal: ac.signal });
+    assert.equal(result.state, 'cancelled');
+    assert.equal(result.budgetExceeded, 'cancelled');
+  });
+
+  it('buildRequest 抛错 → state=failed（不裸抛）', async () => {
+    const model = mockModel([{ content: '不应到达', finishReason: 'stop' }]);
+    const deps = depsFor(model);
+    deps.buildRequest = () => { throw new Error('request build boom'); };
+    const result = await runExecutionLoop(deps, [], { loop: false });
+    assert.equal(result.state, 'failed');
+  });
+
+  it('isTaskComplete 抛错 → state=failed（Loop 不默认放行）', async () => {
+    const model = mockModel([{ content: '进度文本', finishReason: 'stop' }]);
+    const deps = depsFor(model);
+    deps.isTaskComplete = () => { throw new Error('evaluator boom'); };
+    const result = await runExecutionLoop(deps, [], { loop: true });
+    assert.equal(result.state, 'failed');
+  });
+
+  it('B1: 模型同时返回 interrupted 且 signal 中止 → cancelled', async () => {
+    // Given
+    const ac = new AbortController()
+    const model: ModelRuntime = {
+      async complete(): Promise<ModelResponse> {
+        ac.abort()
+        return {
+          id: 'interrupted-response',
+          provider: 'mock',
+          model: 'm',
+          content: '部分输出',
+          finishReason: 'error',
+          interrupted: true,
+        }
+      },
+      async *stream(): AsyncIterable<StreamChunk> { return; },
+    }
+
+    // When
+    const result = await runExecutionLoop(depsFor(model), [], { loop: false, signal: ac.signal })
+
+    // Then
+    assert.equal(result.state, 'cancelled')
+    assert.equal(result.budgetExceeded, 'cancelled')
+  })
+
+  it('B1: signal 中止与时长预算同时成立 → cancelled', async () => {
+    // Given
+    const ac = new AbortController()
+    const model: ModelRuntime = {
+      async complete(): Promise<ModelResponse> {
+        ac.abort()
+        await new Promise(resolve => setTimeout(resolve, 10))
+        return {
+          id: 'slow-response',
+          provider: 'mock',
+          model: 'm',
+          content: '慢响应',
+          finishReason: 'stop',
+        }
+      },
+      async *stream(): AsyncIterable<StreamChunk> { return; },
+    }
+    const budget = {
+      ...normalExecutionBudget(),
+      maxTurns: 0,
+      maxToolCalls: 0,
+      maxTimeMs: 1,
+      maxTokens: 0,
+      maxCostCny: 0,
+    }
+
+    // When
+    const result = await runExecutionLoop(depsFor(model), [], { loop: false, signal: ac.signal, budget })
+
+    // Then
+    assert.equal(result.state, 'cancelled')
+    assert.equal(result.budgetExceeded, 'cancelled')
+  })
 
   it('Normal 与 Loop 预算确实不同（P0-07）', () => {
     const normal = normalExecutionBudget();
@@ -244,6 +458,67 @@ describe('core/runtime/execution-loop', () => {
     assert.equal(result.turnsUsed, 1);
   });
 
+  it('B3: 单次模型调用成本未超限 → completed', async () => {
+    // Given
+    const model = mockModel([{
+      content: '单次完成',
+      finishReason: 'stop',
+      usage: {
+        inputTokens: 600_000,
+        outputTokens: 400_000,
+        totalTokens: 1_000_000,
+      },
+    }])
+    const budget = {
+      ...normalExecutionBudget(),
+      maxTurns: 0,
+      maxToolCalls: 0,
+      maxTimeMs: 0,
+      maxTokens: 0,
+      maxCostCny: 1.5,
+    }
+
+    // When
+    const result = await runExecutionLoop(depsFor(model), [], { loop: false, budget })
+
+    // Then
+    assert.equal(result.state, 'completed')
+    assert.equal(result.content, '单次完成')
+    assert.equal(result.budgetExceeded, 'none')
+  })
+
+  it('B3: 两次模型调用累计成本超限 → budget_exceeded=cost', async () => {
+    // Given
+    const usage = {
+      inputTokens: 600_000,
+      outputTokens: 400_000,
+      totalTokens: 1_000_000,
+    }
+    const model = mockModel([
+      { content: '继续', finishReason: 'stop', usage },
+      { content: '完成', finishReason: 'stop', usage },
+    ])
+    const budget = {
+      ...normalExecutionBudget(),
+      maxTurns: 0,
+      maxToolCalls: 0,
+      maxTimeMs: 0,
+      maxTokens: 0,
+      maxCostCny: 1.5,
+    }
+
+    // When
+    const result = await runExecutionLoop({
+      ...depsFor(model),
+      isTaskComplete: response => response.content === '完成',
+    }, [], { loop: true, budget })
+
+    // Then
+    assert.equal(result.state, 'budget_exceeded')
+    assert.equal(result.budgetExceeded, 'cost')
+    assert.equal(result.turnsUsed, 2)
+  })
+
   it('Loop timeout: maxTimeMs 预算 → budget_exceeded=duration', async () => {
     // 让模型调用真实耗时超过 maxTimeMs（同毫秒 elapsedMs=0 无法触发 duration）
     const slowModel: ModelRuntime = {
@@ -259,10 +534,252 @@ describe('core/runtime/execution-loop', () => {
     assert.equal(result.budgetExceeded, 'duration');
   });
 
-  // ============ §3.1 Streaming：onChunk 实时转发 + 统一聚合 ============
+  it('Task Retry：前 8 次失败后成功，retry 不占用 turnsUsed 并发射 attempt/retry 事件', async () => {
+    let modelCalls = 0
+    const events: Array<{ type: string; payload: Record<string, unknown> }> = []
+    const model: ModelRuntime = {
+      async complete(): Promise<ModelResponse> {
+        modelCalls += 1
+        if (modelCalls <= 8) throw new Error('temporary model failure')
+        return {
+          id: 'recovered',
+          provider: 'mock',
+          model: 'm',
+          content: 'recovered after task retry',
+          finishReason: 'stop',
+        }
+      },
+      async *stream(): AsyncIterable<StreamChunk> { return },
+    }
+
+    const result = await runExecutionLoop({
+      ...depsFor(model),
+      onEvent: (type, payload) => events.push({ type, payload }),
+    }, [{ role: 'user', content: 'original task' }], {
+      loop: false,
+      runId: 'run-task-retry',
+      taskId: 'task-task-retry',
+      retry: {
+        taskMaxRetries: 8,
+        baseDelayMs: 0,
+        jitter: 0,
+      },
+    })
+
+    assert.equal(result.state, 'completed')
+    assert.equal(modelCalls, 9)
+    assert.equal(result.turnsUsed, 1)
+    const started = events.find((event) => event.type === 'attempt.started')
+    const scheduled = events.find((event) => event.type === 'retry.scheduled')
+    assert.equal(started?.payload.runId, 'run-task-retry')
+    assert.equal(started?.payload.taskId, 'task-task-retry')
+    assert.equal(started?.payload.maxAttempts, 9)
+    assert.equal(scheduled?.payload.retryLayer, 'task')
+    assert.equal(scheduled?.payload.attempt, 1)
+  })
+
+  it('Task Retry：重试全部失败进入 retry_exhausted 终态而不是 completed', async () => {
+    let modelCalls = 0
+    const model: ModelRuntime = {
+      async complete(): Promise<ModelResponse> {
+        modelCalls += 1
+        throw new Error('permanent task failure')
+      },
+      async *stream(): AsyncIterable<StreamChunk> { return },
+    }
+
+    const result = await runExecutionLoop(depsFor(model), [], {
+      loop: false,
+      retry: {
+        taskMaxRetries: 8,
+        baseDelayMs: 0,
+        jitter: 0,
+      },
+    })
+
+    assert.equal(result.state, 'failed')
+    assert.equal(result.retryExhausted, true)
+    assert.equal(result.terminalState, 'retry_exhausted')
+    assert.notEqual(result.state, 'completed')
+    assert.equal(result.turnsUsed, 1)
+    assert.equal(modelCalls, 9)
+  })
+
+  it('Tool Retry：可重试工具耗尽后 Task Retry，成功工具通过 checkpoint 不重复执行', async () => {
+    let modelCalls = 0
+    let successfulToolCalls = 0
+    let flakyToolCalls = 0
+    const model: ModelRuntime = {
+      async complete(): Promise<ModelResponse> {
+        modelCalls += 1
+        if (modelCalls === 1) {
+          return {
+            id: 'tools-1',
+            provider: 'mock',
+            model: 'm',
+            content: '',
+            finishReason: 'tool_calls',
+            toolCalls: [
+              { id: 'ok-tool', name: 'ok_tool', arguments: '{}' },
+              { id: 'flaky-tool', name: 'flaky_tool', arguments: '{}' },
+            ],
+          }
+        }
+        if (modelCalls === 2) {
+          return {
+            id: 'tools-2',
+            provider: 'mock',
+            model: 'm',
+            content: '',
+            finishReason: 'tool_calls',
+            toolCalls: [{ id: 'ok-tool', name: 'ok_tool', arguments: '{}' }],
+          }
+        }
+        return {
+          id: 'tools-3',
+          provider: 'mock',
+          model: 'm',
+          content: 'done',
+          finishReason: 'stop',
+        }
+      },
+      async *stream(): AsyncIterable<StreamChunk> { return },
+    }
+
+    const result = await runExecutionLoop({
+      ...depsFor(model, async (tool) => {
+        if (tool.name === 'ok_tool') {
+          successfulToolCalls += 1
+          return 'cached result'
+        }
+        flakyToolCalls += 1
+        throw new ToolError('temporary tool failure', {
+          toolName: 'flaky_tool',
+          code: 'NETWORK_ERROR',
+          retryable: true,
+        })
+      }),
+    }, [], {
+      loop: false,
+      retry: {
+        taskMaxRetries: 1,
+        toolMaxRetries: 3,
+        baseDelayMs: 0,
+        jitter: 0,
+      },
+    })
+
+    assert.equal(result.state, 'completed')
+    assert.equal(modelCalls, 3)
+    assert.equal(successfulToolCalls, 1)
+    assert.equal(flakyToolCalls, 4)
+    assert.equal(result.turnsUsed, 2)
+  })
+
+  it('Tool Retry：不可重试参数错误不自动重试，错误交给 Agent 处理', async () => {
+    let modelCalls = 0
+    let toolCalls = 0
+    const model: ModelRuntime = {
+      async complete(): Promise<ModelResponse> {
+        modelCalls += 1
+        if (modelCalls === 1) {
+          return {
+            id: 'invalid-tool-1',
+            provider: 'mock',
+            model: 'm',
+            content: '',
+            finishReason: 'tool_calls',
+            toolCalls: [{ id: 'invalid-tool', name: 'invalid_tool', arguments: '{}' }],
+          }
+        }
+        return {
+          id: 'invalid-tool-2',
+          provider: 'mock',
+          model: 'm',
+          content: 'agent handled invalid arguments',
+          finishReason: 'stop',
+        }
+      },
+      async *stream(): AsyncIterable<StreamChunk> { return },
+    }
+
+    const result = await runExecutionLoop({
+      ...depsFor(model, async () => {
+        toolCalls += 1
+        throw new ToolError('invalid parameters', {
+          toolName: 'invalid_tool',
+          code: 'INVALID_INPUT',
+          retryable: false,
+        })
+      }),
+    }, [], { loop: false })
+
+    assert.equal(result.state, 'completed')
+    assert.equal(toolCalls, 1)
+    assert.equal(modelCalls, 2)
+  })
+
+  it('Task Retry 保留原始历史并追加失败原因，不从头重发', async () => {
+    const requestMessages: Array<Array<Record<string, unknown>>> = []
+    let modelCalls = 0
+    const model: ModelRuntime = {
+      async complete(): Promise<ModelResponse> {
+        modelCalls += 1
+        if (modelCalls === 1) throw new Error('retry with context')
+        return {
+          id: 'context-2',
+          provider: 'mock',
+          model: 'm',
+          content: 'context preserved',
+          finishReason: 'stop',
+        }
+      },
+      async *stream(): AsyncIterable<StreamChunk> { return },
+    }
+
+    const result = await runExecutionLoop({
+      ...depsFor(model),
+      buildRequest: (messages) => {
+        requestMessages.push([...messages])
+        return { provider: 'mock', model: 'm', messages: [...messages] }
+      },
+    }, [{ role: 'user', content: 'keep this history' }], {
+      loop: false,
+      retry: { taskMaxRetries: 1, baseDelayMs: 0, jitter: 0 },
+    })
+
+    assert.equal(result.state, 'completed')
+    assert.equal(requestMessages.length, 2)
+    assert.deepEqual(requestMessages[0], [{ role: 'user', content: 'keep this history' }])
+    assert.ok(requestMessages[1].some((message) => message.role === 'system'))
+    assert.ok(requestMessages[1].some((message) => String(message.content).includes('retry with context')))
+  })
+
+  it('Retry 等待中 Stop 立即把 Loop 置为 cancelled', async () => {
+    const model: ModelRuntime = {
+      async complete(): Promise<ModelResponse> {
+        throw new Error('retryable failure')
+      },
+      async *stream(): AsyncIterable<StreamChunk> { return },
+    }
+    const abortController = new AbortController()
+    const startedAt = Date.now()
+    const promise = runExecutionLoop(depsFor(model), [], {
+      loop: false,
+      signal: abortController.signal,
+      retry: { taskMaxRetries: 8, baseDelayMs: 1000, jitter: 0 },
+    })
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    abortController.abort()
+    const result = await promise
+    assert.equal(result.state, 'cancelled')
+    assert.equal(result.budgetExceeded, 'cancelled')
+    assert.ok(Date.now() - startedAt < 500)
+  })
+
 
   it('§3.1 流式路径: onChunk 转发 text-delta/reasoning/tool/usage/finish 且结果一致', async () => {
-    const chunks = [
+    const chunks: Array<StreamChunk> = [
       { type: 'block-start' as const, index: 0, blockType: 'text' as const },
       { type: 'text-delta' as const, index: 0, text: '天气' },
       { type: 'text-delta' as const, index: 0, text: '晴' },
@@ -271,7 +788,7 @@ describe('core/runtime/execution-loop', () => {
     ];
     const streamModel: ModelRuntime = {
       async complete(): Promise<ModelResponse> { throw new Error('should use stream'); },
-      async *stream(): AsyncIterable<any> {
+      async *stream(): AsyncIterable<StreamChunk> {
         for (const c of chunks) yield c;
       },
     } as never;
@@ -292,7 +809,7 @@ describe('core/runtime/execution-loop', () => {
 
   it('§3.1 流式路径: tool-call chunk 聚合为 toolCalls 并继续工具链', async () => {
     // 每轮调用 stream() 时返回对应轮次的 chunk（跨调用保持轮次状态）
-    const perTurnChunks = [
+    const perTurnChunks: Array<Array<StreamChunk>> = [
       [
         { type: 'block-start' as const, index: 0, blockType: 'tool-call' as const, id: 'c1', name: 'search' },
         { type: 'tool-call-delta' as const, index: 0, argumentsDelta: '{"q":' },
@@ -309,7 +826,7 @@ describe('core/runtime/execution-loop', () => {
     let callIndex = 0;
     const streamModel: ModelRuntime = {
       async complete(): Promise<ModelResponse> { throw new Error('should use stream'); },
-      async *stream(): AsyncIterable<any> {
+      async *stream(): AsyncIterable<StreamChunk> {
         const slice = perTurnChunks[Math.min(callIndex, perTurnChunks.length - 1)];
         callIndex++;
         for (const c of slice) yield c;

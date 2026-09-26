@@ -92,6 +92,7 @@ export function mapWorkflowEventType(type: string): AgentEvent['type'] {
     'workflow.node.completed': 'task.completed',
     'workflow.completed': 'run.completed',
     'workflow.failed': 'run.failed',
+    'workflow.cancelled': 'run.cancelled',
   };
   return map[type] ?? 'run.created';
 }

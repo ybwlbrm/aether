@@ -261,6 +261,7 @@ export class ToolExecutor {
         return errorResult(toolName, {
           message: error.message,
           code: error.code,
+          retryable: error.retryable,
         }, durationMs);
       }
 

@@ -1,8 +1,45 @@
+// allow: SIZE_OK — the migration ledger is intentionally sequential and atomic.
 import initSqlJs from 'sql.js';
 import { readFileSync, writeFileSync, existsSync, renameSync, unlinkSync, openSync, closeSync, fsyncSync, copyFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import type { BackendConfig } from '../config/index.js';
+
+type SqlPrimitive = string | number | null | Uint8Array
+type SqlQueryResult = {
+  readonly values: SqlPrimitive[][]
+}
+type SqlJsDatabase = {
+  run(sql: string, params?: readonly SqlPrimitive[]): void
+  exec(sql: string): SqlQueryResult[]
+  export(): Uint8Array
+  close(): void
+}
+type SqlJsApi = {
+  readonly Database: new (data?: Uint8Array) => SqlJsDatabase
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
+}
+
+function columnNames(db: SqlJsDatabase, table: string): Set<string> {
+  const result = db.exec(`PRAGMA table_info(${table})`)
+  const values: unknown = result[0]?.values ?? []
+  if (!Array.isArray(values)) return new Set()
+
+  const names: string[] = []
+  for (const row of values) {
+    if (Array.isArray(row) && row.length > 1) {
+      names.push(String(row[1]))
+    }
+  }
+  return new Set(names)
+}
+
+function hasColumn(db: SqlJsDatabase, table: string, column: string): boolean {
+  return columnNames(db, table).has(column)
+}
 
 /** 原子写库（tmp + rename + fsync），防止中途强杀导致主库损坏 */
 function atomicWrite(path: string, buffer: Buffer): void {
@@ -10,39 +47,45 @@ function atomicWrite(path: string, buffer: Buffer): void {
   try {
     const fd = openSync(tmpPath, 'w');
     writeFileSync(fd, buffer);
-    try { fsyncSync(fd); } catch { /* fsync best-effort */ }
+    try { fsyncSync(fd) } catch { // no-excuse-ok: catch
+      // fsync is best-effort on platforms that reject directory-backed descriptors
+    }
     closeSync(fd);
     renameSync(tmpPath, path);
-  } catch (e) {
-    try { if (existsSync(tmpPath)) unlinkSync(tmpPath); } catch (_e: unknown) { /* ignore - intentional */ }
+  } catch (error: unknown) {
+    try { if (existsSync(tmpPath)) unlinkSync(tmpPath) } catch (cleanupError: unknown) { // no-excuse-ok: catch
+      void cleanupError
+    }
     // 非原子回退：至少不丢数据
-    writeFileSync(path, buffer);
+    const reason = error instanceof Error ? error.message : String(error)
+    console.warn(`[DB] 原子写入失败，回退直接写入: ${reason}`)
+    writeFileSync(path, buffer)
   }
 }
 
 /** 打开数据库，若损坏则备份坏库并重建空库，避免启动崩溃黑屏 */
-function openDatabase(SQL: Awaited<ReturnType<typeof initSqlJs>>, dbPath: string): any {
+function openDatabase(SQL: SqlJsApi, dbPath: string): SqlJsDatabase {
   if (!existsSync(dbPath)) {
     return new SQL.Database();
   }
 
-  let db: any;
+  let db: SqlJsDatabase
   try {
     const buffer = readFileSync(dbPath);
     db = new SQL.Database(buffer);
     // 触发懒解析，立即暴露损坏（损坏库在第一条 SQL 时才抛 "file is not a database"）
     db.exec('SELECT name FROM sqlite_master LIMIT 1');
     return db;
-  } catch (e) {
+  } catch (error: unknown) {
     // 备份坏库，避免用户数据被直接覆盖（后续可手动找回）
     try {
-      const bakPath = `${dbPath}.corrupt.${Date.now()}`;
-      renameSync(dbPath, bakPath);
-      console.error(`[DB] 检测到损坏的数据库，已备份到 ${bakPath}，重建新库。原因: ${(e as Error).message}`);
-    } catch (_e: unknown) {
-      console.error('[DB] 损坏库备份失败，直接重建');
+      const bakPath = `${dbPath}.corrupt.${Date.now()}`
+      renameSync(dbPath, bakPath)
+      console.error(`[DB] 检测到损坏的数据库，已备份到 ${bakPath}，重建新库。原因: ${error instanceof Error ? error.message : String(error)}`)
+    } catch (backupError: unknown) { // no-excuse-ok: catch
+      console.error(`[DB] 损坏库备份失败，直接重建: ${errorMessage(backupError)}`)
     }
-    return new SQL.Database();
+    return new SQL.Database()
   }
 }
 
@@ -50,7 +93,7 @@ function openDatabase(SQL: Awaited<ReturnType<typeof initSqlJs>>, dbPath: string
  * 整改计划第 7 章（P1）：启动时完整性校验。
  * PRAGMA integrity_check 返回 'ok' 表示完整；非 'ok' 视为损坏，备份并重建。
  */
-function verifyIntegrity(db: any, dbPath: string, SQL: Awaited<ReturnType<typeof initSqlJs>>): any {
+function verifyIntegrity(db: SqlJsDatabase, dbPath: string, SQL: SqlJsApi): SqlJsDatabase {
   try {
     const res = db.exec('PRAGMA integrity_check');
     const status = res.length > 0 && res[0].values.length > 0 ? String(res[0].values[0][0]) : 'ok';
@@ -60,7 +103,7 @@ function verifyIntegrity(db: any, dbPath: string, SQL: Awaited<ReturnType<typeof
       const bakPath = `${dbPath}.corrupt.${Date.now()}`;
       renameSync(dbPath, bakPath);
       console.error(`[DB] 已备份到 ${bakPath}`);
-    } catch (_e: unknown) {
+    } catch (error: unknown) { // no-excuse-ok: catch
       console.error('[DB] 损坏库备份失败，直接重建');
     }
     return new SQL.Database();
@@ -70,7 +113,9 @@ function verifyIntegrity(db: any, dbPath: string, SQL: Awaited<ReturnType<typeof
       const bakPath = `${dbPath}.corrupt.${Date.now()}`;
       renameSync(dbPath, bakPath);
       console.error(`[DB] integrity_check 执行失败，已备份到 ${bakPath}`);
-    } catch (_e: unknown) { /* ignore */ }
+    } catch (error: unknown) { // no-excuse-ok: catch
+      /* ignore */
+    }
     return new SQL.Database();
   }
 }
@@ -97,11 +142,8 @@ function backupBeforeMigration(dbPath: string): string | null {
  * DBs missing columns), then swaps the new table in.
  * 整改计划第 7 章：rebuildTable 包在事务中执行 —— 任一语句失败，外层 ROLLBACK 回滚。
  */
-function rebuildTable(db: any, table: string, createSql: string): void {
-  const colsResult = db.exec(`PRAGMA table_info(${table})`);
-  const existingColumns: string[] = colsResult.length > 0
-    ? (colsResult[0].values as unknown[][]).map((row: unknown[]) => String(row[1]))
-    : [];
+function rebuildTable(db: SqlJsDatabase, table: string, createSql: string): void {
+  const existingColumns = [...columnNames(db, table)]
   const temp = `${table}__p021`;
   db.run(`DROP TABLE IF EXISTS ${temp}`);
   db.run(createSql.replace(`CREATE TABLE ${table}`, `CREATE TABLE ${temp}`));
@@ -115,7 +157,7 @@ function rebuildTable(db: any, table: string, createSql: string): void {
 
 /** 创建所有表 */
 export async function runMigrations(config: BackendConfig): Promise<void> {
-  const SQL = await initSqlJs();
+  const SQL: SqlJsApi = await initSqlJs()
   let db = openDatabase(SQL, config.dbPath);
 
   db.run('PRAGMA foreign_keys = ON');
@@ -129,7 +171,7 @@ export async function runMigrations(config: BackendConfig): Promise<void> {
   // 不留下"部分迁移"的中间状态（rebuildTable 的 DROP/INSERT/ALTER 同样受保护）。
   // 注意：SQLite 不允许在事务内修改 PRAGMA foreign_keys（no-op），
   // 因此 v13 表重建期间需要的 FK 关闭在 BEGIN 之前全局执行，迁移结束后恢复。
-  const fkOnBefore = (db.exec('PRAGMA foreign_keys')[0].values[0][0] as number) === 1;
+  const fkOnBefore = Number(db.exec('PRAGMA foreign_keys')[0].values[0][0]) === 1
   db.run('PRAGMA foreign_keys = OFF');
   try {
     db.run('BEGIN TRANSACTION');
@@ -197,8 +239,8 @@ export async function runMigrations(config: BackendConfig): Promise<void> {
   db.run(`CREATE TABLE IF NOT EXISTS schema_version (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)`);
   const versionResult = db.exec('SELECT MAX(version) FROM schema_version');
   const currentVersion = versionResult.length > 0 && versionResult[0].values[0][0] !== null
-    ? versionResult[0].values[0][0] as number
-    : 0;
+    ? Number(versionResult[0].values[0][0])
+    : 0
 
   // 版本 1: baseline（所有 CREATE TABLE 已在上面执行）
   if (currentVersion < 1) {
@@ -532,6 +574,37 @@ export async function runMigrations(config: BackendConfig): Promise<void> {
     db.run(`INSERT INTO schema_version (version, applied_at) VALUES (16, ?)`, [new Date().toISOString()]);
   }
 
+  // 版本 17 (W5): Run retry 关系与 lease 字段，Task attempt 字段。
+  // SQLite ADD COLUMN 对已有行写入默认值；last_updated_at 用 created_at 回填，
+  // 让旧运行在首次恢复检查时按真实历史时间计算 lease，而不是被立即误标。
+  if (currentVersion < 17) {
+    if (!hasColumn(db, 'runs', 'parent_run_id')) {
+      db.run('ALTER TABLE runs ADD COLUMN parent_run_id TEXT')
+    }
+    if (!hasColumn(db, 'runs', 'retry_of_run_id')) {
+      db.run('ALTER TABLE runs ADD COLUMN retry_of_run_id TEXT')
+    }
+    if (!hasColumn(db, 'runs', 'attempt')) {
+      db.run('ALTER TABLE runs ADD COLUMN attempt INTEGER NOT NULL DEFAULT 1')
+    }
+    if (!hasColumn(db, 'runs', 'retry_type')) {
+      db.run('ALTER TABLE runs ADD COLUMN retry_type TEXT')
+    }
+    if (!hasColumn(db, 'runs', 'end_reason')) {
+      db.run('ALTER TABLE runs ADD COLUMN end_reason TEXT')
+    }
+    if (!hasColumn(db, 'runs', 'last_updated_at')) {
+      db.run('ALTER TABLE runs ADD COLUMN last_updated_at TEXT')
+    }
+    db.run('UPDATE runs SET last_updated_at = created_at WHERE last_updated_at IS NULL')
+
+    if (!hasColumn(db, 'tasks', 'attempt')) {
+      db.run('ALTER TABLE tasks ADD COLUMN attempt INTEGER NOT NULL DEFAULT 1')
+    }
+
+    db.run(`INSERT INTO schema_version (version, applied_at) VALUES (17, ?)`, [new Date().toISOString()])
+  }
+
   // 整改计划第 7 章（P1）：所有迁移成功 → 提交单事务
   db.run('COMMIT');
   // 恢复迁移前的 FK 开关（SQLite 事务内不可修改，故在此恢复）
@@ -545,11 +618,17 @@ export async function runMigrations(config: BackendConfig): Promise<void> {
   db.close();
   } catch (e: unknown) {
     // 整改计划第 7 章（P1）：迁移失败 → 回滚整个事务，并从 .bak 恢复（若有）
-    try { db.run('ROLLBACK'); } catch (_e: unknown) { /* ignore - intentional */ }
-    if (bakPath) {
-      try { renameSync(bakPath, config.dbPath); } catch (_e: unknown) { /* ignore - intentional */ }
+    try { db.run('ROLLBACK'); } catch (error: unknown) { // no-excuse-ok: catch
+      /* ignore - intentional */
     }
-    try { db.close(); } catch (_e: unknown) { /* ignore - intentional */ }
+    if (bakPath) {
+      try { renameSync(bakPath, config.dbPath); } catch (error: unknown) { // no-excuse-ok: catch
+      /* ignore - intentional */
+    }
+    }
+    try { db.close(); } catch (error: unknown) { // no-excuse-ok: catch
+      /* ignore - intentional */
+    }
     throw e;
   }
 }

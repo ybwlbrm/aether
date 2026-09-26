@@ -1,40 +1,60 @@
-﻿import { randomUUID } from 'node:crypto';
-import { buildToolPayload } from '@pacc/shared';
+﻿import { buildToolPayload } from '@pacc/shared';
 import { parseToolArgsSafe, buildChatRequestBody } from '../../lib/stream-translate.js';
 import { drainDirectives } from '../../lib/inbox.js';
 import { buildModelRuntime, type ModelRequest } from '../../core/models/index.js';
-import { messages } from '../../db/schema/index.js';
 // P0-01 收口：统一生产工具执行器（Agent → ToolRuntime → PolicyEngine → Approval → ToolExecutor）
 import { createProductionToolExecutor, type ProductionToolExecutor } from '../../lib/production-tool-executor.js';
 // §30/§31 收口：预算统一来源 —— AgentDefinition limits → budgetFromAgentLimits（禁止 30/50/128000 散落硬编码）
 import { budgetFromAgentLimits, type AgentLimitsLike } from '../../core/runtime/execution-loop.js';
 // 统一 ExecutionLoop：唯一生产循环控制器（第四部分：ToolLoop 收口为薄 wrapper，无第二套循环）
-import { runExecutionLoop, type ExecutionLoopDeps, type ExecutionBudget } from '../../core/runtime/execution-loop.js';
+import { runExecutionLoop, type ExecutionLoopDeps, type ExecutionBudget, type AssistantToolCallMessage } from '../../core/runtime/execution-loop.js';
+import { persistAssistantToolCallMessage, persistToolResultMessage } from '../../lib/message-history.js';
+import type { EventBus } from '../../lib/event-bus/index.js';
+import type { SQLJsDatabase } from 'drizzle-orm/sql-js';
+import * as schema from '../../db/schema/index.js';
 import type { StreamChunk } from '@pacc/shared';
 
+type Db = SQLJsDatabase<typeof schema>
+
 export interface ToolLoopConfig {
-  apiMessages: any[];
+  apiMessages: Array<Record<string, unknown>>;
   baseUrl: string;
   apiKey: string;
   activeModel: string;
-  activeTools: any[];
+  activeTools: Array<{ type: 'function'; function: { name: string; description?: string; parameters?: unknown } }>;
   maxTurns: number;
   clientAbortSignal: AbortSignal;
   sseSend: (event: string, data: string) => void;
-  eventBus: any;
-  runContext: any;
+  eventBus: EventBus;
+  runContext: {
+    sessionId: string
+    taskId: string
+    agentId: string
+    agentType: string
+  };
   conversationId: string;
-  mcpTools: any[];
-  getMcpServers: () => any[];
+  mcpTools: Array<{ name: string; description?: string; inputSchema?: unknown; serverName?: string }>;
+  getMcpServers: () => Array<{
+    id: string
+    name: string
+    type: 'local' | 'remote'
+    command: string | null
+    cwd: string | null
+    environment: string | null
+    url: string | null
+    enabled: boolean
+    timeout: number
+    headers: string | null
+  }>;
   allowedDirs: string[];
   permissionLevel: number;
   defaultDir: string;
-  settings: any;
+  settings: { permissionLevel?: number };
   deepThinking: boolean | undefined;
   reasoningEffort: 'low' | 'medium' | 'high' | undefined;
   supportsThinking: boolean;
-  db: any;
-  body: any;
+  db: Db;
+  body: { readonly loop?: boolean };
   /** 整改计划第 5 章（P1）：循环预算（缺省用 defaultLoopBudget(maxTurns)） */
   budget?: LoopBudget;
 }
@@ -46,6 +66,7 @@ export interface ToolLoopResult {
   usageTotal: { prompt_tokens: number; completion_tokens: number; total_tokens: number };
   lastToolResult: string;
   endedNormally: boolean;
+  endReason: 'completed' | 'interrupted' | 'error' | 'cancelled';
   aiError: string | null;
   toolCallCount: number;
   /** 整改计划第 5 章（P1）：预算耗尽原因（'turns' | 'duration' | 'tokens' | 'tool_calls' | 'cost' | null） */
@@ -177,6 +198,9 @@ export async function executeToolLoop(
 
   // ExecutionLoopDeps：唯一循环控制器的依赖注入（第四部分收口）
   const deps: ExecutionLoopDeps = {
+    onAssistantToolCalls: (message: AssistantToolCallMessage) => {
+      persistAssistantToolCallMessage(db, conversationId, message)
+    },
     model: runtime,
     hasTools: activeTools.length > 0,
     buildRequest: (msgs, _turn): ModelRequest => ({
@@ -198,7 +222,7 @@ export async function executeToolLoop(
       // 工具执行副作用：SSE tool-call/tool-result、eventBus tool.started/completed、DB 写入
       const funcName = tool.name;
       const parsed = parseToolArgsSafe(tool.arguments);
-      let args: any = parsed.args;
+      const args = parsed.args;
       if (!parsed.ok) {
         const errMsg = `工具参数不是合法 JSON: ${String(tool.arguments || '').slice(0, 500)}`;
         sseSend('tool-call', JSON.stringify({ name: funcName, arguments: {}, id: tool.id }));
@@ -213,11 +237,7 @@ export async function executeToolLoop(
           parentEventId: undefined,
         });
         lastToolResult = errMsg;
-        const toolMsgId = randomUUID();
-        db.insert(messages).values({
-          id: toolMsgId, conversationId: conversationId, role: 'tool', content: errMsg,
-          toolCalls: JSON.stringify({ id: tool.id, function: { name: funcName, arguments: String(tool.arguments || '') } }), createdAt: new Date().toISOString(),
-        }).run();
+        persistToolResultMessage(db, conversationId, tool.id, funcName, String(tool.arguments || ''), errMsg)
         return errMsg;
       }
       sseSend('tool-call', JSON.stringify({ name: funcName, arguments: args, id: tool.id }));
@@ -251,12 +271,7 @@ export async function executeToolLoop(
           parentEventId: toolStarted.eventId,
         });
         lastToolResult = `错误: ${errMsg}`;
-        // 保存错误结果（保持 DB 消息链路完整）
-        const toolMsgId = randomUUID();
-        db.insert(messages).values({
-          id: toolMsgId, conversationId: conversationId, role: 'tool', content: `错误: ${errMsg}`,
-          toolCalls: JSON.stringify({ id: tool.id, function: { name: funcName, arguments: tool.arguments } }), createdAt: new Date().toISOString(),
-        }).run();
+        persistToolResultMessage(db, conversationId, tool.id, funcName, tool.arguments, `错误: ${errMsg}`)
         return `错误: ${errMsg}`;
       }
 
@@ -273,11 +288,7 @@ export async function executeToolLoop(
       // 记录最近一次工具结果（用于下方重复检测）
       lastToolResult = result;
       // 保存工具执行结果到 DB
-      const toolMsgId = randomUUID();
-      db.insert(messages).values({
-        id: toolMsgId, conversationId: conversationId, role: 'tool', content: result,
-        toolCalls: JSON.stringify({ id: tool.id, function: { name: funcName, arguments: tool.arguments } }), createdAt: new Date().toISOString(),
-      }).run();
+      persistToolResultMessage(db, conversationId, tool.id, funcName, tool.arguments, result)
       // L5: 统一截断策略 — API 上下文截断 50000 字符（足够容纳普通文件全文）
       return result.slice(0, 50000);
     },
@@ -329,6 +340,21 @@ export async function executeToolLoop(
   if (result.budgetExceeded !== 'none' && result.budgetExceeded !== 'cancelled') {
     budgetExceeded = result.budgetExceeded;
   }
+  const interrupted = result.state === 'interrupted'
+    || (result.interrupted === true && result.finishReason !== 'error')
+  const failed = result.state === 'failed' || result.finishReason === 'error'
+  const failureMessage = interrupted
+    ? (result.content || '回答被截断')
+    : failed
+      ? (result.content || 'AI 执行失败')
+      : null
+  const endReason = result.state === 'cancelled'
+    ? 'cancelled'
+    : interrupted
+      ? 'interrupted'
+      : failed
+        ? 'error'
+        : 'completed'
 
   return {
     aiContent: result.content,
@@ -340,8 +366,9 @@ export async function executeToolLoop(
       total_tokens: result.usage.cumulativeTotalTokens,
     },
     lastToolResult,
-    endedNormally: result.state === 'completed',
-    aiError: result.state === 'failed' ? (result.content || 'AI 执行失败') : null,
+    endedNormally: result.state === 'completed' && !interrupted && !failed,
+    endReason,
+    aiError: failureMessage,
     toolCallCount: result.toolCallCount,
     budgetExceeded,
     turnsUsed: result.turnsUsed,

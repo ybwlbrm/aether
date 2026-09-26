@@ -10,6 +10,15 @@ import {
   resetSyncState,
 } from './sync-state';
 import { OfflineQueueManager, type QueuedCommand } from '../lib/offline-queue';
+import {
+  buildCancelCommandPayload,
+  matchesRemoteCommandReference,
+  parseRemoteCommandSnapshot,
+  resolveCancellationAction,
+  shouldPollRemoteCommandStatus,
+  type RemoteCommandReference,
+  type RemoteCommandSnapshot,
+} from '../lib/remote-command'
 import { type ChatMessage } from '../lib/message-store';
 
 // 对外 re-export 同步状态 API（组件从 './api/supabase' 统一导入）
@@ -74,9 +83,9 @@ export async function flushPendingQueue(): Promise<number> {
 // ============================================================
 
 export type SendResult =
-  | { status: 'sent'; commandId: string }
-  | { status: 'queued'; commandId: string }
-  | { status: 'failed'; commandId?: string; message?: string };
+  | { status: 'sent'; commandId: string; clientCommandId: string }
+  | { status: 'queued'; commandId: string; clientCommandId: string }
+  | { status: 'failed'; commandId?: string; clientCommandId?: string; message?: string }
 
 /** 本地乐观消息发送状态（§9） */
 export type LocalMessageState = 'sending' | 'queued' | 'sent' | 'failed';
@@ -187,17 +196,17 @@ export async function sendCommand(
 
   const commandKey = clientCommandId ?? generateUuid();
   try {
-    // 幂等检查：同一 client_command_id 已存在且未失败 → 视为已入队/已处理
+    // 幂等检查：同一 client_command_id 的原始命令已存在 → 视为已入队/已处理
     const { data: existing } = await sb
       .from('remote_commands')
       .select('id, status')
       .eq('client_command_id', commandKey)
       .eq('user_id', user.id)
-      .neq('status', 'failed')
+      .in('status', ['pending', 'processing', 'completed'])
       .limit(1);
     if (existing && existing.length > 0) {
       console.log(`[supabase] 幂等跳过：命令已存在 (${existing[0].id}, ${existing[0].status})`);
-      return { status: 'sent', commandId: existing[0].id };
+      return { status: 'sent', commandId: existing[0].id, clientCommandId: commandKey }
     }
 
     const { data: inserted, error } = await sb
@@ -222,7 +231,7 @@ export async function sendCommand(
     // 网络恢复信号：命令成功下发说明连接可用，顺带补传队列中遗留的命令
     autoFlushQueue();
     markSynced();
-    return { status: 'sent', commandId: inserted?.id ?? commandKey };
+    return { status: 'sent', commandId: inserted?.id ?? commandKey, clientCommandId: commandKey }
   } catch (e) {
     const err = classifyError(e);
     if (err.kind === 'network' && allowQueue) {
@@ -236,11 +245,16 @@ export async function sendCommand(
       });
       // 保持 pending 计数（补传成功后由 sendCommand/realtime 接管）
       trackPending(commandKey + '-queued');
-      return { status: 'queued', commandId: commandKey };
+      return { status: 'queued', commandId: commandKey, clientCommandId: commandKey }
     }
     console.error(`[supabase] 发送命令失败 (${err.kind}):`, err.message);
-    return { status: 'failed', commandId: commandKey, message: err.message };
+    return { status: 'failed', commandId: commandKey, clientCommandId: commandKey, message: err.message }
   }
+}
+
+/** 生成客户端幂等键 */
+export function createClientCommandId(): string {
+  return generateUuid()
 }
 
 /** 生成 UUID（crypto.randomUUID，兼容旧 WebView 回退） */
@@ -349,41 +363,86 @@ export async function deleteConversation(convId: string): Promise<boolean> {
 /**
  * §15.1 收口：Mobile Stop 必须真正取消 Run（不能只是 UI 改成 cancelled）。
  * 向 remote_commands 写入一条 cancel 命令（status=cancelled + cancel_requested 标记），
- * 桌面端 Realtime/Polling 检测后触发 runCancellationRegistry.cancel(runTaskId)
+ * 取消行复用原始命令的 client_command_id，桌面端据此定位正在执行的 Run。
  * → AbortSignal → execution-loop state='cancelled' → run.cancelled 终态事件 → Mobile 显示 cancelled。
  * 幂等：同 client_command_id 已存在时不再重复插入。
  */
+function hasCancelRequestedMetadata(value: unknown): boolean {
+  if (typeof value !== 'object' || value === null) return false
+  const metadata = Reflect.get(value, 'metadata')
+  if (typeof metadata !== 'object' || metadata === null) return false
+  return Reflect.get(metadata, 'cancel_requested') === true
+}
+
+export type CancelCommandResult =
+  | { status: 'sent' }
+  | { status: 'cancelled_locally' }
+  | { status: 'failed'; message: string }
+
 export async function cancelCommand(
   conversationId: string,
-  clientCommandId?: string,
-): Promise<{ status: 'sent' } | { status: 'failed'; message?: string }> {
-  const sb = getClient();
-  const cfg = loadConfig();
-  const user = getCurrentUser();
-  if (!sb || !cfg) return { status: 'failed', message: 'Supabase 未配置' };
-  if (!user) return { status: 'failed', message: '未登录' };
+  clientCommandId: string,
+): Promise<CancelCommandResult> {
+  const normalizedClientCommandId = clientCommandId.trim()
+  if (!normalizedClientCommandId) return { status: 'failed', message: '未找到可取消的原始命令' }
 
-  const cancelKey = clientCommandId ?? generateUuid();
+  const hasQueuedCommand = offlineQueue.getPending().some((cmd) => cmd.id === normalizedClientCommandId)
+  if (resolveCancellationAction({ hasQueuedCommand, hasRemoteCommand: false }) === 'cancel_local') {
+    offlineQueue.remove(normalizedClientCommandId)
+    return { status: 'cancelled_locally' }
+  }
+
+  const sb = getClient()
+  const cfg = loadConfig()
+  const user = getCurrentUser()
+  if (!sb || !cfg) return { status: 'failed', message: 'Supabase 未配置' }
+  if (!user) return { status: 'failed', message: '未登录' }
+
   try {
-    const { data: inserted, error } = await sb
+    const { data: originals, error: originalError } = await sb
       .from('remote_commands')
-      .insert({
-        device_id: cfg.deviceId,
-        user_id: user.id,
-        conversation_id: conversationId || null,
-        content: '/cancel',
-        status: 'cancelled', // 桌面端轮询见 status=cancelled + content=/cancel → 触发 Run 取消
-        client_command_id: cancelKey,
-        metadata: { cancel_requested: true },
-      })
-      .select('id')
-      .single();
-    if (error) throw error;
-    return { status: 'sent' };
-  } catch (e) {
-    const err = classifyError(e);
-    console.error(`[supabase] 发送取消命令失败 (${err.kind}):`, err.message);
-    return { status: 'failed', message: err.message };
+      .select('id, conversation_id, client_command_id')
+      .eq('client_command_id', normalizedClientCommandId)
+      .eq('user_id', user.id)
+      .in('status', ['pending', 'processing'])
+      .order('created_at', { ascending: false })
+      .limit(1)
+    if (originalError) throw originalError
+
+    const original = originals?.[0]
+    if (!original || typeof original.client_command_id !== 'string') {
+      return { status: 'failed', message: '未找到可取消的原始命令' }
+    }
+    if (original.conversation_id && original.conversation_id !== conversationId) {
+      return { status: 'failed', message: '原始命令不属于当前对话' }
+    }
+
+    const { data: cancellations, error: cancellationLookupError } = await sb
+      .from('remote_commands')
+      .select('id, metadata')
+      .eq('client_command_id', normalizedClientCommandId)
+      .eq('user_id', user.id)
+      .eq('status', 'cancelled')
+      .limit(1)
+    if (cancellationLookupError) throw cancellationLookupError
+    if (cancellations?.some((row: unknown) => hasCancelRequestedMetadata(row))) {
+      return { status: 'sent' }
+    }
+
+    const { error } = await sb
+      .from('remote_commands')
+      .insert(buildCancelCommandPayload({
+        deviceId: cfg.deviceId,
+        userId: user.id,
+        conversationId,
+        originalClientCommandId: original.client_command_id,
+      }))
+    if (error) throw error
+    return { status: 'sent' }
+  } catch (error: unknown) {
+    const err = classifyError(error)
+    console.error(`[supabase] 发送取消命令失败 (${err.kind}):`, err.message)
+    return { status: 'failed', message: err.message }
   }
 }
 
@@ -400,7 +459,8 @@ export interface RealtimePayload {
   old?: Record<string, unknown> | null;
 }
 
-type ConversationCallback = (payload: RealtimePayload) => void;
+type ConversationCallback = (payload: RealtimePayload) => void
+export type RemoteCommandStatusCallback = (snapshot: RemoteCommandSnapshot) => void
 
 interface MessageChannelEntry {
   key: string;
@@ -423,10 +483,13 @@ const messagesChannelRegistry = new Map<string, MessageChannelEntry>();
 // 会话列表 channel（全局单例）
 let conversationsChannelEntry: SingularChannelEntry | null = null;
 // 远程命令状态 channel（全局单例）
-let commandsChannelEntry: SingularChannelEntry | null = null;
+let commandsChannelEntry: SingularChannelEntry | null = null
+const commandStatusCallbacks = new Map<string, Set<RemoteCommandStatusCallback>>()
+const commandStatusCleanupCallbacks = new Set<() => void>()
 
 /** 延迟释放窗口 */
-const CHANNEL_RELEASE_DELAY_MS = 1000;
+const CHANNEL_RELEASE_DELAY_MS = 1000
+const REMOTE_COMMAND_STATUS_POLL_MS = 2000
 
 /**
  * 订阅消息更新（Realtime — 支持流式 INSERT 和 UPDATE）。
@@ -611,6 +674,121 @@ function scheduleConversationsChannelRelease(entry: SingularChannelEntry): void 
   }, CHANNEL_RELEASE_DELAY_MS);
 }
 
+function normalizeRemoteCommandReference(
+  reference: string | RemoteCommandReference,
+): RemoteCommandReference {
+  if (typeof reference === 'string') {
+    return { serverId: reference, clientCommandId: null }
+  }
+  return {
+    serverId: reference.serverId,
+    clientCommandId: reference.clientCommandId,
+  }
+}
+
+function getCommandReferenceKey(reference: RemoteCommandReference): string | null {
+  return reference.serverId ?? reference.clientCommandId
+}
+
+function dispatchRemoteCommandStatus(snapshot: RemoteCommandSnapshot): void {
+  if (snapshot.isCancellation === true) return
+  const keys = new Set<string>()
+  if (snapshot.id) keys.add(snapshot.id)
+  if (snapshot.clientCommandId) keys.add(snapshot.clientCommandId)
+  for (const key of keys) {
+    commandStatusCallbacks.get(key)?.forEach((callback) => {
+      try { callback(snapshot) } catch (error: unknown) {
+        console.warn('[supabase] 命令终态订阅回调失败:', error instanceof Error ? error.message : error)
+      }
+    })
+  }
+}
+
+/** 订阅单条远程命令的服务端终态，初始查询 + Realtime + 轮询兜底防止漏事件。 */
+export function subscribeRemoteCommandStatus(
+  referenceInput: string | RemoteCommandReference,
+  callback: RemoteCommandStatusCallback,
+): () => void {
+  const sb = getClient()
+  const reference = normalizeRemoteCommandReference(referenceInput)
+  const commandKey = getCommandReferenceKey(reference)
+  if (!sb || !commandKey) return () => {}
+
+  ensureCommandsChannel(sb)
+  let subscribed = true
+  let pollTimer: ReturnType<typeof setInterval> | null = null
+  let queryInFlight = false
+  let terminalReceived = false
+
+  const clearPollTimer = () => {
+    if (!pollTimer) return
+    clearInterval(pollTimer)
+    pollTimer = null
+  }
+
+  const emitSnapshot = (snapshot: RemoteCommandSnapshot) => {
+    if (!subscribed || !matchesRemoteCommandReference(snapshot, reference)) return
+    if (shouldPollRemoteCommandStatus(snapshot.status)) {
+      trackPending(snapshot.id)
+    } else {
+      terminalReceived = true
+      settlePending(snapshot.id)
+    }
+    callback(snapshot)
+    if (terminalReceived) clearPollTimer()
+  }
+
+  const callbacks = commandStatusCallbacks.get(commandKey) ?? new Set<RemoteCommandStatusCallback>()
+  callbacks.add(emitSnapshot)
+  commandStatusCallbacks.set(commandKey, callbacks)
+
+  const queryRemoteCommandStatus = () => {
+    if (!subscribed || queryInFlight || terminalReceived) return
+    queryInFlight = true
+    let query = sb
+      .from('remote_commands')
+      .select('id, client_command_id, status, result_summary, error, content, metadata')
+      .limit(1)
+    if (reference.serverId) {
+      query = query.eq('id', reference.serverId)
+    } else if (reference.clientCommandId) {
+      query = query
+        .eq('client_command_id', reference.clientCommandId)
+        .order('created_at', { ascending: true })
+    }
+    void query.maybeSingle().then(({ data, error }) => {
+      queryInFlight = false
+      if (!subscribed) return
+      if (error) {
+        console.warn('[supabase] 查询命令终态失败:', error.message)
+        return
+      }
+      const snapshot = parseRemoteCommandSnapshot(data)
+      if (snapshot) emitSnapshot(snapshot)
+    }, (error: unknown) => {
+      queryInFlight = false
+      console.warn('[supabase] 查询命令终态失败:', error instanceof Error ? error.message : error)
+    })
+  }
+
+  queryRemoteCommandStatus()
+  if (!terminalReceived) pollTimer = setInterval(queryRemoteCommandStatus, REMOTE_COMMAND_STATUS_POLL_MS)
+
+  let released = false
+  const release = () => {
+    if (released) return
+    released = true
+    subscribed = false
+    clearPollTimer()
+    const current = commandStatusCallbacks.get(commandKey)
+    current?.delete(emitSnapshot)
+    if (current?.size === 0) commandStatusCallbacks.delete(commandKey)
+    commandStatusCleanupCallbacks.delete(release)
+  }
+  commandStatusCleanupCallbacks.add(release)
+  return release
+}
+
 /**
  * 惰性建立 remote_commands 状态订阅（单例）。
  */
@@ -624,19 +802,22 @@ function ensureCommandsChannel(sb: ReturnType<typeof getClient> & object): void 
         table: 'remote_commands',
       },
       (payload: RealtimePayload) => {
-        if (commandsChannelEntry === entry) {
-          markSynced();
-          const row = payload?.new ?? payload?.old;
-          if (!row?.id) return;
-          const status: string | undefined = typeof row.status === 'string' ? row.status : undefined;
-          if (payload.eventType === 'DELETE') {
-            settlePending(String(row.id));
-          } else if (payload.eventType === 'INSERT' || status === 'pending') {
-            trackPending(String(row.id));
-          } else if (status && status !== 'pending') {
-            settlePending(String(row.id));
-          }
+        if (commandsChannelEntry !== entry) return
+        markSynced()
+        const row = payload.new ?? payload.old
+        if (!row || typeof row.id !== 'string') return
+        const parsed = parseRemoteCommandSnapshot(row)
+        if (payload.eventType === 'DELETE') {
+          settlePending(row.id)
+          return
         }
+        if (!parsed || parsed.isCancellation === true) return
+        if (shouldPollRemoteCommandStatus(parsed.status)) {
+          trackPending(parsed.id)
+        } else {
+          settlePending(parsed.id)
+        }
+        dispatchRemoteCommandStatus(parsed)
       },
     );
 
@@ -653,6 +834,9 @@ function ensureCommandsChannel(sb: ReturnType<typeof getClient> & object): void 
 
 /** 清理所有订阅（登出时调用） */
 export function cleanup(): void {
+  for (const release of commandStatusCleanupCallbacks) release()
+  commandStatusCleanupCallbacks.clear()
+
   const sb = getClient();
   if (sb) {
     for (const [key, entry] of messagesChannelRegistry) {
@@ -673,6 +857,8 @@ export function cleanup(): void {
       void sb.removeChannel(entry.channel).catch(() => {});
     }
   }
+
+  commandStatusCallbacks.clear()
 
   // 重置同步状态 + 销毁 client（登出后回到初始，避免旧状态残留）
   resetSyncState();

@@ -31,6 +31,7 @@ export interface TaskEntity {
   agentId: string;
   agentType: string;
   status: TaskStatus;
+  attempt?: number;
   input?: Record<string, unknown>;
   output?: Record<string, unknown>;
   error?: string;
@@ -171,6 +172,7 @@ export class TaskStateMachine {
     parentTaskId?: string;
     agentId: string;
     agentType: string;
+    attempt?: number;
     input?: Record<string, unknown>;
     output?: Record<string, unknown>;
     metadata?: Record<string, unknown>;

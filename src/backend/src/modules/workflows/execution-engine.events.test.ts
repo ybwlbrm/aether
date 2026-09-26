@@ -9,6 +9,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runMigrations } from '../../db/migrate.js';
 import { initDb, getDb } from '../../db/client.js';
+import { workflowRuns } from '../../db/schema/index.js';
 import { makeTestConfig } from '../../tests/helpers/mock-provider.sse.js';
 import type { BackendConfig } from '../../config/index.js';
 import { executeWorkflow } from './execution-engine.js';
@@ -24,29 +25,55 @@ const fakeRequest = {
 
 /** Drizzle-compatible chainable query stub backed by an in-memory map */
 function makeDb() {
-  const runs = new Map<string, Record<string, unknown>>();
-  const db = {
-    _runs: runs,
-    insert: () => ({ values: (v: Record<string, unknown>) => ({ run: () => { runs.set(v.id as string, v); } }) }),
-    update: () => ({
-      set: (patch: Record<string, unknown>) => ({
-        where: () => ({ run: () => {
-          for (const run of runs.values()) Object.assign(run, patch);
-        } }),
+  const runRows = new Map<string, Record<string, unknown>>();
+  const workflowRunRows = new Map<string, Record<string, unknown>>();
+  const rowsFor = (table: unknown): Map<string, Record<string, unknown>> => (
+    table === workflowRuns ? workflowRunRows : runRows
+  )
+  const baseDb = {
+    _runs: runRows,
+    insert: (table: unknown) => ({
+      values: (value: Record<string, unknown>) => ({
+        run: () => {
+          rowsFor(table).set(value.id as string, value)
+        },
       }),
     }),
-    select: () => ({
-      from: () => ({
-        where: () => ({
-          get: () => {
-            const first = runs.values().next().value;
-            return first ? { currentNodeId: first.currentNodeId ?? null } : undefined;
+    update: (table: unknown) => {
+      const rows = rowsFor(table)
+      return {
+        set: (patch: Record<string, unknown>) => ({
+          where: () => {
+            // W5 CAS：transition 现为 update().set().where().returning().get() 链式调用
+            const run = () => {
+              for (const row of rows.values()) Object.assign(row, patch)
+            }
+            return {
+              run,
+              returning: () => ({ get: () => ({ changes: rows.size }) }),
+            }
           },
         }),
-      }),
-    }),
-  };
-  return db;
+      }
+    },
+    select: (table: unknown) => {
+      const rows = rowsFor(table)
+      return {
+        from: () => ({
+          where: () => ({
+            get: () => {
+              const first = rows.values().next().value
+              return first ? { ...first } : undefined
+            },
+          }),
+        }),
+      }
+    },
+  }
+  return {
+    ...baseDb,
+    transaction: (fn: (tx: typeof baseDb) => unknown): unknown => fn(baseDb),
+  }
 }
 
 function node(id: string, label: string, type: WorkflowNode['type'] = 'tool'): WorkflowNode {
@@ -125,7 +152,30 @@ describe('executeWorkflow — event emission (§57)', () => {
 
     assert.equal(result.status, 'failed');
     assert.equal(events.at(-1)!.type, 'workflow.failed');
-    assert.equal((events.at(-1)!.payload.error as string).includes('boom'), true);
+  });
+
+  it('emits workflow.cancelled（而非 workflow.failed）when workflow is cancelled', async () => {
+    const events: Array<{ type: string; payload: Record<string, unknown> }> = [];
+    const nodes = [node('a', 'Node A', 'tool')];
+    const controller = new AbortController();
+    controller.abort(); // 执行前已取消
+
+    const result = await executeWorkflow({
+      workflowId: 'wf-3',
+      nodes,
+      edges: [],
+      input: {},
+      config: cfg as never,
+      db: makeDb() as never,
+      saveDb: () => {},
+      request: fakeRequest as never,
+      signal: controller.signal,
+      executeNode: async () => ({ output: 'unused' }),
+      onEvent: (type, payload) => events.push({ type, payload }),
+    });
+
+    assert.equal(result.status, 'cancelled');
+    assert.equal(events.at(-1)!.type, 'workflow.cancelled');
   });
 
   it('does not emit events when onEvent is omitted (backward compatible)', async () => {

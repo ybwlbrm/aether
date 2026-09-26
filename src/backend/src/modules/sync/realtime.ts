@@ -3,9 +3,16 @@ import type { BackendConfig } from '../../config/index.js';
 import { getDb, saveDb } from '../../db/client.js';
 import { conversations } from '../../db/schema/index.js';
 import { eq } from 'drizzle-orm';
-import { getSyncConfig, getSupabaseClient, getRealtimeChannel, setRealtimeChannel, getDeviceRegistered, setDeviceRegistered } from './sync-config.js';
+import { getRealtimeChannel, setRealtimeChannel } from './sync-config.js';
 import { processRemoteCommand } from './command-processor.js';
 import { startPollingFallback, type PollingFallbackHandle } from './polling-fallback.js';
+import {
+  createSupabaseCancellationLookup,
+  isCancellationCommand,
+  parseRemoteCommandRow,
+  resolveCancellationRunId,
+} from './command-cancellation.js';
+import { REMOTE_COMMAND_REALTIME_FILTER } from './remote-command-status.js';
 // §15.1 收口：Mobile Stop 真取消 —— Realtime 收到 /cancel 命令 → runCancellationRegistry 取消
 import { runCancellationRegistry } from '../../lib/run-cancellation-registry.js';
 import { deleteConversationCascade } from '../conversations/delete-conversation.js';
@@ -23,6 +30,14 @@ const processingCommandIds = new Set<string>();
 // BE-RL-01/02: 模块级句柄 — 重连前显式清理旧轮询与重连定时器，防泄漏
 let pollingHandle: PollingFallbackHandle | null = null;
 let reconnectTimer: NodeJS.Timeout | null = null;
+
+type RealtimeCommandPayload = {
+  readonly new?: Record<string, unknown> | null
+}
+
+type RealtimeDeletePayload = {
+  readonly old?: Record<string, unknown> | null
+}
 
 export async function setupRealtimeListener(
   sb: SupabaseClient,
@@ -49,37 +64,80 @@ export async function setupRealtimeListener(
         event: 'INSERT',
         schema: 'public',
         table: 'remote_commands',
-        filter: `status=eq.pending`,
+        filter: REMOTE_COMMAND_REALTIME_FILTER,
       },
-      async (payload: any) => {
-        const cmd = payload.new;
+      async (payload: RealtimeCommandPayload) => {
+        const row = payload.new
+        const cmd = row ? parseRemoteCommandRow(row) : null
+        if (!cmd) {
+          if (row) console.warn('[Sync] 收到无法解析的远程命令，已忽略')
+          return
+        }
+
         // §15.1 收口：Mobile Stop 真取消 —— Realtime 收到的 /cancel 命令直接触发
         // runCancellationRegistry.cancel（不进入 processRemoteCommand）。
-        if (cmd && (String(cmd.content || '').trim() === '/cancel' || cmd.metadata?.cancel_requested)) {
-          const runId = String(cmd.run_id || cmd.task_id || '');
-          if (runId && runCancellationRegistry.has(runId)) {
-            const aborted = runCancellationRegistry.cancel(runId);
-            console.log(`[Sync] Realtime 收到取消命令 → 取消 Run ${runId} (aborted=${aborted})`);
+        if (isCancellationCommand(cmd)) {
+          if (processingCommandIds.has(cmd.id)) return
+          processingCommandIds.add(cmd.id)
+          try {
+            const runId = await resolveCancellationRunId(
+              cmd,
+              createSupabaseCancellationLookup(sb),
+              (conversationId) => runCancellationRegistry.runIdsForConversation(conversationId),
+            )
+            if (!runId) {
+              console.warn(`[Sync] 收到取消命令但未找到唯一活动 Run (command=${cmd.id}, client_command_id=${cmd.client_command_id ?? '无'})`)
+              return
+            }
+            if (!runCancellationRegistry.has(runId)) {
+              console.warn(`[Sync] 收到取消命令但 Run ${runId} 未注册，可能已结束`)
+              return
+            }
+            const aborted = runCancellationRegistry.cancel(runId)
+            if (aborted) {
+              console.log(`[Sync] Realtime 收到取消命令 → 取消 Run ${runId}`)
+            } else {
+              console.error(`[Sync] Realtime 取消 Run ${runId} 失败：注册表未接受取消`)
+            }
+          } catch (e: unknown) {
+            console.error(
+              `[Sync] Realtime 定位取消 Run 失败 (command=${cmd.id}, client_command_id=${cmd.client_command_id ?? '无'}):`,
+              e instanceof Error ? e.message : e,
+            )
+          } finally {
+            processingCommandIds.delete(cmd.id)
           }
-          return;
+          return
         }
+
         // 去重检查：防止 Supabase Realtime 重复推送同一 INSERT 事件
-        if (cmd && cmd.status === 'pending' && !processingCommandIds.has(cmd.id)) {
-          processingCommandIds.add(cmd.id);
-          console.log('[Sync] 收到远程命令:', cmd.content?.slice(0, 100));
+        if (cmd.status === 'pending' && !processingCommandIds.has(cmd.id)) {
+          processingCommandIds.add(cmd.id)
+          console.log('[Sync] 收到远程命令:', cmd.content.slice(0, 100))
           // 二次确认：从数据库查当前状态，防止重放已处理完的命令
           try {
-            const { data: current } = await sb.from('remote_commands').select('status').eq('id', cmd.id).single();
-            if (current?.status !== 'pending') {
-              console.log('[Sync] 命令已处理，跳过重放:', cmd.id);
-              processingCommandIds.delete(cmd.id);
-              return;
+            const { data: current, error: statusError } = await sb
+              .from('remote_commands')
+              .select('status')
+              .eq('id', cmd.id)
+              .single()
+            if (statusError) {
+              console.error(`[Sync] 二次确认远程命令状态失败，跳过处理 (command=${cmd.id}):`, statusError.message)
+              processingCommandIds.delete(cmd.id)
+              return
             }
-          } catch { /* 查询失败则继续处理，容错 */ }
+            if (current?.status !== 'pending') {
+              console.log('[Sync] 命令已处理，跳过重放:', cmd.id)
+              processingCommandIds.delete(cmd.id)
+              return
+            }
+          } catch (e: unknown) {
+            console.warn('[Sync] 二次确认远程命令状态异常，继续处理:', e instanceof Error ? e.message : e)
+          }
           try {
-            await processRemoteCommand(sb, cfg, cmd, backendConfig);
+            await processRemoteCommand(sb, cfg, cmd, backendConfig)
           } finally {
-            processingCommandIds.delete(cmd.id);
+            processingCommandIds.delete(cmd.id)
           }
         }
       },
@@ -90,8 +148,8 @@ export async function setupRealtimeListener(
         schema: 'public',
         table: 'conversations_sync',
       },
-      async (payload: any) => {
-        const deletedId = payload.old?.id;
+      async (payload: RealtimeDeletePayload) => {
+        const deletedId = typeof payload.old?.id === 'string' ? payload.old.id : null;
         if (deletedId) {
           const db = getDb();
           try {
@@ -108,7 +166,7 @@ export async function setupRealtimeListener(
         }
       },
     )
-    .subscribe((status: string, err: any) => {
+    .subscribe((status: string, err: unknown) => {
       console.log('[Sync] Realtime 订阅状态:', status);
       // BE-RL-03 修复：仅当本 channel 仍是当前注册的 channel 时才处理状态回调。
       // 主动 removeChannel 的旧 channel 触发的 CLOSED/TIMED_OUT 回调被直接忽略，
@@ -117,7 +175,8 @@ export async function setupRealtimeListener(
       if (!isCurrent) return;
       // 断线重连：SUBSCRIBED 但之后 CLOSED/CHANNEL_ERROR/TIMED_OUT → 重新订阅
       if (shouldScheduleReconnect(status, isCurrent)) {
-        console.warn(`[Sync] Realtime 连接异常 (${status})，3s 后重新订阅:`, err?.message || '');
+        const errorMessage = err instanceof Error ? err.message : typeof err === 'string' ? err : ''
+        console.warn(`[Sync] Realtime 连接异常 (${status})，3s 后重新订阅:`, errorMessage)
         // 使用闭包捕获重试次数，实现指数退避 + 最大重试次数，防止无限重试风暴
         let reconnectAttempt = 0;
         const MAX_RECONNECT_ATTEMPTS = 10;

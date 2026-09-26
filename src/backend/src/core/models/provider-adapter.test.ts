@@ -7,7 +7,7 @@ import assert from 'node:assert/strict';
 import type { ModelRequest } from './model-runtime.js';
 import type { StreamChunk, TokenUsage, FinishReason } from '@pacc/shared';
 import { OpenAICompatibleAdapter, type Transport } from './provider-adapter.js';
-import { ModelError } from '../errors/index.js';
+import { ModelError, RetryExhaustedError } from '../errors/index.js';
 import { createRetryPolicy } from './retry-policy.js';
 import { createCircuitBreaker } from './circuit-breaker.js';
 
@@ -231,6 +231,27 @@ describe('provider-adapter', () => {
         assert.strictEqual(finishChunks[0].reason.kind, 'max-tokens');
       });
 
+      it('preserves content_filter as a non-normal finish reason', async () => {
+        const frames = [
+          'data: {"id":"chatcmpl-123","object":"chat.completion.chunk","created":1234567890,"model":"gpt-4","choices":[{"index":0,"delta":{},"finish_reason":"content_filter"}]}',
+          'data: [DONE]',
+        ];
+
+        const adapter = new OpenAICompatibleAdapter({
+          providerId: 'openai',
+          transport: createTransport(frames),
+        });
+
+        const chunks: StreamChunk[] = [];
+        for await (const chunk of adapter.streamMessages(createRequest())) {
+          chunks.push(chunk);
+        }
+
+        const finishChunks = chunks.filter((c) => c.type === 'finish');
+        assert.strictEqual(finishChunks.length, 1);
+        assert.equal(String(finishChunks[0].reason.kind), 'content_filter');
+      });
+
       it('includes reasoningTokens in usage when present', async () => {
         const frames = [
           'data: {"id":"chatcmpl-123","object":"chat.completion.chunk","created":1234567890,"model":"gpt-4","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":100,"completion_tokens":50,"total_tokens":150,"reasoning_tokens":20}}',
@@ -274,7 +295,7 @@ describe('provider-adapter', () => {
         assert.strictEqual(finishChunks[0].reason.kind, 'stop');
       });
 
-      it('ignores malformed JSON lines', async () => {
+      it('malformed JSON 帧产生可识别的流错误，而不是静默截断', async () => {
         const frames = [
           'data: {"id":"chatcmpl-123","object":"chat.completion.chunk","created":1234567890,"model":"gpt-4","choices":[{"index":0,"delta":{"content":"Valid"},"finish_reason":null}]}',
           'data: not valid json',
@@ -289,14 +310,16 @@ describe('provider-adapter', () => {
 
         const chunks: StreamChunk[] = [];
         for await (const chunk of adapter.streamMessages(createRequest())) {
-          chunks.push(chunk);
+          chunks.push(chunk)
         }
 
-        const textDeltas = chunks.filter((c) => c.type === 'text-delta');
-        assert.strictEqual(textDeltas.length, 2);
-        assert.strictEqual(textDeltas[0].text, 'Valid');
-        assert.strictEqual(textDeltas[1].text, 'Also valid');
-      });
+        const textDeltas = chunks.filter((c) => c.type === 'text-delta')
+        assert.deepEqual(textDeltas.map((chunk) => chunk.text), ['Valid'])
+        const finish = chunks.find((chunk) => chunk.type === 'finish')
+        assert.ok(finish)
+        assert.equal(finish.reason.kind, 'error')
+        assert.equal(finish.reason.kind === 'error' ? finish.reason.code : undefined, 'MALFORMED_RESPONSE')
+      })
     });
 
     describe('streamMessages without transport or mock', () => {
@@ -424,7 +447,7 @@ describe('provider-adapter', () => {
         assert.equal(response.provider, 'openai');
       });
 
-      it('non-2xx responses throw a retryable ModelError with status', async () => {
+      it('retryable non-2xx 在策略耗尽时抛 RetryExhaustedError 并保留状态码', async () => {
         const fetchImpl = async () =>
           new Response('rate limited', { status: 429, headers: { 'Content-Type': 'text/plain' } });
         const adapter = new OpenAICompatibleAdapter({
@@ -433,6 +456,8 @@ describe('provider-adapter', () => {
           apiKey: 'sk-test',
           fetchImpl: fetchImpl as typeof fetch,
           allowHttpTransport: true,
+          retryPolicy: createRetryPolicy({ maxRetries: 0 }),
+          circuitBreaker: createCircuitBreaker({ failureThreshold: 100 }),
         });
 
         await assert.rejects(
@@ -441,14 +466,54 @@ describe('provider-adapter', () => {
               void _;
             }
           })(),
-          (err: unknown) => {
-            assert.ok(err instanceof ModelError, `expected ModelError, got ${String(err)}`);
-            assert.equal((err as ModelError).statusCode, 429);
-            assert.equal((err as ModelError).retryable, true);
-            return true;
+          (error: unknown) => {
+            assert.ok(error instanceof RetryExhaustedError)
+            assert.equal(error.attempt, 1)
+            assert.equal(error.maxAttempts, 1)
+            assert.ok(error.lastError instanceof ModelError)
+            assert.equal(error.lastError.statusCode, 429)
+            return true
           },
         );
       });
+
+      it('持续 503 耗尽 Provider 重试后抛 RetryExhaustedError，并保留最后错误', async () => {
+        let calls = 0
+        const fetchImpl = (async () => {
+          calls += 1
+          return new Response('temporarily unavailable', {
+            status: 503,
+            headers: { 'Content-Type': 'text/plain' },
+          })
+        }) as typeof fetch
+
+        const adapter = new OpenAICompatibleAdapter({
+          providerId: 'openai',
+          baseUrl: 'https://api.example.com/v1',
+          apiKey: 'sk-test',
+          fetchImpl,
+          allowHttpTransport: true,
+          retryPolicy: createRetryPolicy({ baseDelayMs: 1, maxDelayMs: 1, jitter: 0 }),
+        })
+
+        await assert.rejects(
+          async () => {
+            for await (const _chunk of adapter.streamMessages(createRequest())) {
+              void _chunk
+            }
+          },
+          (error: unknown) => {
+            assert.ok(error instanceof RetryExhaustedError)
+            assert.equal(error.attempt, 6)
+            assert.equal(error.maxAttempts, 6)
+            assert.ok(error.lastError instanceof ModelError)
+            assert.equal(error.lastError.statusCode, 503)
+            assert.equal(error.retryable, false)
+            return true
+          },
+        )
+        assert.equal(calls, 6)
+      })
 
       it('without allowHttpTransport, streamMessages still throws PROVIDER_UNAVAILABLE', async () => {
         const adapter = new OpenAICompatibleAdapter({ providerId: 'openai' });
@@ -623,7 +688,12 @@ describe('provider-adapter', () => {
           async () => {
             for await (const _c of adapter.streamMessages(createRequest())) { /* drain */ }
           },
-          (e: unknown) => (e as Error).message.includes('network error'),
+          (error: unknown) => {
+            assert.ok(error instanceof RetryExhaustedError)
+            assert.ok(error.lastError instanceof ModelError)
+            assert.equal(error.lastError.message.includes('network error'), true)
+            return true
+          },
         );
         // 记录到 N-1 次 sleep：第 1 次失败后 delay 应为 50（base），第 2 次 100，第 3 次 200
         assert.ok(delays.length >= 3, `应记录至少 3 次退避，实际 ${delays.length}`);

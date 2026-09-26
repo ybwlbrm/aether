@@ -19,6 +19,24 @@ import { createRetryPolicy, defaultRetryable, extractRetryAfterMs } from './retr
 import { createCircuitBreaker } from './circuit-breaker.js';
 
 describe('core/models/retry-policy', () => {
+  it('extractRetryAfterMs：支持秒数字符串/HTTP-date/0，非法值返回 undefined', () => {
+    assert.equal(extractRetryAfterMs('5'), 5000, '正数秒 → 毫秒');
+    assert.equal(extractRetryAfterMs('0'), 0, '0 表示立即重试');
+    assert.equal(extractRetryAfterMs(0), 0, '数字 0 同样表示立即重试');
+    assert.equal(extractRetryAfterMs('Wed, 21 Oct 2015 07:28:00 GMT'), 0, '过去的 HTTP-date → 0（立即）');
+    const future = new Date(Date.now() + 10_000).toUTCString();
+    const futureMs = extractRetryAfterMs(future);
+    assert.ok(futureMs !== undefined && futureMs > 0 && futureMs <= 10_000, '未来 HTTP-date → 剩余毫秒');
+    assert.equal(extractRetryAfterMs('not-a-date'), undefined, '非法字符串 → undefined');
+    assert.equal(extractRetryAfterMs(null), undefined, 'null → undefined');
+  });
+
+  it('delayMs：Retry-After 优先，0 不回退指数退避', () => {
+    const p = createRetryPolicy({ baseDelayMs: 1000 });
+    assert.equal(p.delayMs(0, 0), 0, 'Retry-After=0 → 立即重试');
+    assert.equal(p.delayMs(5, 500), 500, 'Retry-After 毫秒优先于退避');
+  });
+
   it('429 可重试，maxRetries 后停止', () => {
     const p = createRetryPolicy({ maxRetries: 2 });
     const rateLimit = { statusCode: 429 };
@@ -97,10 +115,20 @@ describe('core/models/retry-policy', () => {
     ac.abort();
     await assert.rejects(p.sleep(1000, ac.signal), (err: unknown) => {
       assert.ok(err instanceof Error);
-      assert.equal((err as Error).name, 'AbortError');
+      assert.equal((err as Error).name, 'AbortError', '中止必须抛 AbortError，供 ExecutionLoop 识别为 CANCELLED');
       return true;
     });
   });
+
+  it('默认 maxRetries=5：首次尝试加 5 次重试共 6 次尝试', () => {
+    const p = createRetryPolicy({ jitter: 0 })
+    const providerError = { statusCode: 503 }
+
+    for (let attempt = 0; attempt < 5; attempt++) {
+      assert.equal(p.shouldRetry(attempt, providerError), true)
+    }
+    assert.equal(p.shouldRetry(5, providerError), false)
+  })
 });
 
 describe('core/models/circuit-breaker', () => {

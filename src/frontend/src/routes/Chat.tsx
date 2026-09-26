@@ -1,8 +1,15 @@
 import { useEffect, useState, useRef, useMemo, useCallback, memo } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Send, Plus, MessageSquare, Trash2, Bot, PanelLeftClose, PanelLeftOpen, XCircle, Edit3, Bookmark } from 'lucide-react';
-import { PageHeader } from '../components/PageHeader';
 import { confirm as confirmDialog } from '../components/ui/confirm-dialog';
+import {
+  EmptyState,
+  ErrorState,
+  PageHeader,
+  PageShell,
+  Panel,
+  Stack,
+} from '../components/ui';
 import { PromptTemplateSelector } from '../components/PromptTemplateSelector';
 import { useActivityStore } from '../store/activityStore';
 // P0 通知幂等化：统一经 NotificationCenter（权限收敛到 App Shell/Layout，业务页不再散调）
@@ -13,10 +20,25 @@ import { Streamdown } from 'streamdown';
 import { cjk } from '@streamdown/cjk';
 import { OpenCodeStyleCodeBlock } from '../components/OpenCodeBlock';
 import { useConversations, useStreamSend, useMessagePolling } from '../hooks';
-import { EmptyState } from '../components/ui/empty-state';
+import { createStreamFailure, type StreamFailure } from '../hooks/useStreamSend'
 
 // 流式消息 markdown 渲染（含 shiki 代码高亮 — OpenCode 风格代码卡片化）
 const streamdownPlugins = { cjk };
+
+export function ChatStreamFailure({ failure }: { readonly failure: StreamFailure }) {
+  return (
+    <ErrorState
+      title="回复失败"
+      description={failure.message}
+      data-retryable={failure.retryable}
+      action={(
+        <button type="button" className="btn btn-ghost" disabled>
+          重试
+        </button>
+      )}
+    />
+  )
+}
 
 /** 当前会话的 Activity Stream — 显示所有过程事件（thinking、tools），按 seq 顺序排列 */
 function ChatActivityStream({ convId }: { convId: string | null }) {
@@ -86,6 +108,7 @@ export function Chat() {
   const [permissionLevel, setPermissionLevel] = useState<number>(2);
   const [templateOpen, setTemplateOpen] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [directFailure, setDirectFailure] = useState<StreamFailure | null>(null)
   const [input, setInput] = useState('');
 
   const currentConvRef = useRef<string | null>(null);
@@ -129,6 +152,7 @@ export function Chat() {
       setActiveConversation(conv.id);
       setMessages([]);
       setCurrentConvTokenTotal(0);
+      setDirectFailure(null)
     },
     onChange: () => {},
   });
@@ -149,6 +173,7 @@ export function Chat() {
     setStreamTokens(null);
     setRetryInfo(null);
     setLoadError(null);
+    setDirectFailure(null)
     setLiveReasoning('');
     try {
       const conv = await api.getConversation(id);
@@ -180,6 +205,7 @@ export function Chat() {
   const {
     handleSend,
     stopGeneration,
+    failure,
   } = useStreamSend({
     conversationId: currentConv,
     mode,
@@ -196,6 +222,7 @@ export function Chat() {
       setRetryInfo(null);
       setStreamTokens(null);
       setLiveReasoning('');
+      setDirectFailure(null)
       setLoopMetrics(null); // 整改计划第 5 章：新一轮清空循环指标
     },
     onSendEnd: (success) => {
@@ -215,6 +242,7 @@ export function Chat() {
     abortRef,
     mountedRef,
   });
+  const visibleFailure = failure ?? directFailure
 
   // 整改计划第 3 章（P0）修复：发送必须传入输入框内容。
   // 原实现调用 handleSend() 不带参数，而 useStreamSend 的 handleSend(contentOverride?)
@@ -301,8 +329,8 @@ export function Chat() {
         const provs = await api.getProviders().catch(() => []);
         const dp = Array.isArray(provs) && provs.length > 0 ? provs[0] : null;
         if (!dp) {
-          setMessages(prev => [...prev, { id: `temp-ai-noprovider-${Date.now()}`, role: 'assistant', content: '⚠️ 尚未配置 AI Provider。请前往左侧"设置" → "AI Provider"添加您的 API Key。', createdAt: new Date().toISOString() }]);
-          return;
+          setDirectFailure(createStreamFailure('尚未配置 AI Provider。请前往左侧“设置” → “AI Provider”添加您的 API Key。'))
+          return
         }
         const model = Array.isArray(dp.models) && dp.models[0] ? dp.models[0] : (dp.defaultModel || 'gpt-4o');
         try {
@@ -323,7 +351,7 @@ export function Chat() {
             });
           }
         } catch (e: unknown) {
-          setMessages(prev => [...prev, { id: `temp-ai-error-${Date.now()}`, role: 'assistant', content: '❌ AI 回复失败: ' + (e instanceof Error ? e.message : String(e)), createdAt: new Date().toISOString() }]);
+          setDirectFailure(createStreamFailure(e))
         }
       })();
     } else {
@@ -332,7 +360,7 @@ export function Chat() {
         if (Array.isArray(provs) && provs.length > 0) {
           await handleNewConversation(provs);
         } else {
-          setMessages([{ id: `err-${Date.now()}`, role: 'assistant', content: '⚠️ 尚未配置 AI Provider。请在设置中添加 API Key 后重试。', createdAt: new Date().toISOString() }]);
+          setDirectFailure(createStreamFailure('尚未配置 AI Provider。请在设置中添加 API Key 后重试。'))
         }
       })();
     }
@@ -379,6 +407,7 @@ export function Chat() {
       setActiveConversation(null);
       setMessages([]);
       setCurrentConvTokenTotal(0);
+      setDirectFailure(null)
     }
   }, [handleDeleteConversation, currentConv]);
 
@@ -390,18 +419,32 @@ export function Chat() {
   const messageList = useMemo(() => messages, [messages]);
 
   return (
-    <div className="h-screen flex flex-col overflow-hidden" style={{ background: 'var(--bg-base)', backgroundImage: 'var(--bg-gradient)' }}>
-    <div style={{ maxWidth: 'min(1100px, 100%)', margin: '0 auto', padding: '0 16px', flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
-      <PageHeader title="对话" description="与 AI 助手交流，管理多轮对话" icon={<MessageSquare size={22} />} color="var(--color-accent)" action={<button className="btn btn-primary" onClick={() => handleNewConversation(providers)} title="新建对话"><Plus size={18} /> 新建对话</button>} />
-
-      <div className="flex flex-1 gap-6 min-h-0">
+    <PageShell
+      className="h-screen max-w-[1280px] px-4!"
+      contentClassName="overflow-hidden! p-0!"
+      style={{ background: 'var(--bg-base)', backgroundImage: 'var(--bg-gradient)' }}
+      header={(
+        <PageHeader
+          title="对话"
+          description="与 AI 助手交流，管理多轮对话"
+          icon={<MessageSquare size={22} />}
+          actions={(
+            <button className="btn btn-primary" onClick={() => handleNewConversation(providers)} title="新建对话">
+              <Plus size={18} /> 新建对话
+            </button>
+          )}
+        />
+      )}
+    >
+      <Stack direction="row" gap="6" className="flex min-h-0 flex-1">
         {/* 左侧 — 对话列表（可折叠） */}
         <AnimatePresence initial={false}>
           {!listCollapsed && (
             <motion.div key="conv-list" className="w-72 flex-shrink-0 flex flex-col min-h-0"
               initial={{ opacity: 0, width: 0 }} animate={{ opacity: 1, width: 288 }} exit={{ opacity: 0, width: 0 }} transition={{ duration: 0.2 }}>
-              <div style={{ padding: '12px' }}>
-                <div className="flex items-center justify-between" style={{ padding: '8px 8px 12px' }}>
+              <Panel tone="subtle" className="flex min-h-0 flex-1 flex-col p-0!">
+                <div className="flex min-h-0 flex-1 flex-col p-3!">
+                  <div className="flex items-center justify-between" style={{ padding: '8px 8px 12px' }}>
                   <span style={{ fontSize: 'var(--font-module-title)', fontWeight: 600, color: 'var(--text-primary)', letterSpacing: '-0.02em' }}>对话列表</span>
                   <div className="flex items-center gap-1">
                     <button className="btn btn-primary" onClick={() => handleNewConversation(providers)} title="新建对话" style={{ width: 44, padding: 0 }}>
@@ -473,13 +516,15 @@ export function Chat() {
                     </div>
                   )}
                   {!convLoading && conversations.length === 0 && (
-                    <div className="empty-state">
-                      <MessageSquare size={28} className="empty-state-icon" />
-                      <div className="empty-state-title">暂无对话</div>
-                    </div>
+                    <EmptyState
+                      icon={<MessageSquare size={28} />}
+                      title="暂无对话"
+                      className="border-0 bg-transparent p-4! shadow-none"
+                    />
                   )}
+                  </div>
                 </div>
-              </div>
+              </Panel>
             </motion.div>
           )}
         </AnimatePresence>
@@ -501,9 +546,8 @@ export function Chat() {
         )}
 
         {/* 右侧 — 聊天区域 */}
-        <div className="flex-1 flex flex-col min-h-0">
           {currentConv ? (
-            <div style={{ padding: '16px', display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0 }}>
+            <Panel className="flex min-h-0 flex-1 flex-col p-4!">
               <div ref={messageListRef} onScroll={handleScroll} className="flex-1 overflow-y-auto min-h-0" style={{ display: 'flex', flexDirection: 'column', gap: 16, padding: '8px 8px 16px', overflowAnchor: 'none', position: 'relative' }} aria-live="polite" aria-atomic="true">
                 {/* 整改计划第 4 章（P1）：用户上滑阅读时提供"回到底部"按钮 */}
                 {userScrolledUp && (
@@ -571,6 +615,7 @@ export function Chat() {
                     </div>
                   </div>
                 )}
+                {visibleFailure && <ChatStreamFailure failure={visibleFailure} />}
                 <div ref={messagesEndRef} />
               </div>
               <div className="flex items-center justify-between" style={{ padding: '6px 8px 4px', borderTop: '1px solid var(--border-primary)' }}>
@@ -683,25 +728,31 @@ export function Chat() {
                       </button>
                       </div>
                    </div>
-            </div>
+            </Panel>
           ) : (
-            <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', minHeight: 0 }}>
-              <EmptyState
-                icon={<Bot size={48} className="empty-state-icon" />}
-                title="选择一个对话或新建一个"
-                description="与 AI 助手交流，完成任务"
-              />
-            </div>
+            <Panel
+              tone="subtle"
+              className="flex min-h-0 flex-1 items-center justify-center"
+            >
+              {visibleFailure ? (
+                <ChatStreamFailure failure={visibleFailure} />
+              ) : (
+                <EmptyState
+                  icon={<Bot size={48} />}
+                  title="选择一个对话或新建一个"
+                  description="与 AI 助手交流，完成任务"
+                  className="border-0 bg-transparent shadow-none"
+                />
+              )}
+            </Panel>
           )}
-        </div>
-      </div>
-    </div>
-    <PromptTemplateSelector
-      open={templateOpen}
-      onClose={() => setTemplateOpen(false)}
-      onSelect={(content) => setInput(content)}
-      currentInput={input}
-    />
-    </div>
+      </Stack>
+      <PromptTemplateSelector
+        open={templateOpen}
+        onClose={() => setTemplateOpen(false)}
+        onSelect={(content) => setInput(content)}
+        currentInput={input}
+      />
+    </PageShell>
   );
 }

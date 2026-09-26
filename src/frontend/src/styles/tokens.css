@@ -1,35 +1,124 @@
 /* ============================================
-   Apple Design System — Unified Tokens
+   Aether Phase 6 — Unified design tokens
+   This file is the single source of truth for
+   component dimensions, spacing, type and motion.
+   Theme files only override semantic values.
    ============================================ */
 
 :root {
-  /* ---- Colors ---- */
+  /* ---- Brand and semantic colors ---- */
   --color-accent: #5e9eff;
-  --color-accent-hover: #7aafff;
-  --color-accent-subtle: rgba(94, 158, 255, 0.12);
-  --color-accent-glow: rgba(80, 140, 255, 0.3);
-  /* accent 背景上的前景色（UI-03：随主题覆盖，保证 WCAG 对比度） */
+  --color-accent-hover: color-mix(in oklab, var(--color-accent) 86%, white);
+  --color-accent-subtle: color-mix(in oklab, var(--color-accent) 14%, transparent);
+  --color-accent-glow: color-mix(in oklab, var(--color-accent) 30%, transparent);
   --on-accent: #ffffff;
+
   --color-success: #34d399;
   --color-warning: #fbbf24;
   --color-danger: #f87171;
+  --color-info: #60a5fa;
+  --color-neutral: #94a3b8;
+
+  --color-success-subtle: color-mix(in oklab, var(--color-success) 14%, transparent);
+  --color-warning-subtle: color-mix(in oklab, var(--color-warning) 14%, transparent);
+  --color-danger-subtle: color-mix(in oklab, var(--color-danger) 14%, transparent);
+  --color-info-subtle: color-mix(in oklab, var(--color-info) 14%, transparent);
+  --color-neutral-subtle: color-mix(in oklab, var(--color-neutral) 14%, transparent);
+
+  /* Semantic source aliases. Theme files continue to provide the
+     underlying surface/text/border values for each theme. */
+  --color-background-source: var(--bg-base);
+  --color-foreground-source: var(--text-primary);
+  --color-card-source: var(--card-bg);
+  --color-card-foreground-source: var(--text-primary);
+  --color-popover-source: var(--bg-elevated);
+  --color-popover-foreground-source: var(--text-primary);
+  --color-primary-source: var(--color-accent);
+  --color-primary-foreground-source: var(--on-accent);
+  --color-secondary-source: var(--bg-surface);
+  --color-secondary-foreground-source: var(--text-primary);
+  --color-muted-source: var(--bg-surface);
+  --color-muted-foreground-source: var(--text-secondary);
+  --color-accent-source: var(--color-accent);
+  --color-accent-foreground-source: var(--on-accent);
+  --color-destructive-source: var(--color-danger);
+  --color-border-source: var(--border-primary);
+  --color-input-source: var(--input-bg);
+  --color-ring-source: var(--color-accent);
+  --color-sidebar-source: var(--sidebar-bg, var(--bg-surface));
+  --color-sidebar-foreground-source: var(--text-primary);
+  --color-sidebar-primary-source: var(--color-accent);
+  --color-sidebar-primary-foreground-source: var(--on-accent);
+  --color-sidebar-accent-source: var(--sidebar-item-active, var(--bg-surface-hover));
+  --color-sidebar-accent-foreground-source: var(--text-primary);
+  --color-sidebar-border-source: var(--sidebar-border, var(--border-primary));
+  --color-sidebar-ring-source: var(--color-accent);
+
+  /* ---- Surfaces, text and borders ---- */
+  --surface-canvas: var(--bg-base);
+  --surface-default: var(--bg-surface);
+  --surface-hover: var(--bg-surface-hover);
+  --surface-elevated: var(--bg-elevated);
+  --surface-overlay: var(--bg-overlay);
+  --surface-card: var(--card-bg);
+  --surface-input: var(--input-bg);
+
+  --text-primary-token: var(--text-primary);
+  --text-secondary-token: var(--text-secondary);
+  --text-tertiary-token: var(--text-tertiary);
+  --text-inverse-token: var(--text-inverse);
+  --text-link-token: var(--text-link);
+
+  --border-default-token: var(--border-primary);
+  --border-subtle-token: var(--border-secondary);
+  --border-focus-token: var(--input-border-focus);
+
+  /* Status role aliases used by shared UI primitives. */
+  --status-completed: var(--color-success);
+  --status-failed: var(--color-danger);
+  --status-running: var(--color-info);
+  --status-retrying: var(--color-warning);
+  --status-verifying: var(--color-accent);
+  --status-cancelled: var(--color-neutral);
+  --status-interrupted: var(--color-warning);
+  --status-budget-exceeded: var(--color-danger);
 
   /* ---- Typography ---- */
-  --font-sans: 'Geist Variable', -apple-system, BlinkMacSystemFont, 'Inter', sans-serif;
-  --font-mono: 'SF Mono', 'Fira Code', monospace;
-  --font-page-title: 36px;
-  --font-module-title: 24px;
-  --font-card-title: 18px;
-  --font-base: 15px;
-  --font-sm: 13px;
-  --font-xs: 11px;
+  --font-family-sans: 'Geist Variable', -apple-system, BlinkMacSystemFont, 'Inter', sans-serif;
+  --font-family-heading: var(--font-family-sans);
+  --font-family-mono: 'SF Mono', 'Fira Code', monospace;
+  --font-sans: var(--font-family-sans);
+  --font-heading: var(--font-family-heading);
+  --font-mono: var(--font-family-mono);
+
+  --font-size-display: 36px;
+  --font-size-title: 24px;
+  --font-size-subtitle: 18px;
+  --font-size-body: 15px;
+  --font-size-body-sm: 14px;
+  --font-size-caption: 13px;
+  --font-size-label: 11px;
+
+  --font-page-title: var(--font-size-display);
+  --font-module-title: var(--font-size-title);
+  --font-card-title: var(--font-size-subtitle);
+  --font-base: var(--font-size-body);
+  --font-sm: var(--font-size-caption);
+  --font-xs: var(--font-size-label);
+
   --font-weight-normal: 400;
   --font-weight-medium: 500;
   --font-weight-semibold: 600;
   --font-weight-bold: 700;
-  --letter-spacing-tight: -0.02em;
 
-  /* ---- 8pt Spacing System ---- */
+  --line-height-tight: 1.15;
+  --line-height-heading: 1.25;
+  --line-height-body: 1.5;
+  --line-height-relaxed: 1.6;
+  --letter-spacing-tight: -0.02em;
+  --letter-spacing-normal: 0;
+
+  /* ---- 4px spacing scale ---- */
   --space-1: 4px;
   --space-2: 8px;
   --space-3: 12px;
@@ -39,59 +128,64 @@
   --space-8: 32px;
   --space-10: 40px;
   --space-12: 48px;
-  --space-14: 56px;
   --space-16: 64px;
-  --space-20: 80px;
-  --space-24: 96px;
 
-  /* ---- Page Spacing (8pt Grid) ---- */
-  --module-gap: 48px;
-  --submodule-gap: 32px;
-  --card-gap: 24px;
-  --card-padding: 24px;
-  --title-body-gap: 16px;
-  --body-button-gap: 20px;
-  --button-gap: 12px;
-  --icon-text-gap: 12px;
-  --input-toolbar-gap: 20px;
-  --toolbar-card-gap: 32px;
+  /* Semantic spacing aliases. */
+  --module-gap: var(--space-12);
+  --submodule-gap: var(--space-8);
+  --card-gap: var(--space-6);
+  --card-padding: var(--space-6);
+  --title-body-gap: var(--space-4);
+  --body-button-gap: var(--space-5);
+  --button-gap: var(--space-3);
+  --icon-text-gap: var(--space-3);
+  --input-toolbar-gap: var(--space-5);
+  --toolbar-card-gap: var(--space-8);
 
-  /* ---- Radius ---- */
+  /* ---- Radius scale ---- */
   --radius-xs: 6px;
-  --radius-sm: 10px;
-  --radius-md: 14px;
-  --radius-lg: 18px;
-  --radius-xl: 24px;
-  --radius-2xl: 32px;
-  --radius-full: 9999px;
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --radius-lg: 16px;
+  --radius-xl: 20px;
+  --radius-pill: 9999px;
 
-  /* ---- Glass Card (Unified) — 已迁移到 themes.css 的 --glass-* 变量 ---- */
-  --glass-bg: rgba(255, 255, 255, 0.06);
+  /* Legacy aliases retained while callers migrate to the named scale. */
+  --radius-2xl: var(--radius-xl);
+  --radius-full: var(--radius-pill);
+  --card-radius: var(--radius-lg);
+  --btn-radius: var(--radius-md);
+  --input-radius: var(--radius-md);
 
-  /* ---- Button (44px height) ---- */
+  /* Source aliases let the Tailwind bridge in base.css avoid
+     redefining the same custom-property names. */
+  --radius-source-xs: var(--radius-xs);
+  --radius-source-sm: var(--radius-sm);
+  --radius-source-md: var(--radius-md);
+  --radius-source-lg: var(--radius-lg);
+  --radius-source-xl: var(--radius-xl);
+  --radius-source-pill: var(--radius-pill);
+
+  /* ---- Control and layout dimensions ---- */
   --btn-height: 44px;
-  --btn-padding-x: 24px;
-  --btn-radius: 14px;
-
-  /* ---- Input (48px height) ---- */
+  --btn-padding-x: var(--space-6);
   --input-height: 48px;
-  --input-radius: 16px;
-  --input-padding-x: 16px;
-
-  /* ---- List (56px row height) ---- */
+  --input-padding-x: var(--space-4);
   --list-row-height: 56px;
-  --list-padding-x: 20px;
-
-  /* ---- Card (120px height) ---- */
+  --list-padding-x: var(--space-5);
   --card-height: 120px;
-  --card-radius: 24px;
+  --page-header-min-height: 64px;
+  --page-content-max-width: 1100px;
 
-  /* ---- Animation ---- */
+  /* ---- Motion ---- */
+  --anim-duration-fast: 150ms;
   --anim-duration: 220ms;
+  --anim-duration-slow: 400ms;
   --anim-curve: cubic-bezier(0.34, 1.56, 0.64, 1);
   --anim-ease: cubic-bezier(0.25, 0.1, 0.25, 1);
+  --anim-ease-emphasis: cubic-bezier(0.16, 1, 0.3, 1);
 
-  /* ---- Icon Sizes ---- */
+  /* ---- Icon sizes ---- */
   --icon-nav: 20px;
   --icon-btn: 18px;
   --icon-card: 24px;
@@ -100,27 +194,60 @@
 
   /* ---- Layout ---- */
   --sidebar-width: 260px;
-  --max-content-width: 1100px;
+  --max-content-width: var(--page-content-max-width);
 
-  /* ---- Z-Index (P1-2: 完整 token scale 替代硬编码) ---- */
-  /* P1-4: Toast 必须高于 Modal，防遮罩层挡住最高优先级提示 */
+  /* ---- Focus and elevation ---- */
+  --border-width-hairline: 1px;
+  --focus-ring-width: 2px;
+  --focus-ring-offset: 2px;
+  --focus-ring-color: var(--color-accent);
+  --focus-ring-subtle: var(--color-accent-subtle);
+  --shadow-xs: 0 1px 2px color-mix(in oklab, black 4%, transparent);
+  --shadow-sm: 0 2px 8px color-mix(in oklab, black 8%, transparent);
+  --shadow-md: 0 4px 16px color-mix(in oklab, black 12%, transparent);
+  --shadow-lg: 0 8px 32px color-mix(in oklab, black 16%, transparent);
+  --shadow-xl: 0 16px 48px color-mix(in oklab, black 20%, transparent);
+  --shadow-glow: 0 0 var(--space-5) var(--color-accent-glow);
+  --shadow-inset: inset 0 var(--border-width-hairline) var(--border-width-hairline) color-mix(in oklab, white 18%, transparent);
+  --shadow-button-primary: 0 var(--space-1) var(--space-4) color-mix(in oklab, var(--color-accent) 25%, transparent), var(--shadow-inset);
+  --shadow-button-primary-hover: 0 var(--space-1) var(--space-5) color-mix(in oklab, var(--color-accent) 35%, transparent), var(--shadow-inset);
+
+  /* ---- Z-index ---- */
   --z-base: 0;
+  --z-sidebar: 50;
   --z-dropdown: 1000;
   --z-sticky: 1100;
   --z-fixed: 1200;
-  --z-sidebar: 50;
   --z-command-palette: 1400;
+  --z-popover: 1500;
   --z-modal-backdrop: 1600;
   --z-modal: 1610;
-  --z-popover: 1500;
-  --z-toast: 1700;          /* ⬆ 高于 modal，确保 Toast 始终可见 */
+  --z-toast: 1700;
   --z-tooltip: 1800;
 
-  /* P1-9 修复：统一 Elevation (Shadow) Scale 替代硬编码 box-shadow */
-  --shadow-xs: 0 1px 2px rgba(0, 0, 0, 0.04);
-  --shadow-sm: 0 2px 8px rgba(0, 0, 0, 0.08);
-  --shadow-md: 0 4px 16px rgba(0, 0, 0, 0.12);
-  --shadow-lg: 0 8px 32px rgba(0, 0, 0, 0.16);
-  --shadow-xl: 0 16px 48px rgba(0, 0, 0, 0.20);
-  --shadow-glow: 0 0 20px rgba(94, 158, 255, 0.25);
+  /* ---- Legacy shadcn bridge variables ---- */
+  --background: var(--color-background-source);
+  --foreground: var(--color-foreground-source);
+  --card: var(--color-card-source);
+  --card-foreground: var(--color-card-foreground-source);
+  --popover: var(--color-popover-source);
+  --popover-foreground: var(--color-popover-foreground-source);
+  --primary: var(--color-primary-source);
+  --primary-foreground: var(--color-primary-foreground-source);
+  --secondary: var(--color-secondary-source);
+  --secondary-foreground: var(--color-secondary-foreground-source);
+  --muted: var(--color-muted-source);
+  --muted-foreground: var(--color-muted-foreground-source);
+  --destructive: var(--color-destructive-source);
+  --border: var(--color-border-source);
+  --input: var(--color-input-source);
+  --ring: var(--color-ring-source);
+  --sidebar: var(--color-sidebar-source);
+  --sidebar-foreground: var(--color-sidebar-foreground-source);
+  --sidebar-primary: var(--color-sidebar-primary-source);
+  --sidebar-primary-foreground: var(--color-sidebar-primary-foreground-source);
+  --sidebar-accent: var(--color-sidebar-accent-source);
+  --sidebar-accent-foreground: var(--color-sidebar-accent-foreground-source);
+  --sidebar-border: var(--color-sidebar-border-source);
+  --sidebar-ring: var(--color-sidebar-ring-source);
 }

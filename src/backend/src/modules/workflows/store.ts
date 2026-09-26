@@ -1,9 +1,12 @@
-import { getDb, saveDb } from '../../db/client.js';
-import { workflows, workflowRuns } from '../../db/schema/index.js';
+import { getDb, saveDb } from '../../db/client.js'
+import { workflows, workflowRuns, runs } from '../../db/schema/index.js'
 import { eq, desc } from 'drizzle-orm';
 import { randomUUID } from 'node:crypto';
 import type { BackendConfig } from '../../config/index.js';
+import { RunLifecycleManager } from '../../core/runtime/index.js'
 import type { WorkflowNode, WorkflowEdge } from './types.js';
+
+type WorkflowDatabase = ReturnType<typeof getDb>
 
 /** 解析 JSON 列（容错空值/非法 JSON） */
 export function parseJson<T>(raw: string | null | undefined, fallback: T): T {
@@ -143,9 +146,69 @@ export async function createWorkflowRun(workflowId: string, firstNodeId: string 
   return { runId, now };
 }
 
+type CreateWorkflowRunInput = {
+  readonly workflowId: string
+  readonly firstNodeId: string | undefined
+  readonly config: BackendConfig
+  readonly db: WorkflowDatabase
+  readonly saveDb: (config: BackendConfig) => void
+}
+
+/** 在同一事务内原子创建 runs 与 workflow_runs，避免遗留孤儿运行记录。 */
+export async function createWorkflowRunInternal(input: CreateWorkflowRunInput): Promise<{ runId: string; now: string }> {
+  const { workflowId, firstNodeId, config, db } = input
+  const runId = randomUUID()
+  const now = new Date().toISOString()
+  db.transaction((tx) => {
+    const lifecycle = new RunLifecycleManager(tx)
+    lifecycle.createAndStart({
+      runId,
+      conversationId: null,
+      mode: 'workflow',
+      rootAgentId: 'workflow',
+      metadata: { workflowId, firstNodeId },
+    })
+    tx.insert(workflowRuns).values({
+      id: runId,
+      workflowId,
+      status: 'running',
+      currentNodeId: firstNodeId,
+      results: '{}',
+      startedAt: now,
+    }).run()
+  })
+  input.saveDb(config)
+  return { runId, now }
+}
+
+/** 启动时修复 workflow_runs 与 runs 状态不一致的孤儿记录。 */
+export function repairOrphanWorkflowRuns(db: WorkflowDatabase, config: BackendConfig): number {
+  try {
+    const orphan = db.select().from(workflowRuns)
+      .where(eq(workflowRuns.status, 'running'))
+      .all()
+      .filter(workflowRun => {
+        const run = db.select().from(runs).where(eq(runs.id, workflowRun.id)).get()
+        return !run || !['running', 'waiting', 'created'].includes(run.status)
+      })
+    for (const workflowRun of orphan) {
+      db.update(workflowRuns).set({
+        status: 'failed',
+        error: 'orphan repair: runs 记录缺失或已终止',
+        completedAt: new Date().toISOString(),
+      }).where(eq(workflowRuns.id, workflowRun.id)).run()
+    }
+    if (orphan.length > 0) saveDb(config)
+    return orphan.length
+  } catch (error: unknown) {
+    console.warn('[Workflow] orphan repair 执行失败:', error instanceof Error ? error.message : String(error))
+    return 0
+  }
+}
+
 /** 更新工作流运行状态 */
 export async function updateWorkflowRun(runId: string, updates: {
-  status?: 'running' | 'completed' | 'failed';
+    status?: 'running' | 'completed' | 'failed' | 'cancelled';
   currentNodeId?: string;
   results?: Record<string, unknown>;
   error?: string;
@@ -153,7 +216,7 @@ export async function updateWorkflowRun(runId: string, updates: {
 }, config: BackendConfig) {
   const db = getDb();
   const dbUpdates: {
-    status?: 'running' | 'completed' | 'failed';
+  status?: 'running' | 'completed' | 'failed' | 'cancelled';
     currentNodeId?: string;
     results?: string;
     error?: string;

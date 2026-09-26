@@ -15,6 +15,8 @@
  * polling / optimistic message replacement。
  */
 
+import type { RemoteCommandStatus } from './remote-command'
+
 export type MessageRole = 'user' | 'assistant' | 'tool' | 'system';
 
 /** 统一消息结构（对应 messages_sync 行 + 本地乐观消息） */
@@ -87,9 +89,9 @@ export function replaceOptimistic(
 }
 
 /**
- * 判断「当前请求」是否已有对应 assistant 产出（§14）。
- * 通过绑定 activeCommandId / 该命令对应的 conversation 最后一条 assistant
- * 的 created_at 是否晚于用户消息来判断 —— 不允许看到历史 assistant 就误判完成。
+ * 判断当前时间窗内是否已有 assistant 内容。
+ * 该结果只用于消息归属/展示，不能作为 Chat phase 的完成依据；
+ * phase 只能由 resolveChatCompletion 接收到的 remote command 终态结算。
  */
 export function hasAssistantAfter(
   list: ChatMessage[],
@@ -101,4 +103,51 @@ export function hasAssistantAfter(
       m.role === 'assistant' &&
       new Date(m.created_at).getTime() >= userTs,
   );
+}
+
+export type ChatCompletionSignal =
+  | {
+      readonly kind: 'assistant_message'
+      readonly message: ChatMessage
+    }
+  | {
+      readonly kind: 'remote_command_status'
+      readonly status: RemoteCommandStatus
+    }
+
+export type ChatCompletion =
+  | { readonly kind: 'busy' }
+  | { readonly kind: 'completed' }
+  | { readonly kind: 'failed' }
+  | { readonly kind: 'cancelled' }
+
+function assertNever(value: never): never {
+  return value
+}
+
+/**
+ * Chat phase 只接受 remote command 终态结算。
+ * assistant 消息只表示流式内容到达，不能证明 Run 已结束。
+ */
+export function resolveChatCompletion(signal: ChatCompletionSignal): ChatCompletion {
+  switch (signal.kind) {
+    case 'assistant_message':
+      return { kind: 'busy' }
+    case 'remote_command_status':
+      switch (signal.status) {
+        case 'pending':
+        case 'processing':
+          return { kind: 'busy' }
+        case 'completed':
+          return { kind: 'completed' }
+        case 'failed':
+          return { kind: 'failed' }
+        case 'cancelled':
+          return { kind: 'cancelled' }
+        default:
+          return assertNever(signal.status)
+      }
+    default:
+      return assertNever(signal)
+  }
 }

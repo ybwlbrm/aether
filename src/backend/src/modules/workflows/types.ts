@@ -1,3 +1,9 @@
+export interface NodeExecutionResult {
+  readonly output: string
+  readonly data?: unknown
+  readonly error?: string
+}
+
 export interface WorkflowNode {
   id: string;
   type: 'tool' | 'agent' | 'media' | 'document' | 'condition' | 'system';

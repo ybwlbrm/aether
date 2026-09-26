@@ -169,8 +169,17 @@ export function WorkflowList({
                               dedupeKey: buildTerminalDedupeKey('workflow', result.runId ?? wf.id, 'failed'),
                               always: true,
                             });
+                          } else if (result.status === 'cancelled') {
+                            notificationCenter.notifyOnce({
+                              id: `wf-list-${result.runId ?? wf.id}`,
+                              type: 'cancelled',
+                              title: '工作流运行已取消',
+                              body: result.error || '用户停止工作流',
+                              createdAt: new Date().toISOString(),
+                              dedupeKey: buildTerminalDedupeKey('workflow', result.runId ?? wf.id, 'cancelled'),
+                            });
                           } else {
-                            alert(`${wf.name} 运行完成: ${result.error || ''}`);
+                            alert(`${wf.name} 尚未返回终态`);
                           }
                         } catch (err: unknown) {
                           alert('运行失败: ' + (err instanceof Error ? err.message : String(err)));

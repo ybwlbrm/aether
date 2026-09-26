@@ -37,6 +37,13 @@ async function collect(chunks: AsyncIterable<string>): Promise<StreamChunk[]> {
   return out;
 }
 
+function hasCode(value: unknown, code: string): boolean {
+  return typeof value === 'object'
+    && value !== null
+    && 'code' in value
+    && value.code === code;
+}
+
 /** 类型谓词辅助 */
 const kinds = (cs: StreamChunk[]) => cs.map((c) => c.type);
 
@@ -204,14 +211,16 @@ describe('translate — 延迟发射与结束', () => {
   it('payload 非法 JSON → MALFORMED_RESPONSE', async () => {
     await assert.rejects(
       collect(fromArr(['not-json', 'data: [DONE]'])),
-      (e: unknown) => (e as { code?: string }).code === 'MALFORMED_RESPONSE',
+       (error: unknown) => hasCode(error, 'MALFORMED_RESPONSE'),
+
     );
   });
 
   it('源无 [DONE] → STREAM_CLOSED', async () => {
     await assert.rejects(
       collect(fromArr([wire({ delta: { content: 'x' } })])),
-      (e: unknown) => (e as { code?: string }).code === 'STREAM_CLOSED',
+       (error: unknown) => hasCode(error, 'STREAM_CLOSED'),
+
     );
   });
 });
@@ -222,7 +231,7 @@ describe('mapFinishReason', () => {
     assert.equal(mapFinishReason('tool_calls').kind, 'tool_calls');
     assert.equal(mapFinishReason('length').kind, 'max-tokens');
     assert.equal(mapFinishReason('function_call').kind, 'tool_calls');
-    assert.equal((mapFinishReason('content_filter') as { code?: string }).code, 'CONTENT_FILTER');
+    assert.equal(mapFinishReason('content_filter').kind, 'content_filter');
   });
 });
 
@@ -234,7 +243,8 @@ describe('buildChatRequestBody', () => {
       deepThinking: true,
       reasoningEffort: 'medium',
       supportsThinking: true,
-    } as never);
+     });
+
     assert.deepEqual(body.thinking, { type: 'enabled' });
     assert.equal(body.reasoning_effort, 'medium');
   });
@@ -245,7 +255,8 @@ describe('buildChatRequestBody', () => {
       messages: [],
       deepThinking: false,
       supportsThinking: true,
-    } as never);
+     });
+
     assert.deepEqual(body.thinking, { type: 'disabled' });
     assert.equal(body.reasoning_effort, undefined);
 
@@ -254,7 +265,8 @@ describe('buildChatRequestBody', () => {
       messages: [],
       deepThinking: true,
       supportsThinking: false,
-    } as never);
+     });
+
     assert.equal(body2.thinking, undefined);
     assert.equal(body2.reasoning_effort, undefined);
   });
@@ -281,6 +293,7 @@ describe('parseToolArgsSafe', () => {
 
   it('空/undefined → 空对象', () => {
     assert.equal(parseToolArgsSafe('').ok, true);
-    assert.equal(parseToolArgsSafe(undefined as never).ok, true);
+     assert.equal(parseToolArgsSafe(undefined).ok, true);
+
   });
 });

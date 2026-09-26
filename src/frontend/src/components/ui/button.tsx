@@ -1,5 +1,6 @@
 import { Button as ButtonPrimitive } from "@base-ui/react/button"
 import { cva, type VariantProps } from "class-variance-authority"
+import type { ReactNode } from "react"
 
 import { cn } from "@/lib/utils"
 
@@ -37,15 +38,12 @@ const buttonVariants = cva(
       variant: "default",
       size: "default",
     },
-  }
+  },
 )
 
-function Button({
-  className,
-  variant = "default",
-  size = "default",
-  ...props
-}: ButtonPrimitive.Props & VariantProps<typeof buttonVariants>) {
+export type ButtonProps = ButtonPrimitive.Props & VariantProps<typeof buttonVariants>
+
+function Button({ className, variant = "default", size = "default", ...props }: ButtonProps) {
   return (
     <ButtonPrimitive
       data-slot="button"
@@ -55,4 +53,30 @@ function Button({
   )
 }
 
-export { Button, buttonVariants }
+export type IconButtonSize = "sm" | "default" | "lg"
+
+export interface IconButtonProps extends Omit<ButtonPrimitive.Props, "children"> {
+  readonly icon: ReactNode
+  readonly label: string
+  readonly size?: IconButtonSize
+}
+
+function IconButton({ className, icon, label, size = "default", ...props }: IconButtonProps) {
+  const sizeVariant = size === "sm" ? "icon-sm" : size === "lg" ? "icon-lg" : "icon"
+
+  return (
+    <ButtonPrimitive
+      {...props}
+      data-slot="icon-button"
+      aria-label={label}
+      title={label}
+      className={cn("ui-icon-button", buttonVariants({ size: sizeVariant }), className)}
+    >
+      <span data-slot="icon-button-content" className="ui-icon-button-content" aria-hidden="true">
+        {icon}
+      </span>
+    </ButtonPrimitive>
+  )
+}
+
+export { Button, IconButton, buttonVariants }

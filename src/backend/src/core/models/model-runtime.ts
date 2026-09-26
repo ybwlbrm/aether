@@ -128,9 +128,6 @@ interface StreamAccumulator {
   usage: TokenUsage | null;
   currentBlockIndex: number | null;
   currentBlockType: 'text' | 'reasoning' | 'tool-call' | null;
-  currentToolCallId: string | null;
-  currentToolCallName: string | null;
-  currentToolCallArguments: string;
 }
 
 /**
@@ -166,69 +163,67 @@ export async function streamToComplete(
     usage: null,
     currentBlockIndex: null,
     currentBlockType: null,
-    currentToolCallId: null,
-    currentToolCallName: null,
-    currentToolCallArguments: '',
   };
 
   for await (const chunk of stream) {
     switch (chunk.type) {
       case 'block-start': {
-        acc.currentBlockIndex = chunk.index;
-        acc.currentBlockType = chunk.blockType;
+        acc.currentBlockIndex = chunk.index
+        acc.currentBlockType = chunk.blockType
         if (chunk.blockType === 'tool-call') {
-          acc.currentToolCallId = chunk.id ?? '';
-          acc.currentToolCallName = chunk.name ?? '';
-          acc.currentToolCallArguments = '';
+          const toolCallId = chunk.id ?? `call_idx_${chunk.index}`
+          // block-start 即初始化条目；有 id 用协议 id，无 id 用 block index 稳定占位。
+          acc.toolCalls.set(toolCallId, {
+            id: toolCallId,
+            name: chunk.name ?? '',
+            arguments: '',
+          })
         }
-        break;
+        break
       }
 
       case 'text-delta': {
         if (acc.currentBlockType === 'text') {
-          acc.content += chunk.text;
+          acc.content += chunk.text
         }
-        break;
+        break
       }
 
       case 'reasoning-delta': {
         if (acc.currentBlockType === 'reasoning') {
-          acc.reasoningContent += chunk.text;
+          acc.reasoningContent += chunk.text
         }
-        break;
+        break
       }
 
       case 'tool-call-delta': {
-        if (acc.currentBlockType === 'tool-call' && chunk.index === acc.currentBlockIndex) {
-          acc.currentToolCallArguments += chunk.argumentsDelta;
-          // Update the map with accumulated arguments so far
-          if (acc.currentToolCallId) {
-            acc.toolCalls.set(acc.currentToolCallId, {
-              id: acc.currentToolCallId,
-              name: acc.currentToolCallName ?? '',
-              arguments: acc.currentToolCallArguments,
-            });
-          }
+        // 有 id 按协议 id 关联；无 id 旧协议按 block index 关联同一个占位 key。
+        const toolCallId = chunk.id ?? `call_idx_${chunk.index}`
+        const prev = acc.toolCalls.get(toolCallId)
+        if (prev) {
+          acc.toolCalls.set(toolCallId, {
+            id: toolCallId,
+            name: chunk.name ?? prev.name,
+            arguments: prev.arguments + chunk.argumentsDelta,
+          })
         }
-        break;
+        break
       }
 
       case 'block-end': {
-        // Block-end carries the final consolidated block — we already accumulated deltas,
-        // but for tool-calls we ensure the final arguments are captured.
-        if (chunk.block.kind === 'tool-call' && chunk.index === acc.currentBlockIndex) {
+        // Block-end 自带完整 block；tool-call 的 arguments 以 delta 累积为准
+        // （并行交错时 block-end 不得覆盖累积结果）。仅对缺少
+        // block-start/delta 的孤立 block-end 用 block 数据兜底。
+        if (chunk.block.kind === 'tool-call' && chunk.block.id && !acc.toolCalls.has(chunk.block.id)) {
           acc.toolCalls.set(chunk.block.id, {
             id: chunk.block.id,
             name: chunk.block.name,
             arguments: chunk.block.arguments,
-          });
+          })
         }
-        acc.currentBlockIndex = null;
-        acc.currentBlockType = null;
-        acc.currentToolCallId = null;
-        acc.currentToolCallName = null;
-        acc.currentToolCallArguments = '';
-        break;
+        acc.currentBlockIndex = null
+        acc.currentBlockType = null
+        break
       }
 
       case 'usage': {

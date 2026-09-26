@@ -221,9 +221,9 @@ describe('runMigrations — v10/v11/v12 (Aether 2.0 Runtime tables)', () => {
       await runMigrationsReal(makeConfig(dbPath, dir));
 
       const db = openDb(dbPath);
-      // schema_version 最大值应为 16 (v10-v16，含 §27 Prompt 持久化列)
-      const ver = db.exec('SELECT MAX(version) FROM schema_version');
-      assert.equal(ver[0].values[0][0], 16, 'schema_version should be 16');
+      // schema_version 最大值应为 17（W5 Run retry 字段迁移）
+      const ver = db.exec('SELECT MAX(version) FROM schema_version')
+      assert.equal(ver[0].values[0][0], 17, 'schema_version should be 17')
 
       // 三张新表存在
       const tables = db.exec("SELECT name FROM sqlite_master WHERE type='table' AND name IN ('runs','tasks','events')");
@@ -292,10 +292,10 @@ describe('runMigrations — v10/v11/v12 (Aether 2.0 Runtime tables)', () => {
       // 运行真实迁移
       await runMigrationsReal(makeConfig(dbPath, dir));
 
-      // 验证：schema_version 达到 16
-      const db2 = openDb(dbPath);
-      const ver = db2.exec('SELECT MAX(version) FROM schema_version');
-      assert.equal(ver[0].values[0][0], 16, 'schema_version should be 16 after upgrade');
+      // 验证：schema_version 达到 17
+      const db2 = openDb(dbPath)
+      const ver = db2.exec('SELECT MAX(version) FROM schema_version')
+      assert.equal(ver[0].values[0][0], 17, 'schema_version should be 17 after upgrade')
 
       // 预存数据完好
       const prov = db2.exec("SELECT id, name FROM providers WHERE id = 'prov-1'");
@@ -359,7 +359,7 @@ describe('runMigrations — v10/v11/v12 (Aether 2.0 Runtime tables)', () => {
 
       const db = openDb(dbPath);
       const ver = db.exec('SELECT MAX(version) FROM schema_version');
-      assert.equal(ver[0].values[0][0], 16, 'schema_version should still be 16 after second run');
+      assert.equal(ver[0].values[0][0], 17, 'schema_version should still be 17 after second run')
       db.close();
     } finally {
       rmSync(dir, { recursive: true, force: true });
@@ -408,4 +408,84 @@ describe('runMigrations — v10/v11/v12 (Aether 2.0 Runtime tables)', () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  it('v17: Run 重试字段与 Task attempt 迁移并为旧行填默认值', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'pacc-migrate-v17-'))
+    const dbPath = join(dir, 'pacc.db')
+    const createdAt = '2026-01-01T00:00:00.000Z'
+    try {
+      const db = new SQL.Database()
+      db.run('CREATE TABLE schema_version (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)')
+      db.run('INSERT INTO schema_version (version, applied_at) VALUES (16, ?)', [createdAt])
+      db.run(`CREATE TABLE runs (
+        id TEXT PRIMARY KEY,
+        conversation_id TEXT,
+        status TEXT NOT NULL DEFAULT 'created',
+        mode TEXT NOT NULL DEFAULT 'normal',
+        root_agent_id TEXT,
+        started_at TEXT,
+        completed_at TEXT,
+        end_reason TEXT,
+        input_tokens INTEGER NOT NULL DEFAULT 0,
+        output_tokens INTEGER NOT NULL DEFAULT 0,
+        total_tokens INTEGER NOT NULL DEFAULT 0,
+        error TEXT,
+        metadata TEXT,
+        created_at TEXT NOT NULL
+      )`)
+      db.run(`CREATE TABLE tasks (
+        id TEXT PRIMARY KEY,
+        run_id TEXT NOT NULL,
+        parent_task_id TEXT,
+        agent_id TEXT NOT NULL DEFAULT 'main',
+        agent_type TEXT NOT NULL DEFAULT 'conversation',
+        status TEXT NOT NULL DEFAULT 'pending',
+        input TEXT,
+        output TEXT,
+        error TEXT,
+        started_at TEXT,
+        completed_at TEXT,
+        metadata TEXT,
+        created_at TEXT NOT NULL
+      )`)
+      db.run("INSERT INTO runs (id, status, mode, end_reason, created_at) VALUES ('old-run', 'failed', 'normal', 'old-error', ?)", [createdAt])
+      db.run("INSERT INTO tasks (id, run_id, status, created_at) VALUES ('old-task', 'old-run', 'failed', ?)", [createdAt])
+      writeFileSync(dbPath, Buffer.from(db.export()))
+      db.close()
+
+      await runMigrationsReal(makeConfig(dbPath, dir))
+
+      const migrated = openDb(dbPath)
+      const runColumns = new Set(
+        migrated.exec('PRAGMA table_info(runs)')[0].values.map((row: unknown[]) => String(row[1])),
+      )
+      for (const column of [
+        'parent_run_id',
+        'retry_of_run_id',
+        'attempt',
+        'retry_type',
+        'end_reason',
+        'last_updated_at',
+      ]) {
+        assert.ok(runColumns.has(column), `runs should contain ${column}`)
+      }
+      const taskColumns = new Set(
+        migrated.exec('PRAGMA table_info(tasks)')[0].values.map((row: unknown[]) => String(row[1])),
+      )
+      assert.ok(taskColumns.has('attempt'), 'tasks should contain attempt')
+
+      const run = migrated.exec("SELECT parent_run_id, retry_of_run_id, attempt, retry_type, end_reason, last_updated_at FROM runs WHERE id = 'old-run'")
+      assert.equal(run[0].values[0][0], null)
+      assert.equal(run[0].values[0][1], null)
+      assert.equal(run[0].values[0][2], 1)
+      assert.equal(run[0].values[0][3], null)
+      assert.equal(run[0].values[0][4], 'old-error')
+      assert.equal(run[0].values[0][5], createdAt)
+      const task = migrated.exec("SELECT attempt FROM tasks WHERE id = 'old-task'")
+      assert.equal(task[0].values[0][0], 1)
+      migrated.close()
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
 });

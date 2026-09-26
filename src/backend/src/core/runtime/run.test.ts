@@ -11,26 +11,45 @@ import assert from 'node:assert/strict';
 // Import types from source for compile-time checking
 import type { RunStatus, RunMode, RunEntity } from './run.js';
 // Import runtime values from built dist
-const { RunStateMachine } = await import('./index.js');
-const { RuntimeError } = await import('../errors/index.js');
+const { RunStateMachine, isValidRunTransition } = await import('./run.js')
+const { RuntimeError } = await import('../errors/index.js')
 
 function createMachine() {
   return new RunStateMachine();
 }
 
+const EXPECTED_RUN_STATUSES = [
+  'created',
+  'running',
+  'waiting',
+  'retry_waiting',
+  'retrying',
+  'verifying',
+  'completed',
+  'failed',
+  'cancelled',
+  'interrupted',
+  'budget_exceeded',
+] as const
+
+function isExpectedRunStatus(value: string): value is RunStatus {
+  return EXPECTED_RUN_STATUSES.some((status) => status === value)
+}
+
+function toRunStatus(value: string): RunStatus {
+  if (!isExpectedRunStatus(value)) {
+    throw new Error(`unexpected run status in test: ${value}`)
+  }
+  return value
+}
+
 describe('core/runtime/run', () => {
   describe('RunStatus type', () => {
-    it('includes all 7 expected statuses', () => {
-      const statuses: RunStatus[] = [
-        'created',
-        'running',
-        'waiting',
-        'completed',
-        'failed',
-        'cancelled',
-        'interrupted',
-      ];
-      assert.equal(statuses.length, 7);
+    it('includes all 11 expected statuses', () => {
+      assert.equal(EXPECTED_RUN_STATUSES.length, 11)
+      for (const status of EXPECTED_RUN_STATUSES) {
+        assert.ok(isExpectedRunStatus(status))
+      }
     });
   });
 
@@ -82,18 +101,78 @@ describe('core/runtime/run', () => {
       assert.equal(machine.endReason, 'Task finished successfully');
     });
 
+    it('valid retry and verification paths preserve the state machine contract', () => {
+      const machine = createMachine()
+      const path = ['running', 'retry_waiting', 'retrying', 'running', 'verifying', 'completed'] as const
+
+      for (const next of path) {
+        machine.transition(toRunStatus(next))
+      }
+
+      assert.equal(machine.status, 'completed')
+      assert.equal(machine.isTerminal, true)
+    })
+
+    it('legal transition table covers every declared edge and rejects every other edge', () => {
+      const expectedTransitions: Readonly<Record<string, readonly string[]>> = {
+        created: ['running'],
+        running: [
+          'waiting',
+          'retry_waiting',
+          'verifying',
+          'completed',
+          'failed',
+          'cancelled',
+          'interrupted',
+          'budget_exceeded',
+        ],
+        waiting: [
+          'running',
+          'retry_waiting',
+          'verifying',
+          'completed',
+          'failed',
+          'cancelled',
+          'interrupted',
+          'budget_exceeded',
+        ],
+        retry_waiting: ['retrying', 'failed', 'cancelled', 'interrupted', 'budget_exceeded'],
+        retrying: ['running', 'waiting', 'failed', 'cancelled', 'interrupted', 'budget_exceeded'],
+        verifying: ['running', 'completed', 'failed', 'cancelled', 'interrupted', 'budget_exceeded'],
+        completed: [],
+        failed: [],
+        cancelled: [],
+        interrupted: [],
+        budget_exceeded: [],
+      }
+
+      for (const from of EXPECTED_RUN_STATUSES) {
+        const allowed = expectedTransitions[from]
+        if (!allowed) {
+          throw new Error(`missing expected transition row: ${from}`)
+        }
+        for (const to of EXPECTED_RUN_STATUSES) {
+          assert.equal(
+            isValidRunTransition(toRunStatus(from), toRunStatus(to)),
+            allowed.includes(to),
+            `unexpected transition result: ${from} -> ${to}`,
+          )
+        }
+      }
+    })
+
     it('startedAt set on first running transition', () => {
-      const machine = createMachine();
-      assert.equal(machine.startedAt, undefined);
-      machine.transition('running');
-      assert.ok(machine.startedAt !== undefined);
-      const firstStartedAt = machine.startedAt;
+      const machine = createMachine()
+      assert.equal(machine.startedAt, undefined)
+      machine.transition('running')
+      assert.ok(machine.startedAt !== undefined)
+      const firstStartedAt = machine.startedAt
 
       // Subsequent transitions should not change startedAt
-      machine.transition('waiting');
-      machine.transition('running');
-      assert.equal(machine.startedAt, firstStartedAt);
-    });
+      machine.transition('waiting')
+      machine.transition('running')
+      assert.equal(machine.startedAt, firstStartedAt)
+    })
 
     it('completedAt and endReason set on terminal transition', () => {
       const machine = createMachine();
@@ -146,14 +225,21 @@ describe('core/runtime/run', () => {
     });
 
     it('failed from running works with error', () => {
-      const machine = createMachine();
-      machine.transition('running');
-      machine.transition('failed', { endReason: 'Model error', error: 'Rate limit exceeded' });
+      const machine = createMachine()
+      machine.transition('running')
+      machine.transition('failed', { endReason: 'Model error', error: 'Rate limit exceeded' })
 
-      assert.equal(machine.status, 'failed');
-      assert.equal(machine.isTerminal, true);
-      assert.equal(machine.endReason, 'Model error');
-    });
+      assert.equal(machine.status, 'failed')
+      assert.equal(machine.isTerminal, true)
+      assert.equal(machine.endReason, 'Model error')
+      const entity = machine.toEntity({
+        id: 'run-error',
+        mode: 'normal',
+        createdAt: '2024-01-01T00:00:00.000Z',
+      })
+      assert.equal(entity.error, 'Rate limit exceeded')
+      assert.notEqual(entity.error, entity.endReason)
+    })
 
     it('assertStatus ok when status matches', () => {
       const machine = createMachine();
@@ -268,28 +354,34 @@ describe('core/runtime/run', () => {
     });
 
     it('all terminal states are absorbing (no outgoing transitions)', () => {
-      const terminalStatuses: RunStatus[] = ['completed', 'failed', 'cancelled', 'interrupted'];
+      const terminalStatuses = [
+        'completed',
+        'failed',
+        'cancelled',
+        'interrupted',
+        'budget_exceeded',
+      ] as const
 
       for (const terminal of terminalStatuses) {
-        const m = createMachine();
-        m.transition('running');
-        m.transition(terminal);
+        const m = createMachine()
+        m.transition('running')
+        m.transition(toRunStatus(terminal))
 
         // Try all possible transitions from terminal state
-        for (const next of ['created', 'running', 'waiting', 'completed', 'failed', 'cancelled', 'interrupted'] as RunStatus[]) {
-          if (next === terminal) continue; // Same state not in VALID_TRANSITIONS anyway
+        for (const next of EXPECTED_RUN_STATUSES) {
+          if (next === terminal) continue
           assert.throws(
-            () => m.transition(next),
+            () => m.transition(toRunStatus(next)),
             (err: Error) => {
-              assert.ok(err instanceof RuntimeError);
-              assert.equal(err.code, 'INVALID_RUN_TRANSITION');
-              return true;
+              assert.ok(err instanceof RuntimeError)
+              assert.equal(err.code, 'INVALID_RUN_TRANSITION')
+              return true
             },
-            `Expected error from ${terminal} -> ${next}`
-          );
+            `Expected error from ${terminal} -> ${next}`,
+          )
         }
       }
-    });
+    })
 
     it('waiting -> running allowed (round-trip)', () => {
       const machine = createMachine();

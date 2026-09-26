@@ -87,4 +87,23 @@ export {
 } from './checkpoint.js';
 
 // Re-export RuntimeError for convenience (used in lifecycle transitions)
-export { RuntimeError } from '../errors/index.js';
+export { RuntimeError } from '../errors/index.js'
+
+// Multi-layer retry controllers
+export {
+  ExecutionRetryController,
+  ToolRecoveryController,
+  RetryCheckpoint,
+  isToolRetryable,
+  type RetryEvent,
+  type RetryEventPayload,
+  type RetryEventType,
+  type RetryLayer,
+  type RetryRunOptions,
+  type RetrySleep,
+  type RetryPredicate,
+  type RetryType,
+  type ExecutionRetryOptions,
+  type ToolRecoveryOptions,
+  type ToolRecoveryRunOptions,
+} from './execution-retry.js'

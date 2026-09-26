@@ -7,15 +7,18 @@
  * - tools：tool_calls 两段增量（验证组装）
  * - args-bad：工具调用且 arguments 非 JSON（验证 args 降级路径）
  * - empty：只发 [DONE]（验证 EMPTY_RESPONSE）
+ * - max-tokens：输出部分内容后以 length 结束（验证截断终态）
+ * - content-filter：输出部分内容后以 content_filter 结束（验证过滤终态）
  * - truncated：流中途关闭不发 [DONE]（验证 STREAM_CLOSED）
  * - usage-trailing：尾部独立 usage chunk（验证延迟到位）
+
  */
 import { createServer, type Server, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { encrypt } from '../../lib/crypto.js';
 import type { BackendConfig } from '../../config/index.js';
 
-export type MockScenario = 'text' | 'reasoning' | 'tools' | 'args-bad' | 'empty' | 'truncated' | 'usage-trailing';
+export type MockScenario = 'text' | 'reasoning' | 'tools' | 'args-bad' | 'empty' | 'max-tokens' | 'content-filter' | 'truncated' | 'usage-trailing';
 
 let server: Server | null = null;
 
@@ -51,8 +54,11 @@ function detectScenario(msg: string): MockScenario {
   if (msg.includes('[scenario:tools]')) return 'tools';
   if (msg.includes('[scenario:reasoning]')) return 'reasoning';
   if (msg.includes('[scenario:truncated]')) return 'truncated';
-  if (msg.includes('[scenario:usage]')) return 'usage-trailing';
-  if (msg.includes('[scenario:empty]')) return 'empty';
+   if (msg.includes('[scenario:usage]')) return 'usage-trailing';
+   if (msg.includes('[scenario:max-tokens]')) return 'max-tokens';
+   if (msg.includes('[scenario:content-filter]')) return 'content-filter';
+   if (msg.includes('[scenario:empty]')) return 'empty';
+
   return 'text';
 }
 
@@ -103,10 +109,21 @@ function writeScenarioStream(res: ServerResponse, scenario: MockScenario): void 
       res.write(chunk(id, {}, 'stop'));
       done();
       break;
-    case 'empty':
-      done();
-      break;
-case 'truncated':
+     case 'max-tokens':
+       res.write(chunk(id, { content: '这是被截断的部分回答' }));
+       res.write(chunk(id, {}, 'length', { prompt_tokens: 12, completion_tokens: 4, total_tokens: 16 }));
+       done();
+       break;
+     case 'content-filter':
+       res.write(chunk(id, { content: '这是被内容过滤器截断的部分回答' }));
+       res.write(chunk(id, {}, 'content_filter', { prompt_tokens: 12, completion_tokens: 4, total_tokens: 16 }));
+       done();
+       break;
+     case 'empty':
+       done();
+       break;
+     case 'truncated':
+
       res.write(chunk(id, { content: '只说了一半' }));
       // 不发 [DONE]，正常 end() — 模拟"EOF 无 [DONE]"断流（STREAM_CLOSED 语义），
       // 避免 destroy() 触发 fetchWithRetry 连接层退避重试导致测试超时

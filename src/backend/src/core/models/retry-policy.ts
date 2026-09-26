@@ -12,7 +12,7 @@
  */
 
 export interface RetryPolicyOptions {
-  /** 最大重试次数（默认 3，即最多 4 次尝试） */
+  /** 最大重试次数（默认 5，即首次 + 5 次重试 = 最多 6 次尝试） */
   maxRetries?: number;
   /** 基础退避毫秒（默认 1000） */
   baseDelayMs?: number;
@@ -26,23 +26,40 @@ export interface RetryPolicyOptions {
 export type RetryablePredicate = (err: unknown) => boolean;
 
 export interface RetryPolicy {
+  /** 最大重试次数（默认 5） */
+  readonly maxRetries: number
+  /** 最大尝试次数（首次 + maxRetries） */
+  readonly maxAttempts: number
   /** 是否允许重试（第 attempt 次失败后，attempt 从 0 开始） */
-  shouldRetry(attempt: number, err: unknown): boolean;
+  shouldRetry(attempt: number, err: unknown): boolean
   /** 计算本次重试前的等待时间（含 jitter），毫秒 */
-  delayMs(attempt: number, retryAfterMs?: number): number;
+  delayMs(attempt: number, retryAfterMs?: number): number
   /** 可中止的等待 */
-  sleep(ms: number, signal?: AbortSignal): Promise<void>;
+  sleep(ms: number, signal?: AbortSignal): Promise<void>
 }
 
-/** 从错误中提取 Retry-After（毫秒）；无效返回 undefined */
+/** 从错误/HTTP 头中提取 Retry-After（毫秒）；无效返回 undefined。
+ *  支持：正数秒字符串（"5" → 5000）、"0"（立即重试 → 0）、HTTP-date
+ *  （"Wed, 21 Oct 2015 07:28:00 GMT" → 与当前时间差毫秒，过去则 0）、
+ *  错误对象上的 retryAfterMs/retryAfter 字段。 */
 export function extractRetryAfterMs(err: unknown): number | undefined {
-  if (!err || typeof err !== 'object') return undefined;
+  if (err === null || err === undefined) return undefined;
+  if (typeof err === 'string') {
+    if (err.trim() === '') return undefined;
+    const numeric = Number(err);
+    if (Number.isFinite(numeric)) return numeric <= 0 ? 0 : numeric * 1000;
+    const parsed = Date.parse(err);
+    if (Number.isFinite(parsed)) return Math.max(0, parsed - Date.now());
+    return undefined;
+  }
+  if (typeof err === 'number') {
+    if (!Number.isFinite(err)) return undefined;
+    return err <= 0 ? 0 : err;
+  }
+  if (typeof err !== 'object') return undefined;
   const e = err as Record<string, unknown>;
   const retryAfter = e.retryAfterMs ?? (e as { retryAfter?: unknown }).retryAfter;
-  if (typeof retryAfter === 'number' && Number.isFinite(retryAfter) && retryAfter > 0) {
-    return retryAfter;
-  }
-  return undefined;
+  return extractRetryAfterMs(retryAfter);
 }
 
 /** 默认可重试判定：429 / 5xx / 网络错误（ModelError.retryable） */
@@ -60,7 +77,7 @@ export function defaultRetryable(err: unknown): boolean {
 }
 
 export function createRetryPolicy(opts: RetryPolicyOptions = {}): RetryPolicy {
-  const maxRetries = opts.maxRetries ?? 3;
+  const maxRetries = opts.maxRetries ?? 5
   const baseDelayMs = opts.baseDelayMs ?? 1000;
   const maxDelayMs = opts.maxDelayMs ?? 10_000;
   const jitter = opts.jitter ?? 0.3;
@@ -71,8 +88,9 @@ export function createRetryPolicy(opts: RetryPolicyOptions = {}): RetryPolicy {
   };
 
   const delayMs: RetryPolicy['delayMs'] = (attempt, retryAfterMs) => {
-    if (retryAfterMs !== undefined && Number.isFinite(retryAfterMs) && retryAfterMs > 0) {
-      return Math.min(retryAfterMs, maxDelayMs);
+    if (retryAfterMs !== undefined && Number.isFinite(retryAfterMs) && retryAfterMs >= 0) {
+      // Retry-After 优先于指数退避；0 表示"立即可重试"（仅对上限封顶）
+      return Math.min(Math.max(retryAfterMs, 0), maxDelayMs);
     }
     // 指数退避：base * 2^attempt，乘性 jitter
     const exp = Math.min(baseDelayMs * Math.pow(2, attempt), maxDelayMs);
@@ -100,5 +118,11 @@ export function createRetryPolicy(opts: RetryPolicyOptions = {}): RetryPolicy {
       signal?.addEventListener('abort', onAbort, { once: true });
     });
 
-  return { shouldRetry, delayMs, sleep };
+  return {
+    maxRetries,
+    maxAttempts: maxRetries + 1,
+    shouldRetry,
+    delayMs,
+    sleep,
+  }
 }

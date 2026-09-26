@@ -259,16 +259,22 @@ describe('core/errors', () => {
       assert.equal(err.name, 'RetryExhaustedError');
     });
 
-    it('toJSON includes exhausted: true', () => {
+    it('toJSON includes exhausted: true and lastError metadata', () => {
+      const lastError = new ModelError('last provider failure', {
+        provider: 'openai',
+        statusCode: 503,
+      })
       const err = new RetryExhaustedError('Done', {
         maxAttempts: 3,
         backoffMs: 1000,
-      });
+        lastError,
+      })
 
-      const json = err.toJSON();
-      assert.equal(json.exhausted, true);
-      assert.equal(json.retryable, false);
-    });
+      const json = err.toJSON()
+      assert.equal(json.exhausted, true)
+      assert.equal(json.retryable, false)
+      assert.equal(json.lastError?.message, 'last provider failure')
+    })
 
     it('isRetryExhaustedError type guard works', () => {
       const err = new RetryExhaustedError('test', { maxAttempts: 3, backoffMs: 100 });

@@ -70,6 +70,34 @@ describe('model-runtime', () => {
       strictEqual(response.finishReason, 'tool_calls');
     });
 
+    it('B4: 无 id tool-call block-start + delta + block-end 累积为单个调用', async () => {
+      // Given
+      const chunks: StreamChunk[] = [
+        { type: 'block-start', index: 7, blockType: 'tool-call', name: 'legacy_tool' },
+        { type: 'tool-call-delta', index: 7, name: 'legacy_tool', argumentsDelta: '{"value":' },
+        { type: 'tool-call-delta', index: 7, name: 'legacy_tool', argumentsDelta: '42}' },
+        {
+          type: 'block-end',
+          index: 7,
+          block: { kind: 'tool-call', id: '', name: 'legacy_tool', arguments: '{"value":42}' },
+        },
+        { type: 'finish', reason: { kind: 'tool_calls' } },
+      ]
+      const stream = async function* () {
+        for (const chunk of chunks) yield chunk
+      }()
+
+      // When
+      const response = await streamToComplete(stream)
+
+      // Then
+      deepStrictEqual(response.toolCalls, [{
+        id: 'call_idx_7',
+        name: 'legacy_tool',
+        arguments: '{"value":42}',
+      }])
+    })
+
     it('handles multiple tool calls', async () => {
       const chunks: StreamChunk[] = [
         { type: 'block-start', index: 0, blockType: 'tool-call', id: 'call_1', name: 'func_a' },
@@ -93,8 +121,37 @@ describe('model-runtime', () => {
       strictEqual(response.toolCalls![1].id, 'call_2');
     });
 
-    it('extracts finish reason from finish chunk', async () => {
-      const finishReasons: ('stop' | 'tool_calls' | 'max-tokens')[] = ['stop', 'tool_calls', 'max-tokens'];
+     it('keeps interleaved parallel tool-call deltas associated by block index', async () => {
+       // Given
+       const chunks: StreamChunk[] = [
+         { type: 'block-start', index: 0, blockType: 'tool-call', id: 'call_a', name: 'func_a' },
+         { type: 'tool-call-delta', index: 0, id: 'call_a', name: 'func_a', argumentsDelta: 'A12' },
+         { type: 'block-start', index: 1, blockType: 'tool-call', id: 'call_b', name: 'func_b' },
+         { type: 'tool-call-delta', index: 0, id: 'call_a', name: 'func_a', argumentsDelta: 'B12' },
+         { type: 'block-end', index: 0, block: { kind: 'tool-call', id: 'call_a', name: 'func_a', arguments: 'A12' } },
+         { type: 'block-end', index: 1, block: { kind: 'tool-call', id: 'call_b', name: 'func_b', arguments: 'B12' } },
+         { type: 'finish', reason: { kind: 'tool_calls' } },
+       ];
+
+       const stream = async function* () {
+         for (const chunk of chunks) yield chunk;
+       }();
+
+       // When
+       const response = await streamToComplete(stream);
+
+       // Then
+       strictEqual(response.toolCalls?.length, 2);
+       deepStrictEqual(response.toolCalls?.map((call) => [call.id, call.arguments]), [
+         ['call_a', 'A12B12'],
+         ['call_b', ''],
+       ]);
+     });
+
+
+     it('extracts finish reason from finish chunk', async () => {
+       const finishReasons: ('stop' | 'tool_calls' | 'max-tokens')[] = ['stop', 'tool_calls', 'max-tokens'];
+
 
       for (const reason of finishReasons) {
         const chunks: StreamChunk[] = [

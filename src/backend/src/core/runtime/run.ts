@@ -6,69 +6,119 @@
  * Pure TypeScript only.
  */
 
-import { RuntimeError } from '../errors/index.js';
+import { RuntimeError } from '../errors/index.js'
 
-/**
- * Run status enum matching the runs table.
- * State machine: created → running ⇄ waiting → completed | failed | cancelled | interrupted
- */
-export type RunStatus =
-  | 'created'
-  | 'running'
-  | 'waiting'
-  | 'completed'
-  | 'failed'
-  | 'cancelled'
-  | 'interrupted';
+/** Run 状态的完整集合 */
+export const RUN_STATUSES = [
+  'created',
+  'running',
+  'waiting',
+  'retry_waiting',
+  'retrying',
+  'verifying',
+  'completed',
+  'failed',
+  'cancelled',
+  'interrupted',
+  'budget_exceeded',
+] as const
+
+export type RunStatus = (typeof RUN_STATUSES)[number]
 
 /**
  * Run mode enum matching the runs table.
  */
-export type RunMode = 'normal' | 'super' | 'workflow' | 'background';
+export type RunMode = 'normal' | 'super' | 'workflow' | 'background'
 
 /**
  * RunEntity interface matching the runs table shape.
  */
 export interface RunEntity {
-  id: string;
-  conversationId?: string;
-  status: RunStatus;
-  mode: RunMode;
-  rootAgentId?: string;
-  startedAt?: string;
-  completedAt?: string;
-  endReason?: string;
-  inputTokens: number;
-  outputTokens: number;
-  totalTokens: number;
-  error?: string;
-  metadata?: Record<string, unknown>;
-  createdAt: string;
+  id: string
+  conversationId?: string
+  status: RunStatus
+  mode: RunMode
+  rootAgentId?: string
+  startedAt?: string
+  completedAt?: string
+  endReason?: string
+  inputTokens: number
+  outputTokens: number
+  totalTokens: number
+  parentRunId?: string | null
+  retryOfRunId?: string | null
+  attempt?: number
+  retryType?: string | null
+  lastUpdatedAt?: string
+  error?: string
+  metadata?: Record<string, unknown>
+  createdAt: string
+}
+
+/** RunStateMachine transition metadata. */
+export interface RunTransitionOptions {
+  endReason?: string
+  error?: string
+  tokenUsage?: {
+    inputTokens: number
+    outputTokens: number
+    totalTokens: number
+  }
 }
 
 /**
  * Valid run state transitions.
  * Key = current state, Value = allowed next states.
  */
-const VALID_RUN_TRANSITIONS: Record<RunStatus, RunStatus[]> = {
+const VALID_RUN_TRANSITIONS: Record<RunStatus, readonly RunStatus[]> = {
   created: ['running'],
-  running: ['waiting', 'completed', 'failed', 'cancelled', 'interrupted'],
-  waiting: ['running', 'completed', 'failed', 'cancelled', 'interrupted'],
+  running: [
+    'waiting',
+    'retry_waiting',
+    'verifying',
+    'completed',
+    'failed',
+    'cancelled',
+    'interrupted',
+    'budget_exceeded',
+  ],
+  waiting: [
+    'running',
+    'retry_waiting',
+    'verifying',
+    'completed',
+    'failed',
+    'cancelled',
+    'interrupted',
+    'budget_exceeded',
+  ],
+  retry_waiting: ['retrying', 'failed', 'cancelled', 'interrupted', 'budget_exceeded'],
+  retrying: ['running', 'waiting', 'failed', 'cancelled', 'interrupted', 'budget_exceeded'],
+  verifying: ['running', 'completed', 'failed', 'cancelled', 'interrupted', 'budget_exceeded'],
   completed: [],
   failed: [],
   cancelled: [],
   interrupted: [],
-};
+  budget_exceeded: [],
+}
 
 /** RUN-001: 校验状态转移是否合法（任何模块改 run 状态前必须先过此函数） */
 export function isValidRunTransition(from: RunStatus, to: RunStatus): boolean {
-  return VALID_RUN_TRANSITIONS[from]?.includes(to) ?? false;
+  return VALID_RUN_TRANSITIONS[from].includes(to)
 }
 
-/**
- * Terminal run states (absorbing).
- */
-const TERMINAL_RUN_STATUSES: RunStatus[] = ['completed', 'failed', 'cancelled', 'interrupted'];
+/** Terminal run states are absorbing. */
+export const TERMINAL_RUN_STATUSES = [
+  'completed',
+  'failed',
+  'cancelled',
+  'interrupted',
+  'budget_exceeded',
+] as const satisfies readonly RunStatus[]
+
+export function isTerminalRunStatus(status: RunStatus): boolean {
+  return TERMINAL_RUN_STATUSES.some((terminalStatus) => terminalStatus === status)
+}
 
 /**
  * RunStateMachine — Pure in-memory state machine for Run lifecycle.
@@ -77,158 +127,134 @@ const TERMINAL_RUN_STATUSES: RunStatus[] = ['completed', 'failed', 'cancelled', 
  * All invalid transitions throw RuntimeError with code 'INVALID_RUN_TRANSITION'.
  */
 export class RunStateMachine {
-  #status: RunStatus = 'created';
-  #startedAt?: string;
-  #completedAt?: string;
-  #endReason?: string;
-  #inputTokens = 0;
-  #outputTokens = 0;
-  #totalTokens = 0;
+  #status: RunStatus = 'created'
+  #startedAt?: string
+  #completedAt?: string
+  #endReason?: string
+  #error?: string
+  #lastUpdatedAt?: string
+  #inputTokens = 0
+  #outputTokens = 0
+  #totalTokens = 0
 
-  /**
-   * Current run status.
-   */
+  /** Current run status. */
   get status(): RunStatus {
-    return this.#status;
+    return this.#status
   }
 
-  /**
-   * Whether the run is in a terminal state.
-   */
+  /** Whether the run is in a terminal state. */
   get isTerminal(): boolean {
-    return TERMINAL_RUN_STATUSES.includes(this.#status);
+    return isTerminalRunStatus(this.#status)
   }
 
-  /**
-   * Whether the run has started (reached running state at least once).
-   */
+  /** Whether the run has started (reached running state at least once). */
   get hasStarted(): boolean {
-    return this.#startedAt !== undefined;
+    return this.#startedAt !== undefined
   }
 
-  /**
-   * Timestamp when run first entered running state (ISO 8601).
-   */
+  /** Timestamp when run first entered running state (ISO 8601). */
   get startedAt(): string | undefined {
-    return this.#startedAt;
+    return this.#startedAt
   }
 
-  /**
-   * Timestamp when run reached a terminal state (ISO 8601).
-   */
+  /** Timestamp when run reached a terminal state (ISO 8601). */
   get completedAt(): string | undefined {
-    return this.#completedAt;
+    return this.#completedAt
   }
 
-  /**
-   * Reason for run termination (set on terminal transition).
-   */
+  /** Reason for run termination. */
   get endReason(): string | undefined {
-    return this.#endReason;
+    return this.#endReason
   }
 
-  /**
-   * Accumulated input tokens.
-   */
+  /** Error carried by the latest transition. */
+  get error(): string | undefined {
+    return this.#error
+  }
+
+  /** Timestamp of the latest state transition. */
+  get lastUpdatedAt(): string | undefined {
+    return this.#lastUpdatedAt
+  }
+
   get inputTokens(): number {
-    return this.#inputTokens;
+    return this.#inputTokens
   }
 
-  /**
-   * Accumulated output tokens.
-   */
   get outputTokens(): number {
-    return this.#outputTokens;
+    return this.#outputTokens
   }
 
-  /**
-   * Accumulated total tokens.
-   */
   get totalTokens(): number {
-    return this.#totalTokens;
+    return this.#totalTokens
   }
 
   /**
    * Attempts to transition to a new status.
-   * Validates transition, updates timestamps, and accumulates token usage.
    *
    * @param next - The status to transition to
    * @param opts - Optional transition metadata
    * @returns The new status after transition
    * @throws {RuntimeError} If transition is invalid (code: 'INVALID_RUN_TRANSITION')
    */
-  transition(
-    next: RunStatus,
-    opts?: {
-      endReason?: string;
-      error?: string;
-      tokenUsage?: { inputTokens: number; outputTokens: number; totalTokens: number };
-    }
-  ): RunStatus {
-    const allowed = VALID_RUN_TRANSITIONS[this.#status];
+  transition(next: RunStatus, opts?: RunTransitionOptions): RunStatus {
+    const allowed = VALID_RUN_TRANSITIONS[this.#status]
     if (!allowed.includes(next)) {
       throw new RuntimeError(`Invalid run transition: ${this.#status} -> ${next}`, {
         code: 'INVALID_RUN_TRANSITION',
         context: { currentState: this.#status, attemptedState: next },
         retryable: false,
-      });
+      })
     }
 
-    // Set startedAt on first transition to running
+    const now = new Date().toISOString()
     if (this.#status !== 'running' && next === 'running' && this.#startedAt === undefined) {
-      this.#startedAt = new Date().toISOString();
+      this.#startedAt = now
     }
-
-    // Handle terminal transitions
-    if (TERMINAL_RUN_STATUSES.includes(next)) {
-      this.#completedAt = new Date().toISOString();
-      if (opts?.endReason) {
-        this.#endReason = opts.endReason;
-      }
+    if (isTerminalRunStatus(next)) {
+      this.#completedAt = now
     }
-
-    // Accumulate token usage if provided
+    if (opts?.endReason !== undefined) {
+      this.#endReason = opts.endReason
+    }
+    if (opts?.error !== undefined) {
+      this.#error = opts.error
+    }
     if (opts?.tokenUsage) {
-      this.#inputTokens += opts.tokenUsage.inputTokens ?? 0;
-      this.#outputTokens += opts.tokenUsage.outputTokens ?? 0;
-      this.#totalTokens += opts.tokenUsage.totalTokens ?? 0;
+      this.#inputTokens += opts.tokenUsage.inputTokens
+      this.#outputTokens += opts.tokenUsage.outputTokens
+      this.#totalTokens += opts.tokenUsage.totalTokens
     }
 
-    this.#status = next;
-    return this.#status;
+    this.#status = next
+    this.#lastUpdatedAt = now
+    return this.#status
   }
 
-  /**
-   * Asserts that the current status matches the expected status.
-   * Throws RuntimeError if mismatch.
-   *
-   * @param expected - Expected status
-   * @throws {RuntimeError} If current status !== expected (code: 'INVALID_RUN_TRANSITION')
-   */
+  /** Assert that the current status matches the expected status. */
   assertStatus(expected: RunStatus): void {
     if (this.#status !== expected) {
       throw new RuntimeError(`Run status mismatch: expected ${expected}, got ${this.#status}`, {
         code: 'INVALID_RUN_TRANSITION',
         context: { expected, actual: this.#status },
         retryable: false,
-      });
+      })
     }
   }
 
-  /**
-   * Creates a RunEntity snapshot from current state.
-   * Useful for persistence.
-   *
-   * @param base - Base entity fields (id, conversationId, mode, rootAgentId, metadata, createdAt)
-   * @returns Complete RunEntity
-   */
+  /** Create a RunEntity snapshot from current state. */
   toEntity(base: {
-    id: string;
-    conversationId?: string;
-    mode: RunMode;
-    rootAgentId?: string;
-    metadata?: Record<string, unknown>;
-    createdAt: string;
+    id: string
+    conversationId?: string
+    mode: RunMode
+    rootAgentId?: string
+    parentRunId?: string | null
+    retryOfRunId?: string | null
+    attempt?: number
+    retryType?: string | null
+    metadata?: Record<string, unknown>
+    createdAt: string
+    lastUpdatedAt?: string
   }): RunEntity {
     return {
       ...base,
@@ -239,21 +265,21 @@ export class RunStateMachine {
       inputTokens: this.#inputTokens,
       outputTokens: this.#outputTokens,
       totalTokens: this.#totalTokens,
-      error: this.#status === 'failed' ? this.#endReason : undefined,
-    };
+      lastUpdatedAt: this.#lastUpdatedAt ?? base.lastUpdatedAt ?? base.createdAt,
+      error: this.#error,
+    }
   }
 
-  /**
-   * Resets the state machine to initial state.
-   * Only for testing purposes.
-   */
+  /** Reset the state machine to its initial state. */
   reset(): void {
-    this.#status = 'created';
-    this.#startedAt = undefined;
-    this.#completedAt = undefined;
-    this.#endReason = undefined;
-    this.#inputTokens = 0;
-    this.#outputTokens = 0;
-    this.#totalTokens = 0;
+    this.#status = 'created'
+    this.#startedAt = undefined
+    this.#completedAt = undefined
+    this.#endReason = undefined
+    this.#error = undefined
+    this.#lastUpdatedAt = undefined
+    this.#inputTokens = 0
+    this.#outputTokens = 0
+    this.#totalTokens = 0
   }
 }

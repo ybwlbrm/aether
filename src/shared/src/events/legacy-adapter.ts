@@ -23,6 +23,7 @@ import type {
   OutputDeltaPayload,
   ToolEventPayloadV2,
   TokenUsagePayload,
+  RetryEventPayload,
   AGENT_EVENT_TYPES,
   RunEndReason,
   TaskEndReason,
@@ -104,6 +105,12 @@ const V2_TO_V1_TYPE: Readonly<Partial<Record<AgentEvent['type'], AgentEventType>
   'tool.error': 'tool.error',
   'tool.retry': 'tool.retry',
   'token.usage': 'token',
+  'attempt.started': 'agent.started',
+  'retry.scheduled': 'agent.retry',
+  'retry.started': 'agent.retry',
+  'retry.completed': 'agent.retry',
+  'retry.failed': 'agent.retry',
+  'retry.exhausted': 'agent.retry',
 };
 
 /** 从 v2 payload 提取 v1 兼容字段 */
@@ -204,6 +211,28 @@ function extractV1Fields(event: AgentEvent): Partial<AgentEventEnvelope> {
       const p = event.payload as TokenUsagePayload;
       base.metadata = { ...base.metadata, tokenUsage: p };
       break;
+    }
+    case 'attempt.started':
+    case 'retry.scheduled':
+    case 'retry.started':
+    case 'retry.completed':
+    case 'retry.failed':
+    case 'retry.exhausted': {
+      const p: RetryEventPayload = event.payload
+      base.status = event.type === 'retry.failed' || event.type === 'retry.exhausted' ? 'error' : 'retry'
+      base.content = p.reason
+      base.metadata = {
+        ...base.metadata,
+        retryAttempt: p.attempt,
+        maxAttempts: p.maxAttempts,
+        retryType: p.retryType,
+        retryLayer: p.retryLayer,
+        errorCode: p.errorCode,
+        statusCode: p.statusCode,
+        delayMs: p.delayMs,
+        nextRetryAt: p.nextRetryAt,
+      }
+      break
     }
   }
 
@@ -393,6 +422,64 @@ function buildV2Payload(envelope: AgentEventEnvelope, v2Type: AgentEvent['type']
         totalTokens: tu?.totalTokens ?? 0,
         model: tu?.model,
       };
+    }
+    case 'attempt.started':
+    case 'retry.started':
+    case 'retry.completed': {
+      const attempt = typeof envelope.metadata?.retryAttempt === 'number' ? envelope.metadata.retryAttempt : 1
+      const maxAttempts = typeof envelope.metadata?.maxAttempts === 'number' ? envelope.metadata.maxAttempts : attempt
+      const retryType = envelope.metadata?.retryType === 'manual' ? 'manual' : 'automatic'
+      const retryLayer = envelope.metadata?.retryLayer === 'provider' || envelope.metadata?.retryLayer === 'tool'
+        ? envelope.metadata.retryLayer
+        : 'task'
+      return {
+        runId: 'legacy',
+        taskId: envelope.taskId,
+        attempt,
+        maxAttempts,
+        retryType,
+        retryLayer,
+        ...(typeof envelope.content === 'string' ? { reason: envelope.content } : {}),
+      }
+    }
+    case 'retry.scheduled': {
+      const attempt = typeof envelope.metadata?.retryAttempt === 'number' ? envelope.metadata.retryAttempt : 1
+      const maxAttempts = typeof envelope.metadata?.maxAttempts === 'number' ? envelope.metadata.maxAttempts : attempt
+      const delayMs = typeof envelope.metadata?.delayMs === 'number' ? envelope.metadata.delayMs : 0
+      const nextRetryAt = typeof envelope.metadata?.nextRetryAt === 'string'
+        ? envelope.metadata.nextRetryAt
+        : new Date(0).toISOString()
+      return {
+        runId: 'legacy',
+        taskId: envelope.taskId,
+        attempt,
+        maxAttempts,
+        retryType: envelope.metadata?.retryType === 'manual' ? 'manual' : 'automatic',
+        retryLayer: envelope.metadata?.retryLayer === 'provider' || envelope.metadata?.retryLayer === 'tool'
+          ? envelope.metadata.retryLayer
+          : 'task',
+        reason: envelope.content ?? 'retry scheduled',
+        delayMs,
+        nextRetryAt,
+      }
+    }
+    case 'retry.failed':
+    case 'retry.exhausted': {
+      const attempt = typeof envelope.metadata?.retryAttempt === 'number' ? envelope.metadata.retryAttempt : 1
+      const maxAttempts = typeof envelope.metadata?.maxAttempts === 'number' ? envelope.metadata.maxAttempts : attempt
+      return {
+        runId: 'legacy',
+        taskId: envelope.taskId,
+        attempt,
+        maxAttempts,
+        retryType: envelope.metadata?.retryType === 'manual' ? 'manual' : 'automatic',
+        retryLayer: envelope.metadata?.retryLayer === 'provider' || envelope.metadata?.retryLayer === 'tool'
+          ? envelope.metadata.retryLayer
+          : 'task',
+        reason: envelope.content ?? 'retry failed',
+        ...(typeof envelope.metadata?.errorCode === 'string' ? { errorCode: envelope.metadata.errorCode } : {}),
+        ...(typeof envelope.metadata?.statusCode === 'number' ? { statusCode: envelope.metadata.statusCode } : {}),
+      }
     }
   }
 }

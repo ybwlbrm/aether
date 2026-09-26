@@ -28,10 +28,12 @@ export interface ToolErrorResult {
   /** Error details */
   error: {
     /** Human-readable error message */
-    message: string;
+    message: string
     /** Optional error code for programmatic handling */
-    code?: string;
-  };
+    code?: string
+    /** Whether a caller may retry the tool with the same input */
+    retryable?: boolean
+  }
   /** Execution duration in milliseconds */
   durationMs: number;
 }
@@ -103,7 +105,7 @@ export function successResult(
  */
 export function errorResult(
   toolName: string,
-  error: { message: string; code?: string },
+  error: { message: string; code?: string; retryable?: boolean },
   durationMs: number
 ): ToolErrorResult {
   return {
@@ -111,7 +113,7 @@ export function errorResult(
     toolName,
     error,
     durationMs,
-  };
+  }
 }
 
 /**

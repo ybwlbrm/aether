@@ -55,6 +55,12 @@ import {
   ToolErrorEvent,
   ToolRetryEvent,
   TokenUsageEvent,
+  AttemptStartedEvent,
+  RetryScheduledEvent,
+  RetryStartedEvent,
+  RetryCompletedEvent,
+  RetryFailedEvent,
+  RetryExhaustedEvent,
 } from './events.js';
 import { toLegacy, toV2, verifyRoundTrip } from './legacy-adapter.js';
 import type { AgentEventEnvelope } from '../agent-event.js';
@@ -74,7 +80,7 @@ function baseEvent(overrides: Partial<BaseEvent> = {}): BaseEvent {
 }
 
 describe('v2 AgentEvent protocol', () => {
-  describe('all 37 event types constructible with correct discriminant', () => {
+  describe('all 44 event types constructible with correct discriminant', () => {
     const eventConstructors: Array<{ type: AgentEvent['type']; create: () => AgentEvent }> = [
       { type: 'run.created', create: () => ({ ...baseEvent(), type: 'run.created', payload: {} }) as RunCreatedEvent },
       { type: 'run.started', create: () => ({ ...baseEvent(), type: 'run.started', payload: {} }) as RunStartedEvent },
@@ -119,11 +125,18 @@ describe('v2 AgentEvent protocol', () => {
       { type: 'tool.retry', create: () => ({ ...baseEvent(), type: 'tool.retry', payload: { toolName: 'read_file', toolInput: 'path', status: 'retry' as const } }) as ToolRetryEvent },
 
       { type: 'token.usage', create: () => ({ ...baseEvent(), type: 'token.usage', payload: { inputTokens: 100, outputTokens: 200, totalTokens: 300 } }) as TokenUsageEvent },
+
+      { type: 'attempt.started', create: () => ({ ...baseEvent(), type: 'attempt.started', payload: { runId: 'run-1', taskId: 'task-1', attempt: 1, maxAttempts: 9, retryType: 'automatic', retryLayer: 'task' } }) as AttemptStartedEvent },
+      { type: 'retry.scheduled', create: () => ({ ...baseEvent(), type: 'retry.scheduled', payload: { runId: 'run-1', taskId: 'task-1', attempt: 1, maxAttempts: 9, retryType: 'automatic', retryLayer: 'task', reason: 'temporary failure', errorCode: 'NETWORK_ERROR', delayMs: 100, nextRetryAt: '2026-09-05T00:00:00.100Z' } }) as RetryScheduledEvent },
+      { type: 'retry.started', create: () => ({ ...baseEvent(), type: 'retry.started', payload: { runId: 'run-1', taskId: 'task-1', attempt: 2, maxAttempts: 9, retryType: 'automatic', retryLayer: 'task', reason: 'temporary failure', delayMs: 0, nextRetryAt: '2026-09-05T00:00:00.000Z' } }) as RetryStartedEvent },
+      { type: 'retry.completed', create: () => ({ ...baseEvent(), type: 'retry.completed', payload: { runId: 'run-1', taskId: 'task-1', attempt: 2, maxAttempts: 9, retryType: 'automatic', retryLayer: 'task', reason: 'recovered' } }) as RetryCompletedEvent },
+      { type: 'retry.failed', create: () => ({ ...baseEvent(), type: 'retry.failed', payload: { runId: 'run-1', taskId: 'task-1', attempt: 1, maxAttempts: 9, retryType: 'automatic', retryLayer: 'task', reason: 'temporary failure', errorCode: 'NETWORK_ERROR' } }) as RetryFailedEvent },
+      { type: 'retry.exhausted', create: () => ({ ...baseEvent(), type: 'retry.exhausted', payload: { runId: 'run-1', taskId: 'task-1', attempt: 9, maxAttempts: 9, retryType: 'automatic', retryLayer: 'task', reason: 'all attempts failed', errorCode: 'RETRY_EXHAUSTED' } }) as RetryExhaustedEvent },
     ];
 
-    it('AGENT_EVENT_TYPES has exactly 38 entries', () => {
-      assert.equal(AGENT_EVENT_TYPES.length, 38);
-    });
+    it('AGENT_EVENT_TYPES has exactly 44 entries', () => {
+      assert.equal(AGENT_EVENT_TYPES.length, 44)
+    })
 
     it('each event type constructs and matches its discriminant', () => {
       for (const { type, create } of eventConstructors) {
@@ -133,7 +146,7 @@ describe('v2 AgentEvent protocol', () => {
       }
     });
 
-    it('AGENT_EVENT_TYPES contains all 38 discriminants in correct order', () => {
+    it('AGENT_EVENT_TYPES contains all 44 discriminants in correct order', () => {
       const expected = [
         'run.created', 'run.started', 'run.paused', 'run.resumed', 'run.completed', 'run.failed', 'run.cancelled', 'run.interrupted',
         'task.started', 'task.plan', 'task.progress', 'task.ask-confirm', 'task.completed', 'task.cancelled', 'task.failed',
@@ -142,9 +155,10 @@ describe('v2 AgentEvent protocol', () => {
         'agent.output.delta', 'agent.output.completed',
         'tool.started', 'tool.progress', 'tool.completed', 'tool.error', 'tool.retry',
         'token.usage',
-      ];
-      assert.deepEqual([...AGENT_EVENT_TYPES], expected);
-    });
+        'attempt.started', 'retry.scheduled', 'retry.started', 'retry.completed', 'retry.failed', 'retry.exhausted',
+      ]
+      assert.deepEqual([...AGENT_EVENT_TYPES], expected)
+    })
   });
 
   describe('exhaustive switching on AgentEvent union', () => {
@@ -190,11 +204,17 @@ describe('v2 AgentEvent protocol', () => {
         case 'tool.error': return 'tool-error';
         case 'tool.retry': return 'tool-retry';
         case 'token.usage': return 'token-usage';
+        case 'attempt.started': return 'attempt-started';
+        case 'retry.scheduled': return 'retry-scheduled';
+        case 'retry.started': return 'retry-started';
+        case 'retry.completed': return 'retry-completed';
+        case 'retry.failed': return 'retry-failed';
+        case 'retry.exhausted': return 'retry-exhausted';
         default: return assertNever(event);
       }
     }
 
-    it('exhaustive switch compiles and handles all 37 types', () => {
+    it('exhaustive switch compiles and handles all 44 types', () => {
       const sampleEvent = { ...baseEvent(), type: 'task.started' as const, payload: { status: 'started' as const } };
       const result = handleEventExhaustively(sampleEvent);
       assert.equal(result, 'task-started');
@@ -430,5 +450,34 @@ describe('v2 AgentEvent protocol', () => {
       };
       assert.equal(event.payload.totalTokens, 300);
     });
-  });
-});
+
+    it('Retry 事件携带 run/task、attempt、layer 与调度字段', () => {
+      const event: RetryScheduledEvent = {
+        ...baseEvent(),
+        type: 'retry.scheduled',
+        payload: {
+          runId: 'run-1',
+          taskId: 'task-1',
+          attempt: 2,
+          maxAttempts: 9,
+          retryType: 'automatic',
+          retryLayer: 'task',
+          reason: 'temporary failure',
+          errorCode: 'RATE_LIMIT',
+          statusCode: 429,
+          delayMs: 250,
+          nextRetryAt: '2026-09-05T00:00:00.250Z',
+        },
+      }
+      assert.equal(event.payload.runId, 'run-1')
+      assert.equal(event.payload.taskId, 'task-1')
+      assert.equal(event.payload.attempt, 2)
+      assert.equal(event.payload.maxAttempts, 9)
+      assert.equal(event.payload.retryType, 'automatic')
+      assert.equal(event.payload.retryLayer, 'task')
+      assert.equal(event.payload.statusCode, 429)
+      assert.equal(event.payload.delayMs, 250)
+      assert.ok(event.payload.nextRetryAt)
+    })
+  })
+})

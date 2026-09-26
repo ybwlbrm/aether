@@ -3,7 +3,7 @@ import type { BackendConfig } from '../../config/index.js';
 import type { SyncConfig } from './sync-config.js';
 import { getDb, saveDb } from '../../db/client.js';
 import { conversations, messages } from '../../db/schema/index.js';
-import { eq, desc } from 'drizzle-orm';
+import { eq, sql } from 'drizzle-orm';
 import { randomUUID } from 'node:crypto';
 import { getProviderByCapability } from '../../lib/provider.js';
 import { fileTools, executeFileTool } from '../../lib/files.js';
@@ -29,11 +29,54 @@ import { RunLifecycleManager } from '../../core/runtime/index.js';
 import { budgetFromAgentLimits } from '../../core/runtime/execution-loop.js';
 // 统一 ExecutionLoop：唯一生产循环控制器（Mobile Remote 命令不再自建 while 循环）
 import { runExecutionLoop, type ExecutionLoopDeps, type ExecutionBudget } from '../../core/runtime/execution-loop.js';
+import { mapExecutionLoopResult } from './command-outcome.js'
+import {
+  finalizeRemoteCommand,
+  updateRemoteCommandTerminal,
+  type RemoteCommandTerminalStatus,
+} from './remote-command-terminal.js'
+import { persistAssistantToolCallMessage, persistToolResultMessage, rebuildProviderMessages } from '../../lib/message-history.js';
+import {
+  createRemoteRunSignal,
+  runCancellable,
+  throwIfRemoteRunCancelled,
+  type RemoteCommandInput,
+} from './command-cancellation.js'
 // 15.1 收口：Mobile Stop 必须真正取消 Run —— Remote Run 注册到 RunCancellationRegistry，
 // /api/runs/:runId/cancel → abort AbortController → execution-loop 收到 cancelled
 import { runCancellationRegistry } from '../../lib/run-cancellation-registry.js';
-import type { ModelRequest } from '../../core/models/index.js';
 import type { StreamChunk } from '@pacc/shared';
+
+type RemoteToolArguments = {
+  readonly [key: string]: unknown
+  readonly command?: string
+  readonly workdir?: string
+  readonly timeout?: number
+  readonly pattern?: string
+  readonly path?: string
+  readonly include?: string
+  readonly maxResults?: number
+  readonly query?: string
+  readonly url?: string
+  readonly format?: string
+  readonly filePath?: string
+  readonly code?: string
+  readonly language?: string
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function parseRemoteToolArguments(value: string): RemoteToolArguments {
+  try {
+    const parsed: unknown = JSON.parse(value || '{}')
+    return isRecord(parsed) ? parsed : {}
+  } catch (error: unknown) {
+    console.warn('[Sync] 工具参数解析失败，按空参数继续:', error instanceof Error ? error.message : error)
+    return {}
+  }
+}
 
 // ============================================================
 // 处理远程命令（手机端发来的指令）
@@ -42,7 +85,7 @@ import type { StreamChunk } from '@pacc/shared';
 export async function processRemoteCommand(
   sb: SupabaseClient,
   cfg: SyncConfig,
-  command: any,
+  command: RemoteCommandInput,
   backendConfig: BackendConfig
 ): Promise<void> {
   const db = getDb();
@@ -51,7 +94,10 @@ export async function processRemoteCommand(
   const existingConvId = command.conversation_id;
   // P0-04 收口：runId 提升到函数作用域，供外层 catch 写终态
   let runTaskId = '';
+  let runConversationId: string | null = null;
+  let runTerminalStatus: RemoteCommandTerminalStatus | null = null;
   let runLifecycle: RunLifecycleManager | null = null;
+  let runAbortController: AbortController | null = null;
 
   // P0-1: 解析并剥离手机端附加的模式/Level/开关前缀 [mode=X][level=Y][deep=Z][web=W][loop=L]
   let remoteMode = 'normal';
@@ -149,6 +195,7 @@ export async function processRemoteCommand(
         updatedAt: now0,
       }).run();
     }
+    runConversationId = convId
 
     // 保存用户消息到本地（含文件附件处理）
     let userMsgId = randomUUID();
@@ -196,13 +243,18 @@ export async function processRemoteCommand(
       }
     }
 
-    db.insert(messages).values({
-      id: userMsgId,
-      conversationId: convId,
-      role: 'user',
-      content: storedContent,
-      createdAt: now,
-    }).run();
+     const userSeq = (db.select({ maxSeq: sql<number>`COALESCE(MAX(${messages.seq}), 0)` })
+       .from(messages)
+       .where(eq(messages.conversationId, convId))
+       .get()?.maxSeq ?? 0) + 1
+     db.insert(messages).values({
+       id: userMsgId,
+       conversationId: convId,
+       role: 'user',
+       content: storedContent,
+       seq: userSeq,
+       createdAt: now,
+     }).run();
 
     // P0-2: 立即把 conversation_id 写回 remote_commands，让桌面端能立刻开始轮询导航
     try {
@@ -223,9 +275,8 @@ export async function processRemoteCommand(
       try {
         // 幂等性检查：若 remote_commands 已有 conversation_id，说明该命令已部分处理过，
         // 复用该 conversation_id 而非创建新对话，防止重复。
-        let effectiveConvId = convId;
-        let effectiveUserMsgId = userMsgId;
-        let isRetryOfExisting = false;
+         let effectiveConvId = convId;
+         let effectiveUserMsgId = userMsgId;
 
         if (attempt > 1) {
           // 重试时，从远程命令读取已分配的 conversation_id（若有）
@@ -235,9 +286,8 @@ export async function processRemoteCommand(
             .eq('id', commandId)
             .single();
           if (cmdCheck?.conversation_id) {
-            effectiveConvId = cmdCheck.conversation_id;
-            isRetryOfExisting = true;
-            console.log(`[Sync] 重试第 ${attempt} 次：复用已有 conversation_id=${effectiveConvId}`);
+             effectiveConvId = cmdCheck.conversation_id;
+             console.log(`[Sync] 重试第 ${attempt} 次：复用已有 conversation_id=${effectiveConvId}`);
           }
         }
 
@@ -274,7 +324,10 @@ export async function processRemoteCommand(
         }
 
         // 步骤 3：同步历史消息（复用现有对话时）
-        const allHist = db.select().from(messages).where(eq(messages.conversationId, effectiveConvId)).orderBy(messages.createdAt).all();
+         const allHist = db.select().from(messages)
+           .where(eq(messages.conversationId, effectiveConvId))
+           .orderBy(messages.seq, messages.createdAt)
+           .all();
         const histToSync = allHist.filter(h => h.id !== effectiveUserMsgId);
         if (histToSync.length > 0) {
           const BATCH = 100;
@@ -344,9 +397,10 @@ export async function processRemoteCommand(
     const model = provider.defaultModel;
     const history = db.select()
       .from(messages)
-      .where(eq(messages.conversationId, convId))
-      .orderBy(messages.createdAt)
-      .all()
+       .where(eq(messages.conversationId, convId))
+       .orderBy(messages.seq, messages.createdAt)
+       .all()
+
       // Q4 优化：上下文窗口管理 — 限制历史消息数量（与桌面对话框 MAX_HISTORY=50 对齐）。
       // 全量历史会膨胀 prompt token，显著拖慢首 token 响应。
       .slice(-50);
@@ -360,7 +414,10 @@ export async function processRemoteCommand(
     const permissionLevel = typeof settings.permissionLevel === 'number' ? settings.permissionLevel : 2;
 
     // 加载 MCP 工具（与文件工具合并）
-    const getMcpServers = () => db.select().from(mcpServers).all() as any[];
+     const getMcpServers = () => db.select().from(mcpServers).all().map((server) => ({
+       ...server,
+       timeout: server.timeout ?? 5000,
+     }));
     const mcpTools = await listMcpTools(getMcpServers);
     const allTools: Array<{ type: 'function'; function: { name: string; description?: string; parameters?: unknown } }> = [
       ...(fileTools as Array<{ type: 'function'; function: { name: string; description?: string; parameters?: unknown } }>),
@@ -408,19 +465,10 @@ export async function processRemoteCommand(
 ## 重要规则
 - **工具调用的结果（如 read_file、list_files 等）已由系统直接展示给用户，请勿在回答中重复输出工具结果的完整内容。只需基于结果进行分析、总结或给出下一步建议。**`;
 
-    const apiMessages: any[] = [
-      { role: 'system', content: systemPrompt },
-      ...history.map(m => {
-        const msg: any = { role: m.role, content: m.content };
-        if (m.role === 'assistant' && m.toolCalls) {
-          try { msg.tool_calls = JSON.parse(m.toolCalls); } catch { /* ignore */ }
-        }
-        if (m.role === 'tool' && m.toolCalls) {
-          try { msg.tool_call_id = JSON.parse(m.toolCalls).id; } catch { /* ignore */ }
-        }
-        return msg;
-      }),
-    ];
+     const apiMessages: Array<Record<string, unknown>> = [
+       { role: 'system', content: systemPrompt },
+       ...rebuildProviderMessages(history),
+     ];
 
     // 检测用户消息中的图片 data URL，转为多模态格式（AI 才能看到图片）
     const lastUserMsg = apiMessages.slice().reverse().find(m => m.role === 'user');
@@ -433,8 +481,8 @@ export async function processRemoteCommand(
       }
       if (images.length > 0) {
         // 去掉 content 中的图片 markdown，转为多模态 content parts
-        const textContent = lastUserMsg.content.replace(/!\[([^\]]*)\]\((data:image\/[^)]+)\)/g, '').trim() || '用户上传了图片';
-        const contentParts: any[] = [{ type: 'text', text: textContent }];
+         const textContent = lastUserMsg.content.replace(/!\[([^\]]*)\]\((data:image\/[^)]+)\)/g, '').trim() || '用户上传了图片';
+        const contentParts: Array<Record<string, unknown>> = [{ type: 'text', text: textContent }];
         for (const img of images.slice(0, 10)) {
           contentParts.push({ type: 'image_url', image_url: { url: img } });
         }
@@ -447,21 +495,20 @@ export async function processRemoteCommand(
     // §30/§31 收口：预算统一来源 —— budgetFromAgentLimits（Remote 无显式 AgentDefinition limits，
     // 走统一 Normal/Loop 基线预算，循环模式默认上限收敛到统一函数，不再散落 30 硬编码）
     const unifiedBudget = budgetFromAgentLimits(undefined, !!remoteLoop);
-    let maxTurns = unifiedBudget.maxTurns;
-    let lastErr: string = '';
     let streamMsgId: string = ''; // 流式消息 ID，在循环外定义，最终使用
     let lastToolResult = ''; // 最近一次工具执行结果，用于去重
-    // §16 修复：流中断标记（提升到函数级作用域，供 while 循环外收尾判断）
-    let streamInterrupted = false;
+    let executionError = ''; // ExecutionLoop 真实错误，用于失败终态回传
 
     // 创建 EventBus 用于发射活动事件（桌面端 ActivityStream 消费）
     const eventBus = createEventBus(getDb(), undefined, () => saveDb(backendConfig));
     runTaskId = randomUUID();
     // 15.1 收口：Mobile Stop 必须真正取消 Run —— 注册 run-scoped AbortController，
     // 使 /api/runs/:runId/cancel（runCancellationRegistry.cancel）能中止执行流。
-    const runAbortController = new AbortController();
+    const controller = new AbortController()
+    runAbortController = controller
+    const runSignal = createRemoteRunSignal(controller)
     try {
-      runCancellationRegistry.register(runTaskId, convId, runAbortController);
+      runCancellationRegistry.register(runTaskId, convId, controller)
     } catch (e: unknown) {
       console.warn('[Sync] 取消注册失败（不影响执行）:',
         e instanceof Error ? e.message : String(e));
@@ -477,17 +524,26 @@ export async function processRemoteCommand(
         metadata: { source: 'remote-command', commandId },
       });
     } catch (e: unknown) {
-      console.warn('[Sync] runs 行创建失败（不影响远程命令执行）:',
-        e instanceof Error ? e.message : String(e));
+      const createError = e instanceof Error ? e.message : String(e)
+      const errorMessage = `Run 创建失败: ${createError}`
+      runLifecycle = null
+      try { runCancellationRegistry.unregister(runTaskId) } catch (unregisterError: unknown) {
+        console.warn('[Sync] Run 创建失败后清理取消注册失败:', unregisterError instanceof Error ? unregisterError.message : unregisterError)
+      }
+      throw new Error(errorMessage)
     }
     // P0-A16: 回填 run_id/task_id 到 remote_commands（移动端 SyncState 可追踪本次执行）
     void sb.from('remote_commands').update({
       run_id: runTaskId,
       task_id: runTaskId,
     }).eq('id', commandId).then(
-      () => { /* 回填成功 */ },
+      ({ error }) => {
+        if (error) {
+          console.warn('[Sync] run_id 回填失败（不阻塞）:', error.message)
+        }
+      },
       (e: unknown) => console.warn('[Sync] run_id 回填失败（不阻塞）:', e instanceof Error ? e.message : e),
-    );
+    )
     eventBus.emit(convId, 'task.started', {
       taskId: runTaskId, agentId: 'main', agentType: 'conversation',
       content: content.slice(0, 200),
@@ -541,22 +597,47 @@ export async function processRemoteCommand(
     // 流式消息用最终消息 ID —— 全程 upsert 同一条，不产生重复
     streamMsgId = randomUUID();
     // 立即在本地 DB 插入空消息占位（电脑端可实时看到内容增长）
-    try {
-      db.insert(messages).values({
-        id: streamMsgId,
-        conversationId: convId,
-        role: 'assistant',
-        content: '',
-        createdAt: new Date().toISOString(),
-      }).run();
-    } catch { /* 已存在则忽略 */ }
+     try {
+       const streamSeq = (db.select({ maxSeq: sql<number>`COALESCE(MAX(${messages.seq}), 0)` })
+         .from(messages)
+         .where(eq(messages.conversationId, convId))
+         .get()?.maxSeq ?? 0) + 1
+       db.insert(messages).values({
+         id: streamMsgId,
+         conversationId: convId,
+         role: 'assistant',
+         content: '',
+         seq: streamSeq,
+         createdAt: new Date().toISOString(),
+       }).run();
+     } catch { /* 已存在则忽略 */ }
+
 
     // 流式累积（供 onChunk 副作用转发 + 节流同步）
     let accumulatedContentForStream = '';
     let reasoningContentForStream = '';
 
     // 统一 ExecutionLoop（唯一生产循环控制器；Mobile 不再自建 while 循环）
-    const deps: ExecutionLoopDeps = {
+     const deps: ExecutionLoopDeps = {
+       onAssistantToolCalls: (message) => {
+         const assistantMsgId = persistAssistantToolCallMessage(db, convId, message)
+         flushChain = flushChain.then(async () => {
+           try {
+             await sb.from('messages_sync').upsert({
+               id: assistantMsgId,
+               conversation_id: convId,
+               device_id: cfg.deviceId,
+               user_id: command.user_id ?? null,
+               role: 'assistant',
+               content: message.content,
+               tool_calls: JSON.stringify(message.tool_calls),
+               created_at: new Date().toISOString(),
+             }, { onConflict: 'id' })
+           } catch (syncError: unknown) {
+             console.warn('[Sync] assistant.tool_calls 同步失败:', syncError instanceof Error ? syncError.message : String(syncError))
+           }
+         }).catch(() => undefined)
+       },
       model: runtime,
       hasTools: activeTools.length > 0,
       buildRequest: (msgs, _turn) => ({
@@ -565,62 +646,88 @@ export async function processRemoteCommand(
         messages: msgs,
         tools: activeTools,
         ...(remoteDeep ? { thinking: true } : {}),
-        signal: AbortSignal.timeout(300000), // 5分钟超时
-      } as ModelRequest),
+        signal: runSignal,
+      }),
       executeTool: async (tool) => {
-        // 工具执行副作用（MCP/文件/命令等 + Supabase 同步 + eventBus）
-        const funcName = tool.name;
-        let args: any = {};
-        try { args = JSON.parse(tool.arguments || '{}'); } catch { /* ignore */ }
+        const funcName = tool.name
+        const args = parseRemoteToolArguments(tool.arguments || '{}')
+        throwIfRemoteRunCancelled(runSignal)
         eventBus.emit(convId, 'tool.started', {
-          taskId: runTaskId, agentId: 'main', agentType: 'conversation',
-          status: 'started', tool: buildToolPayload(funcName, args),
-        });
-        const mcpTool = mcpTools.find(t => t.name === funcName);
-        let result: string;
-        if (mcpTool) {
-          try {
-            result = await callMcpTool(mcpTool.serverName, funcName.slice(mcpTool.serverName.length + 1), args, getMcpServers, permissionLevel);
-          } catch (e: unknown) {
-            result = `MCP 工具调用失败: ${e instanceof Error ? e.message : String(e)}`;
+          taskId: runTaskId,
+          agentId: 'main',
+          agentType: 'conversation',
+          status: 'started',
+          tool: buildToolPayload(funcName, args),
+        })
+
+        const result = await runCancellable(async (activeSignal) => {
+          const mcpTool = mcpTools.find((toolDefinition) => toolDefinition.name === funcName)
+          if (mcpTool) {
+            try {
+              return await callMcpTool(
+                mcpTool.serverName,
+                funcName.slice(mcpTool.serverName.length + 1),
+                args,
+                getMcpServers,
+                permissionLevel,
+                activeSignal,
+              )
+            } catch (error: unknown) {
+              throwIfRemoteRunCancelled(activeSignal)
+              return `MCP 工具调用失败: ${error instanceof Error ? error.message : String(error)}`
+            }
           }
-        } else {
+
           try {
             if (funcName === 'execute_command') {
-              result = await executeCommand(args.command, args.workdir, args.timeout, allowedDirs, permissionLevel, defaultDir);
-              addCommandHistory({ command: args.command || '', output: result, duration: 0, success: !result.startsWith('错误:'), source: 'agent' });
-            } else if (funcName === 'grep') {
-              result = executeGrep(args.pattern, args.path, args.include, args.maxResults, allowedDirs, permissionLevel, defaultDir);
-            } else if (funcName === 'glob') {
-              result = executeGlob(args.pattern, args.path, allowedDirs, permissionLevel, defaultDir);
-            } else if (funcName === 'web_search') {
-              result = await executeWebSearch(args.query, args.maxResults);
-            } else if (funcName === 'web_fetch') {
-              result = await executeWebFetch(args.url, args.format, allowedDirs, permissionLevel, defaultDir);
-            } else if (funcName === 'lsp_diagnostics') {
-              result = await executeLspDiagnostics(args.filePath, allowedDirs, permissionLevel, defaultDir);
-            } else if (funcName === 'run_tests') {
-              result = await executeRunTests(args.command, args.path, args.timeout, allowedDirs, permissionLevel, defaultDir);
-            } else if (funcName === 'code_review') {
-              result = executeCodeReview(args.filePath, args.code, args.language, allowedDirs, permissionLevel, defaultDir);
-            } else {
-              result = await executeFileTool(funcName, args, allowedDirs, defaultDir, permissionLevel);
+              const output = await executeCommand(
+                args.command ?? '',
+                args.workdir,
+                args.timeout,
+                allowedDirs,
+                permissionLevel,
+                defaultDir,
+                activeSignal,
+              )
+              addCommandHistory({
+                command: args.command ?? '',
+                output,
+                duration: 0,
+                success: !output.startsWith('错误:'),
+                source: 'agent',
+              })
+              return output
             }
-          } catch (e: unknown) {
-            result = `工具执行失败: ${e instanceof Error ? e.message : String(e)}`;
+            if (funcName === 'grep') {
+              return executeGrep(args.pattern ?? '', args.path, args.include, args.maxResults, allowedDirs, permissionLevel, defaultDir)
+            }
+            if (funcName === 'glob') {
+              return executeGlob(args.pattern ?? '', args.path, allowedDirs, permissionLevel, defaultDir)
+            }
+            if (funcName === 'web_search') {
+              return await executeWebSearch(args.query ?? '', args.maxResults)
+            }
+            if (funcName === 'web_fetch') {
+              return await executeWebFetch(args.url ?? '', args.format, allowedDirs, permissionLevel, defaultDir)
+            }
+            if (funcName === 'lsp_diagnostics') {
+              return await executeLspDiagnostics(args.filePath ?? '', allowedDirs, permissionLevel, defaultDir)
+            }
+            if (funcName === 'run_tests') {
+              return await executeRunTests(args.command ?? '', args.path, args.timeout, allowedDirs, permissionLevel, defaultDir)
+            }
+            if (funcName === 'code_review') {
+              return executeCodeReview(args.filePath, args.code, args.language, allowedDirs, permissionLevel, defaultDir)
+            }
+            return await executeFileTool(funcName, args, allowedDirs, defaultDir, permissionLevel)
+          } catch (error: unknown) {
+            throwIfRemoteRunCancelled(activeSignal)
+            return `工具执行失败: ${error instanceof Error ? error.message : String(error)}`
           }
-        }
-        // 记录最近一次工具结果，用于去重（覆盖 MCP 和文件工具）
-        lastToolResult = result;
-        const toolMsgId = randomUUID();
-        db.insert(messages).values({
-          id: toolMsgId,
-          conversationId: convId,
-          role: 'tool',
-          content: result,
-          toolCalls: JSON.stringify({ id: tool.id, type: 'function', function: { name: funcName, arguments: args } }),
-          createdAt: new Date().toISOString(),
-        }).run();
+        }, runSignal)
+
+        lastToolResult = result
+        const toolMsgId = persistToolResultMessage(db, convId, tool.id, funcName, tool.arguments, result)
         try {
           await sb.from('messages_sync').upsert({
             id: toolMsgId,
@@ -629,15 +736,22 @@ export async function processRemoteCommand(
             user_id: command.user_id ?? null,
             role: 'tool',
             content: result.slice(0, 3000),
-            tool_calls: JSON.stringify({ id: tool.id, type: 'function', function: { name: funcName, arguments: args } }),
+            tool_calls: JSON.stringify({
+              id: tool.id,
+              type: 'function',
+              function: { name: funcName, arguments: tool.arguments },
+            }),
             created_at: new Date().toISOString(),
-          }, { onConflict: 'id' });
+          }, { onConflict: 'id' })
         } catch { /* 单条失败不阻塞 */ }
         eventBus.emit(convId, 'tool.completed', {
-          taskId: runTaskId, agentId: 'main', agentType: 'conversation',
-          status: 'completed', tool: buildToolPayload(funcName, args, result),
-        });
-        return result.slice(0, 2000);
+          taskId: runTaskId,
+          agentId: 'main',
+          agentType: 'conversation',
+          status: 'completed',
+          tool: buildToolPayload(funcName, args, result),
+        })
+        return result.slice(0, 2000)
       },
       // 流式 chunk 副作用：eventBus + Supabase 节流同步（§16 流中断由 execution-loop interrupted 标记承载）
       onChunk: (chunk: StreamChunk) => {
@@ -667,7 +781,12 @@ export async function processRemoteCommand(
       },
       // 完成判定：缺省有文本即完成（与 Normal 一致）
       isTaskComplete: (resp) => resp.content.trim() !== '',
-    };
+      onEvent: (type, payload) => {
+        if (type === 'execution.failed' && typeof payload.error === 'string') {
+          executionError = payload.error
+        }
+      },
+    }
 
     // 统一 ExecutionLoop 执行（第十五部分：Mobile 与 Desktop 共用同一执行链）
     const executionBudget: ExecutionBudget = {
@@ -680,8 +799,7 @@ export async function processRemoteCommand(
     const loopResult = await runExecutionLoop(deps, apiMessages, {
       loop: !!remoteLoop,
       budget: executionBudget,
-      // 15.1 收口：run-scoped AbortController（Mobile Stop 真取消）+ 5min 超时兜底
-      signal: AbortSignal.any([runAbortController.signal, AbortSignal.timeout(300000)]),
+      signal: runSignal,
     });
 
     // 流结束，确保最后内容落盘（清除定时器，等待排队的 flush 完成）
@@ -691,22 +809,18 @@ export async function processRemoteCommand(
     }
     await flushChain.catch(() => undefined);
 
-    // 统一结果映射：内容 / 用量 / 中断标记
-    aiContentFinal = loopResult.content;
+    // 统一结果映射：内容 / 用量 / 真实终态
+    const runOutcome = mapExecutionLoopResult(loopResult, controller.signal.aborted, executionError || undefined)
+    aiContentFinal = loopResult.content
     usageTotal = {
       prompt_tokens: loopResult.usage.cumulativeInputTokens,
       completion_tokens: loopResult.usage.cumulativeOutputTokens,
       total_tokens: loopResult.usage.cumulativeTotalTokens,
-    };
-    if (loopResult.interrupted) {
-      streamInterrupted = true;
     }
-    // 工具调用数（供收尾/去重使用）
-    const remoteToolCallCount = loopResult.toolCallCount;
 
-    // maxTurns 耗尽兜底
-    if (!aiContentFinal) {
-      // 核心修复：工具循环结束后 AI 没给文本总结（aiContentFinal 为空），追加一轮强制总结，
+    // 只有真实完成态才允许追加总结；失败、预算耗尽和取消态必须保留真实错误语义。
+    if (runOutcome.kind === 'complete' && !aiContentFinal) {
+      // 工具循环结束后 AI 没给文本总结（aiContentFinal 为空），追加一轮强制总结，
       // 让 AI 基于所有工具结果给出完整答复，而不是填占位符
       try {
         const summaryResponse = await runtime.complete({
@@ -714,30 +828,42 @@ export async function processRemoteCommand(
           model,
           messages: [...apiMessages, { role: 'user', content: '请基于上面所有工具执行的结果，给出完整的总结与最终答复。如果任务还没完成，请继续说明还需要做什么。' }],
           tools: allTools,
-          signal: AbortSignal.timeout(120000),
-        });
-        if (summaryResponse.content?.trim()) aiContentFinal = summaryResponse.content.trim();
-      } catch { /* 强制总结失败则回退占位符 */ }
+          signal: runSignal,
+        })
+        if (summaryResponse.content?.trim()) aiContentFinal = summaryResponse.content.trim()
+      } catch (summaryError: unknown) {
+        console.warn('[Sync] 强制总结失败:', summaryError instanceof Error ? summaryError.message : summaryError)
+      }
     }
-    if (!aiContentFinal) {
-      aiContentFinal = '✅ 处理完成（工具调用已执行）';
+    if (runOutcome.kind === 'complete' && !aiContentFinal) {
+      aiContentFinal = '✅ 处理完成（工具调用已执行）'
+    } else if (runOutcome.kind === 'fail' && !aiContentFinal) {
+      aiContentFinal = runOutcome.error
+    } else if (runOutcome.kind === 'cancel' && !aiContentFinal) {
+      aiContentFinal = '用户已停止任务'
     }
 
-    // 去重复：如果 AI 回复原样复述了工具结果，替换为简洁提示
-    const dedupReplacement = dedupToolResultReplacement(aiContentFinal, lastToolResult);
-    if (dedupReplacement) {
-      aiContentFinal = dedupReplacement;
+    // 去重复：只对正常完成态做工具结果去重，避免覆盖失败/取消错误。
+    if (runOutcome.kind === 'complete') {
+      const dedupReplacement = dedupToolResultReplacement(aiContentFinal, lastToolResult)
+      if (dedupReplacement) aiContentFinal = dedupReplacement
     }
 
     // 使用流式消息 ID 作为最终消息 ID（不重新创建，避免重复）
     const finalMsgId = streamMsgId;
     // 更新本地消息内容为最终版（流式过程可能已部分写入）
-    try {
-      db.update(messages).set({
-        content: aiContentFinal,
-        toolResults: JSON.stringify(usageTotal.total_tokens > 0 ? usageTotal : { total_tokens: Math.max(1, Math.round(aiContentFinal.length / 4)) }),
-      }).where(eq(messages.id, finalMsgId)).run();
-    } catch (updateErr: unknown) {
+     try {
+       const finalSeq = (db.select({ maxSeq: sql<number>`COALESCE(MAX(${messages.seq}), 0)` })
+         .from(messages)
+         .where(eq(messages.conversationId, convId))
+         .get()?.maxSeq ?? 0) + 1
+       db.update(messages).set({
+         content: aiContentFinal,
+         toolResults: JSON.stringify(usageTotal.total_tokens > 0 ? usageTotal : { total_tokens: Math.max(1, Math.round(aiContentFinal.length / 4)) }),
+         seq: finalSeq,
+       }).where(eq(messages.id, finalMsgId)).run();
+     } catch (updateErr: unknown) {
+
       console.warn('[Sync] 最终消息本地更新失败（不阻塞但需关注）:', updateErr instanceof Error ? updateErr.message : String(updateErr));
     }
 
@@ -768,95 +894,162 @@ export async function processRemoteCommand(
       updated_at: new Date().toISOString(),
     }, { onConflict: 'id' });
 
-    // 标记命令完成/中断，同时写入 conversation_id 供手机端追踪
-    // §16 修复：流中断（streamInterrupted）时不得伪装 completed —— 标记 failed + interrupted 语义
-    const finalStatus = streamInterrupted ? 'failed' : 'completed';
-    await sb.from('remote_commands').update({
+    // 先落本地 Run 真实终态，再同步远端；远端失败不得回滚本地正确终态。
+    let finalStatus: RemoteCommandTerminalStatus
+    let finalError: string | null
+    let resultSummary: string
+    switch (runOutcome.kind) {
+      case 'complete':
+        finalStatus = 'completed'
+        finalError = null
+        resultSummary = aiContentFinal.slice(0, 200)
+        break
+      case 'cancel':
+        finalStatus = 'cancelled'
+        finalError = runOutcome.error
+        resultSummary = `${runOutcome.endReason}: ${aiContentFinal.slice(0, 160)}`
+        break
+      case 'fail':
+        finalStatus = 'failed'
+        finalError = runOutcome.error
+        resultSummary = `${runOutcome.endReason}: ${aiContentFinal.slice(0, 160)}`
+        break
+      default:
+        throw new Error('未知命令终态')
+    }
+
+    const finalized = await finalizeRemoteCommand({
+      sb,
+      commandId,
+      runId: runTaskId,
+      taskId: runTaskId,
+      conversationId: convId,
       status: finalStatus,
-      conversation_id: convId,
-      result_summary: streamInterrupted ? `⚠️ 流式输出中断（部分内容已同步）: ${aiContentFinal.slice(0, 160)}` : aiContentFinal.slice(0, 200),
-      error: streamInterrupted ? 'stream interrupted before finish' : null,
-      processed_at: new Date().toISOString(),
-    }).eq('id', commandId);
+      resultSummary,
+      error: finalError,
+      existingMetadata: command.metadata,
+      transitionRun: () => {
+        if (!runLifecycle) throw new Error('RunLifecycleManager unavailable')
+        switch (runOutcome.kind) {
+          case 'cancel':
+            runLifecycle.transition(runTaskId, 'cancel', {
+              endReason: 'aborted',
+              error: runOutcome.error,
+              totalTokens: usageTotal.total_tokens || 0,
+            })
+            break
+          case 'fail':
+            runLifecycle.transition(runTaskId, 'fail', {
+              endReason: runOutcome.endReason,
+              error: runOutcome.error,
+              totalTokens: usageTotal.total_tokens || 0,
+            })
+            break
+          case 'complete':
+            runLifecycle.transition(runTaskId, 'complete', {
+              endReason: 'completed',
+              totalTokens: usageTotal.total_tokens || 0,
+            })
+            break
+          default:
+            throw new Error('未知命令终态')
+        }
+      },
+    })
+    runTerminalStatus = finalized.status
+    finalStatus = finalized.status
+    finalError = finalized.error
+    resultSummary = finalized.resultSummary
+
+    // 远端补偿不改变本地 Run 终态；此处只持久化已经落地的本地状态。
+    saveDb(backendConfig)
 
     // 记录同步日志
     await sb.from('sync_log').insert({
       device_id: cfg.deviceId,
       user_id: command.user_id ?? null,
       action: 'remote_command',
-      status: streamInterrupted ? 'failed' : 'success',
-      details: `${streamInterrupted ? '命令流中断' : '命令已处理'}: ${content.slice(0, 100)}`,
+      status: finalStatus === 'completed' ? 'success' : 'failed',
+      details: `${finalStatus === 'completed' ? '命令已处理' : `命令${finalStatus}`}: ${content.slice(0, 100)}`,
       created_at: new Date().toISOString(),
-    });
-
-    // 持久化本地数据库
-    saveDb(backendConfig);
-
-    // 15.1 收口：run 终态后从取消注册表释放（不泄漏 AbortController）
-    try { runCancellationRegistry.unregister(runTaskId); } catch { /* ignore */ }
+    })
 
     // 发射 task.completed / task.failed / task.cancelled 事件（桌面端 ActivityStream 显示任务终态）
-    // 15.1 收口：Mobile Stop 真取消 → runExecutionLoop state='cancelled' → 终态 cancelled（非伪造完成）
-    const loopCancelled = loopResult.state === 'cancelled' || runAbortController.signal.aborted;
-    if (loopCancelled) {
-      // 命令标记 cancelled（15.1：UI 不再是"本地改 cancelled"，而是后端真实终止后的终态）
+    switch (finalStatus) {
+      case 'cancelled':
+        eventBus.emit(convId, 'task.failed', {
+          taskId: runTaskId, agentId: 'main', agentType: 'conversation',
+          status: 'cancelled', content: '已停止', endReason: 'aborted',
+        })
+        break
+      case 'failed':
+        eventBus.emit(convId, 'task.failed', {
+          taskId: runTaskId, agentId: 'main', agentType: 'conversation',
+          status: runOutcome.kind === 'fail' && runOutcome.endReason === 'interrupted' ? 'interrupted' : 'error',
+          content: (finalError ?? aiContentFinal).slice(0, 200),
+          endReason: runOutcome.kind === 'fail' ? runOutcome.endReason : 'error',
+        })
+        break
+      case 'completed':
+        eventBus.emit(convId, 'task.completed', {
+          taskId: runTaskId, agentId: 'main', agentType: 'conversation',
+          status: 'completed', content: '完成', endReason: 'completed',
+        })
+        break
+      default:
+        throw new Error('未知命令终态')
+    }
+  } catch (error: unknown) {
+    const errorMessage = error instanceof Error ? error.message : String(error)
+    const cancelled = runAbortController?.signal.aborted === true
+    let transitionError: string | null = null
+
+    if (runTerminalStatus === null) {
       try {
-        await sb.from('remote_commands').update({
-          status: 'cancelled',
-          conversation_id: convId,
-          result_summary: (aiContentFinal || '用户已停止任务').slice(0, 200),
-          error: 'cancelled by user (remote stop)',
-          processed_at: new Date().toISOString(),
-        }).eq('id', commandId);
-      } catch { /* 标记失败不阻塞 */ }
-      eventBus.emit(convId, 'task.failed', {
-        taskId: runTaskId, agentId: 'main', agentType: 'conversation',
-        status: 'cancelled', content: '已停止', endReason: 'aborted',
-      });
-    } else if (streamInterrupted) {
-      eventBus.emit(convId, 'task.failed', {
-        taskId: runTaskId, agentId: 'main', agentType: 'conversation',
-        status: 'interrupted', content: '流式输出中断', endReason: 'interrupted',
-      });
-    } else {
-      eventBus.emit(convId, 'task.completed', {
-        taskId: runTaskId, agentId: 'main', agentType: 'conversation',
-        status: 'completed', content: '完成', endReason: 'completed',
-      });
-    }
-    // P0-05 收口：Remote Command Run 终态统一经 RunLifecycleManager
-    // 15.1 收口：真取消（loopCancelled）→ cancel 终态；流中断 → fail；否则 complete
-    try {
-      if (loopCancelled) {
-        runLifecycle?.transition(runTaskId, 'cancel', {
-          endReason: 'aborted',
-          totalTokens: usageTotal.total_tokens || 0,
-        });
-      } else {
-        runLifecycle?.transition(runTaskId, streamInterrupted ? 'fail' : 'complete', {
-          endReason: streamInterrupted ? 'interrupted' : 'completed',
-          totalTokens: usageTotal.total_tokens || 0,
-        });
+        if (!runLifecycle || !runTaskId) throw new Error('Run terminal transition unavailable')
+        const currentStatus = runLifecycle.get(runTaskId)?.status
+        if (currentStatus === 'running' || currentStatus === 'waiting') {
+          runLifecycle.transition(runTaskId, cancelled ? 'cancel' : 'fail', {
+            error: cancelled ? `aborted: ${errorMessage}` : errorMessage,
+            endReason: cancelled ? 'aborted' : 'error',
+          })
+          runTerminalStatus = cancelled ? 'cancelled' : 'failed'
+        } else if (currentStatus === 'completed' || currentStatus === 'failed' || currentStatus === 'cancelled') {
+          runTerminalStatus = currentStatus
+        } else {
+          throw new Error(`Run terminal transition unavailable from status: ${currentStatus ?? 'missing'}`)
+        }
+      } catch (transitionFailure: unknown) {
+        transitionError = transitionFailure instanceof Error
+          ? transitionFailure.message
+          : String(transitionFailure)
+        console.error(
+          `[Sync] exception-path run terminal transition failed (runId=${runTaskId || 'none'}, taskId=${runTaskId || 'none'}, commandId=${commandId}, status=failed):`,
+          transitionError,
+        )
       }
-    } catch (err) {
-      console.warn('[Sync] run 终态写入失败（不阻塞）:',
-        err instanceof Error ? err.message : String(err));
     }
-  } catch (e: unknown) {
-    const errMsg = e instanceof Error ? e.message : String(e);
-    console.error('[Sync] 远程命令处理失败:', errMsg);
-    // P0-05 收口：失败路径也写 Run 终态
-    try {
-      runLifecycle?.transition(runTaskId, 'fail', { error: errMsg, endReason: 'error' });
-    } catch { /* ignore */ }
-    // 标记命令失败（尽力而为）
-    try {
-      await sb.from('remote_commands').update({
-        status: 'failed',
-        error: errMsg,
-        processed_at: new Date().toISOString(),
-      }).eq('id', commandId);
-    } catch { /* ignore */ }
+
+    const terminalStatus: RemoteCommandTerminalStatus = runTerminalStatus
+      ?? (transitionError === null && cancelled ? 'cancelled' : 'failed')
+    const terminalError = transitionError === null
+      ? terminalStatus === 'completed' ? null : cancelled ? `aborted: ${errorMessage}` : errorMessage
+      : `Run terminal transition failed: ${transitionError}; original error: ${errorMessage}`
+    console.error(`[Sync] 远程命令处理失败 (${terminalStatus}):`, errorMessage)
+
+    await updateRemoteCommandTerminal({
+      sb,
+      commandId,
+      runId: runTaskId || null,
+      taskId: runTaskId || null,
+      conversationId: runConversationId,
+      status: terminalStatus,
+      resultSummary: terminalError ?? '命令已处理',
+      error: terminalError,
+      existingMetadata: command.metadata,
+    })
+  } finally {
+    if (runTaskId) runCancellationRegistry.unregister(runTaskId)
   }
 }
 
@@ -912,13 +1105,17 @@ export async function syncAssistantError(
     }, { onConflict: 'id' });
 
     // 标记命令失败并写 conversation_id
-    await sb.from('remote_commands').update({
+    await updateRemoteCommandTerminal({
+      sb,
+      commandId,
+      runId: null,
+      taskId: null,
+      conversationId: convId,
       status: 'failed',
-      conversation_id: convId,
+      resultSummary: errMsg.slice(0, 200),
       error: errMsg,
-      result_summary: errMsg.slice(0, 200),
-      processed_at: new Date().toISOString(),
-    }).eq('id', commandId);
+      existingMetadata: null,
+    })
 
     await sb.from('sync_log').insert({
       device_id: cfg.deviceId,

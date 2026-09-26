@@ -22,6 +22,20 @@ import { runExecutionLoop, type ExecutionLoopDeps, type ExecutionBudget } from '
 // Super Worker / Orchestrator / Synth / Direct Sisyphus）立即生效。
 import { getEffectivePrompt, setPrompt, getAllPrompts } from '../../lib/prompt-registry.js';
 
+type DirectHistoryMessage = {
+  readonly role: 'user' | 'assistant'
+  readonly content: unknown
+}
+
+type DirectSisyphusBody = {
+  prompt: string
+  conversationId?: string
+  conversationTitle?: string
+  providerId?: string
+  model?: string
+  history?: DirectHistoryMessage[]
+}
+
 export function registerAgentRoutes(app: FastifyInstance, config: BackendConfig): void {
   // 获取 Agent 列表（含配置信息 + 系统提示词）
   app.get('/api/agents', {
@@ -172,10 +186,8 @@ export function registerAgentRoutes(app: FastifyInstance, config: BackendConfig)
       },
     },
   }, async (request) => {
-    const body = request.body as {
-      prompt: string; conversationId?: string; conversationTitle?: string;
-      providerId?: string; model?: string; history?: any[];
-    };
+    const body = request.body as DirectSisyphusBody;
+
     const db = getDb();
     const now = new Date().toISOString();
 
@@ -256,9 +268,10 @@ export function registerAgentRoutes(app: FastifyInstance, config: BackendConfig)
       }
 
       // 历史消息（剥离图片 markdown URL —— 服务端虚拟路径 AI 无法访问）
-      const historyMessages = (body.history || [])
-        .filter((m: any) => m.role === 'user' || m.role === 'assistant')
-        .map((m: any) => ({
+       const historyMessages = (body.history || [])
+         .filter((m) => m.role === 'user' || m.role === 'assistant')
+         .map((m) => ({
+
           ...m,
           content: typeof m.content === 'string'
             ? m.content
@@ -301,14 +314,26 @@ export function registerAgentRoutes(app: FastifyInstance, config: BackendConfig)
         total_tokens: result.usage.cumulativeTotalTokens,
       };
 
-      // Run 终态写入（状态机统一；失败/中断 → fail 而非假成功）
-      try {
-        if (result.state === 'completed') {
-          lifecycle.transition(runId, 'complete', { endReason: 'completed', inputTokens: usage.prompt_tokens, outputTokens: usage.completion_tokens });
-        } else {
-          lifecycle.transition(runId, 'fail', { error: result.content || 'AI 执行失败', endReason: result.state === 'budget_exceeded' ? 'max_turns' : 'error', inputTokens: usage.prompt_tokens, outputTokens: usage.completion_tokens });
-        }
-      } catch { /* 终态写入失败不阻塞回复 */ }
+       const endReason = result.state === 'cancelled'
+         ? 'cancelled'
+         : result.state === 'budget_exceeded'
+           ? 'max_turns'
+           : result.finishReason === 'max-tokens' || result.finishReason === 'content_filter'
+             ? 'interrupted'
+             : result.state === 'completed'
+               ? 'completed'
+               : 'error'
+       // Run 终态写入（状态机统一；失败/中断 → fail 而非假成功）
+       try {
+         if (result.state === 'completed') {
+           lifecycle.transition(runId, 'complete', { endReason: 'completed', inputTokens: usage.prompt_tokens, outputTokens: usage.completion_tokens });
+         } else if (result.state === 'cancelled') {
+           lifecycle.transition(runId, 'cancel', { inputTokens: usage.prompt_tokens, outputTokens: usage.completion_tokens });
+         } else {
+           lifecycle.transition(runId, 'fail', { error: result.content || 'AI 执行失败', endReason, inputTokens: usage.prompt_tokens, outputTokens: usage.completion_tokens });
+         }
+       } catch { /* 终态写入失败不阻塞回复 */ }
+
 
       // 4. 保存 AI 回复
       const aiMsgId = randomUUID();

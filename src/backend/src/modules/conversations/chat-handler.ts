@@ -28,7 +28,8 @@ import { budgetFromAgentLimits } from '../../core/runtime/execution-loop.js';
 import { getWorkspaceContext } from '../../core/workspace/workspace-context.js';
 import { initSseHeaders, createSseSender, startSseHeartbeat, clearSseHeartbeat, sendSseError, sendSseDone, endSseResponse } from './sse-stream.js';
 import { processCompaction, executeForceSummary } from './compaction.js';
-import { executeToolLoop } from './tool-loop.js';
+import { executeToolLoop, type ToolLoopResult } from './tool-loop.js';
+import { rebuildProviderMessages } from '../../lib/message-history.js';
 
 interface ChatHandlerContext {
   app: FastifyInstance;
@@ -229,7 +230,9 @@ export async function handleSendMessage(
   // 整改计划第 5 章（P1）：循环 UI 指标 —— 已用轮数/时长/工具调用（随终态事件推给前端）
   let loopMetrics: { turnsUsed: number; elapsedMs: number; toolCalls: number; budgetExceeded: string | null } | null = null;
   let endedNormally = false;
-  let aiError: string | null = null;
+  let executionEndReason: ToolLoopResult['endReason'] = 'error'
+  let normalCompletion = false
+  let aiError: string | null = null
   try {
     // SSE 心跳 — 防止长操作时连接超时
     heartbeat = startSseHeartbeat(reply);
@@ -301,7 +304,13 @@ ${fileAttachmentsHint}
       const MAX_HISTORY = 100;
 
       const allHistory = history
-        .filter((m) => m.role === 'user' || m.role === 'assistant' || m.role === 'tool');
+        .filter((m) => m.role === 'user' || m.role === 'assistant' || m.role === 'tool')
+        .map((m) => ({
+          role: m.role,
+          content: m.content,
+          toolCalls: m.toolCalls,
+          reasoningContent: m.reasoningContent,
+        }));
       let recentHistory = allHistory.slice(-MAX_HISTORY);
       // A5 修复：截断后丢弃开头的孤立 tool 消息 —— 其对应的 assistant.tool_calls 已被截掉，
       // 若保留会给 OpenAI API 发孤立 tool 消息导致 400 "must be a response to a preceding message with tool_calls"
@@ -322,49 +331,28 @@ ${fileAttachmentsHint}
           overflowHistory.push({ role: removed.role, content: typeof removed.content === 'string' ? removed.content : '' });
         }
       }
-      const apiMessages: any[] = [
+      const rebuiltHistory = rebuildProviderMessages(recentHistory)
+      for (const message of rebuiltHistory) {
+        // 图片 URL(markdown 或裸 URL)对 AI 无意义：/data/chat-images/ 是服务端虚拟路径，
+        // AI 无法通过文件系统访问。剥离图片 markdown，仅保留纯文本进上下文，
+        // 当前上传的图片由 body.images 走 vision 多模态通道传递。
+        if (typeof message.content === 'string') {
+          message.content = message.content
+            .replace(/!\[[^\]]*\]\(\/data\/chat-images\/[^)]+\)/g, '[图片]')
+            .replace(/!\[[^\]]*\]\((data:image\/[^)]+)\)/g, '[图片]')
+            .trim()
+        }
+      }
+      const apiMessages: Array<Record<string, unknown>> = [
         { role: 'system', content: systemPrompt },
-        ...recentHistory
-          .map((m) => {
-            const msg: any = { role: m.role, content: m.content };
-            // 图片 URL(markdown 或裸 URL)对 AI 无意义：/data/chat-images/ 是服务端虚拟路径，
-            // AI 无法通过文件系统访问。剥离图片 markdown，仅保留纯文本进上下文，
-            // 当前上传的图片由 body.images 走 vision 多模态通道传递。
-            if (typeof msg.content === 'string') {
-              msg.content = msg.content
-                .replace(/!\[[^\]]*\]\(\/data\/chat-images\/[^)]+\)/g, '[图片]')
-                .replace(/!\[[^\]]*\]\((data:image\/[^)]+)\)/g, '[图片]')
-                .trim();
-            }
-            // L2: 保留 assistant 的 tool_calls
-            if (m.role === 'assistant' && m.toolCalls) {
-              try {
-                const tc = JSON.parse(m.toolCalls);
-                msg.tool_calls = Array.isArray(tc) ? tc : [tc];
-              } catch { /* fallback */ }
-              // 对齐 harness：纯工具轮 content 回放空串（而非 null，部分网关拒绝 null）
-              if (msg.tool_calls.length > 0 && !msg.content) msg.content = '';
-            }
-            // thinking 模式：assistant 消息回传 reasoning_content（防会话"砖化"）
-            if (m.role === 'assistant' && (m as any).reasoningContent) {
-              msg.reasoning_content = (m as any).reasoningContent;
-            }
-            // L2: tool 消息需要 tool_call_id
-            if (m.role === 'tool' && m.toolCalls) {
-              try {
-                const tc = JSON.parse(m.toolCalls);
-                msg.tool_call_id = tc.id;
-              } catch { /* fallback */ }
-            }
-            return msg;
-          }),
+        ...rebuiltHistory,
       ];
 
       // 图片支持：将最后一条用户消息的 content 改为多模态数组（text + image_url）
       if (body.images && body.images.length > 0) {
         const lastUserMsg = apiMessages.slice().reverse().find(m => m.role === 'user');
         if (lastUserMsg) {
-          const contentParts: any[] = [{ type: 'text', text: lastUserMsg.content }];
+          const contentParts: Array<Record<string, unknown>> = [{ type: 'text', text: lastUserMsg.content }];
           for (const img of body.images.slice(0, 10)) {
             contentParts.push({ type: 'image_url', image_url: { url: img } });
           }
@@ -376,15 +364,18 @@ ${fileAttachmentsHint}
       // 失败时回退到直接丢弃，不阻塞主流程；但需记录以便排查（LC-025）。
       if (overflowHistory.length > 0 && provider.apiKey) {
         let compactionMessage: { role: 'system'; content: string } | null = null;
-        try {
-          compactionMessage = await processCompaction({
-            baseUrl: provider.baseUrl.replace(/\/$/, ''),
-            apiKey: provider.apiKey,
-            model: activeModel,
-            removedHistory: overflowHistory,
-            recentContext: (recentHistory[recentHistory.length - 1]?.content as string) || body.content || '',
-            signal: clientAbort.signal,
-          });
+         try {
+           const recentContent = recentHistory[recentHistory.length - 1]?.content
+           const recentContext = typeof recentContent === 'string' ? recentContent : body.content
+           compactionMessage = await processCompaction({
+             baseUrl: provider.baseUrl.replace(/\/$/, ''),
+             apiKey: provider.apiKey,
+             model: activeModel,
+             removedHistory: overflowHistory,
+             recentContext,
+             signal: clientAbort.signal,
+           });
+
         } catch (compactionErr: unknown) {
           console.warn('[Chat] compaction 摘要生成失败，已回退为直接丢弃最早历史:', compactionErr instanceof Error ? compactionErr.message : String(compactionErr));
         }
@@ -401,7 +392,10 @@ ${fileAttachmentsHint}
       let maxTurns = body.loop ? loopBudget.maxTurns : loopBudget.maxTurns;
 
       // 加载 MCP 工具（与文件工具合并）— 统一走 tool-registry 的 buildAllTools（消除重复实现）
-      const getMcpServers = () => db.select().from(mcpServers).all() as any[];
+      const getMcpServers = () => db.select().from(mcpServers).all().map((server) => ({
+        ...server,
+        timeout: server.timeout ?? 5000,
+      }));
       const mcpTools = await listMcpTools(getMcpServers);
       const allTools = buildAllTools(mcpTools);
 
@@ -441,12 +435,15 @@ ${fileAttachmentsHint}
       reasoningContent = toolLoopResult.reasoningContent;
       usageTotal = toolLoopResult.usageTotal;
       lastToolResult = toolLoopResult.lastToolResult;
-      endedNormally = toolLoopResult.endedNormally;
-      aiError = toolLoopResult.aiError;
+       endedNormally = toolLoopResult.endedNormally;
+       executionEndReason = toolLoopResult.endReason;
+       aiError = toolLoopResult.aiError;
       // 整改计划第 5 章（P1）：预算耗尽 —— 超过轮数/时长/token/工具调用/费用任一预算即停止，
       // 写 budget_exceeded 错误码，不再继续请求模型
-      budgetExceeded = toolLoopResult.budgetExceeded;
-      // 整改计划第 5 章（P1）：循环 UI 指标 —— 已用轮数/时长/工具调用（随终态事件推给前端）
+       budgetExceeded = toolLoopResult.budgetExceeded;
+       normalCompletion = endedNormally && executionEndReason === 'completed'
+       // 整改计划第 5 章（P1）：循环 UI 指标 —— 已用轮数/时长/工具调用（随终态事件推给前端）
+
       loopMetrics = {
         turnsUsed: toolLoopResult.turnsUsed,
         elapsedMs: toolLoopResult.elapsedMs,
@@ -456,8 +453,9 @@ ${fileAttachmentsHint}
 
       // maxTurns 耗尽后的兜底处理 — 这些变量在 while 循环内声明，循环外不可见
       // 用 aiContent 是否为空判断，不引用循环内变量
-      if (!endedNormally && !aiContent) {
-        // 核心修复：工具循环结束后 AI 没给文本总结（aiContent 为空），追加一轮强制总结，
+       if (!endedNormally && executionEndReason !== 'cancelled' && !aiContent && !aiError) {
+         // 核心修复：工具循环结束后 AI 没给文本总结（aiContent 为空），追加一轮强制总结，
+
         // 让 AI 基于所有工具结果给出完整答复，而不是填占位符
         const forceSummary = await executeForceSummary(
           apiMessages,
@@ -478,25 +476,30 @@ ${fileAttachmentsHint}
           streamedContent = aiContent;
         }
       }
-      if (!endedNormally && !aiContent) {
-        aiContent = '✅ 处理完成（工具调用已执行）';
-      }
+       if (!endedNormally && executionEndReason !== 'cancelled' && !aiContent && !aiError) {
+         aiContent = '✅ 处理完成（工具调用已执行）';
+       }
 
-      // 去重复显示（SSE 发送前）：若 AI 回复原样复述了工具执行结果（同一段内容出现两次），
+       // 去重复显示（仅正常完成态）：避免把失败/取消的真实错误替换成工具结果。
+
       // 只保留工具的绿色结果框，assistant 白字替换为简短说明，避免同内容显示两次。
       // 典型场景：视觉/分析工具返回 JSON，AI 把这段 JSON 原样粘贴进回复文本。
-      const dedupReplacement = dedupToolResultReplacement(aiContent, lastToolResult);
-      if (dedupReplacement) {
-        aiContent = dedupReplacement;
-      }
+       if (normalCompletion) {
+         const dedupReplacement = dedupToolResultReplacement(aiContent, lastToolResult);
+         if (dedupReplacement) {
+           aiContent = dedupReplacement;
+         }
+       }
+
 
       // 流式返回最终内容 — 修复 SSE 双发：
       // 流式中每个 delta 已实时发送（完整内容已推到前端），这里若再次发送 aiContent
       // 前端纯追加会显示两遍。仅在发生「去重复制替换」（aiContent 已被换成简短提示）
       // 时发送 message-replace 事件让前端替换累积内容；未替换时不再重发。
-      if (!aiContent) {
-        aiContent = '处理完成（无文本输出）';
-      }
+       if (!aiContent && !aiError && executionEndReason !== 'cancelled') {
+         aiContent = '处理完成（无文本输出）';
+       }
+
       if (aiContent !== streamedContent) {
         sseSend('message-replace', JSON.stringify({ content: aiContent }));
       }
@@ -507,7 +510,12 @@ ${fileAttachmentsHint}
       return reply; // BE-08: heartbeat 在 finally 中统一清理
     }
   } catch (e: unknown) {
-    aiError = e instanceof Error ? e.message : String(e) || '未知错误';
+    if (clientAbort.signal.aborted) {
+      executionEndReason = 'cancelled';
+      aiError = null;
+    } else {
+      aiError = e instanceof Error ? e.message : String(e) || '未知错误';
+    }
     aiContent = '';
   } finally {
     clearSseHeartbeat(heartbeat);
@@ -520,17 +528,24 @@ ${fileAttachmentsHint}
     usageTotal.total_tokens = Math.max(1, Math.round(aiContent.length / 4));
     usageTotal.completion_tokens = usageTotal.total_tokens;
   }
+  const messageStatus = normalCompletion
+    ? 'completed'
+    : executionEndReason === 'cancelled'
+      ? 'cancelled'
+      : executionEndReason === 'interrupted'
+        ? 'interrupted'
+        : 'error'
   // 消息完成事件（统一协议）— 含最终文本与 token 用量
   eventBus.emit(runContext.sessionId, 'agent.message.completed', {
     taskId: runContext.taskId,
     agentId: runContext.agentId,
     agentType: runContext.agentType,
     content: aiContent,
-    status: aiError ? 'error' : 'completed',
-    metadata: usageTotal.total_tokens > 0 ? usageTotal as unknown as Record<string, unknown> : undefined,
-  }, { persist: aiError === null });
+    status: messageStatus,
+    metadata: usageTotal.total_tokens > 0 ? { ...usageTotal } : undefined,
+  }, { persist: normalCompletion });
   // 保存 reasoning 到 toolResults（供前端加载时显示思考过程）
-  let toolResultsObj: any = {};
+  let toolResultsObj: Record<string, unknown> = {};
   if (usageTotal.total_tokens > 0) toolResultsObj = usageTotal;
   if (reasoningContent) toolResultsObj.reasoning = reasoningContent;
   const toolResultsStr = Object.keys(toolResultsObj).length > 0 ? JSON.stringify(toolResultsObj) : null;
@@ -562,8 +577,9 @@ ${fileAttachmentsHint}
           .run();
       }
 
-      // 整改计划第 4 章：流中断（aiError）→ 写 interrupted + partial content；正常 → idle
-      db.update(conversations).set({ generationStatus: aiError ? 'interrupted' : 'idle', updatedAt: now }).where(eq(conversations.id, id)).run();
+       // 整改计划第 4 章：流中断/失败/取消 → interrupted；正常完成 → idle
+       db.update(conversations).set({ generationStatus: normalCompletion ? 'idle' : 'interrupted', updatedAt: now }).where(eq(conversations.id, id)).run();
+
     });
 
     // 同步 AI 回复到 Supabase（手机端实时可见）
@@ -595,22 +611,33 @@ ${fileAttachmentsHint}
       agentId: runContext.agentId,
       agentType: runContext.agentType,
       content: undefined,
-      metadata: usageTotal as unknown as Record<string, unknown>,
+       metadata: { ...usageTotal },
+
     }, { persist: false });
   }
 
   // L7: 移除自动保存对话到 Memory — 过于激进，应只在用户明确要求时保存
 
-  // 出错时发送 SSE 错误事件
-  if (aiError) {
-    sendSseError(sseSend, aiError);
+  // 出错、取消或未正常结束时发送明确的失败终态，禁止落回 task.completed。
+  if (executionEndReason === 'cancelled' || clientAbort.signal.aborted) {
     eventBus.emit(runContext.sessionId, 'task.failed', {
       taskId: runContext.taskId,
       agentId: runContext.agentId,
       agentType: runContext.agentType,
-      status: 'error',
+      status: 'cancelled',
+      content: '已停止',
+      endReason: 'aborted',
+    });
+  } else if (aiError) {
+    sendSseError(sseSend, aiError);
+    const interruptedEnd = executionEndReason === 'interrupted'
+    eventBus.emit(runContext.sessionId, 'task.failed', {
+      taskId: runContext.taskId,
+      agentId: runContext.agentId,
+      agentType: runContext.agentType,
+      status: interruptedEnd ? 'interrupted' : 'error',
       content: aiError,
-      endReason: 'error',
+      endReason: interruptedEnd ? 'interrupted' : 'error',
     });
   } else if (budgetExceeded) {
     // 整改计划第 5 章（P1）：预算耗尽 → 写 budget_exceeded 错误码（前端显示恢复动作）
@@ -625,8 +652,19 @@ ${fileAttachmentsHint}
       endReason: 'budget_exceeded',
       metadata: { code: 'BUDGET_EXCEEDED', budgetExceeded, ...loopMetrics },
     });
+  } else if (!normalCompletion) {
+    const endReason = executionEndReason === 'interrupted' ? 'interrupted' : 'error';
+    const endMessage = executionEndReason === 'interrupted' ? '回答被截断' : 'AI 执行未正常结束';
+    eventBus.emit(runContext.sessionId, 'task.failed', {
+      taskId: runContext.taskId,
+      agentId: runContext.agentId,
+      agentType: runContext.agentType,
+      status: executionEndReason === 'interrupted' ? 'interrupted' : 'error',
+      content: endMessage,
+      endReason,
+    });
   } else {
-    // 任务完成事件（统一协议）— 结束原因：中止→aborted；正常文本→completed；轮次耗尽→max_turns
+    // 任务完成事件（统一协议）— 结束原因：正常文本→completed
     // 整改计划第 5 章（P1）：终态事件携带循环指标（轮数/时长/工具调用）供前端循环 UI 显示
     eventBus.emit(runContext.sessionId, 'task.completed', {
       taskId: runContext.taskId,
@@ -634,7 +672,7 @@ ${fileAttachmentsHint}
       agentType: runContext.agentType,
       status: 'completed',
       content: '完成',
-      endReason: clientAbort.signal.aborted ? 'aborted' : endedNormally ? 'completed' : 'max_turns',
+      endReason: 'completed',
       metadata: { ...loopMetrics },
     });
   }
@@ -642,10 +680,13 @@ ${fileAttachmentsHint}
   // P0-05 收口：普通 Chat 的 runs 行终态也统一走 RunLifecycleManager 状态机
   try {
     const runLifecycle = new RunLifecycleManager(db);
-    if (aiError) {
+    if (executionEndReason === 'cancelled' || clientAbort.signal.aborted) {
+      runLifecycle.transition(runContext.taskId, 'cancel', { totalTokens: usageTotal.total_tokens || 0 });
+    } else if (aiError) {
+      const interruptedEnd = executionEndReason === 'interrupted'
       runLifecycle.transition(runContext.taskId, 'fail', {
         error: aiError,
-        endReason: 'error',
+        endReason: interruptedEnd ? 'interrupted' : 'error',
         totalTokens: usageTotal.total_tokens || 0,
       });
     } else if (budgetExceeded) {
@@ -655,11 +696,15 @@ ${fileAttachmentsHint}
         endReason: 'budget_exceeded',
         totalTokens: usageTotal.total_tokens || 0,
       });
-    } else if (clientAbort.signal.aborted) {
-      runLifecycle.transition(runContext.taskId, 'cancel', { totalTokens: usageTotal.total_tokens || 0 });
+    } else if (!normalCompletion) {
+      runLifecycle.transition(runContext.taskId, 'fail', {
+        error: executionEndReason === 'interrupted' ? '回答被截断' : 'AI 执行未正常结束',
+        endReason: executionEndReason === 'interrupted' ? 'interrupted' : 'error',
+        totalTokens: usageTotal.total_tokens || 0,
+      });
     } else {
       runLifecycle.transition(runContext.taskId, 'complete', {
-        endReason: endedNormally ? 'completed' : 'max_turns',
+        endReason: 'completed',
         totalTokens: usageTotal.total_tokens || 0,
       });
     }

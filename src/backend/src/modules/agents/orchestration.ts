@@ -1,4 +1,4 @@
-import type { FastifyInstance, FastifyReply } from 'fastify';
+import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type { BackendConfig } from '../../config/index.js';
 import { getProviderByCapability, getProviderById, providerSupportsThinking } from '../../lib/provider.js';
 import { getDb, saveDb } from '../../db/client.js';
@@ -23,6 +23,7 @@ import { MANDATORY_COMPLIANCE_PROMPT, SISYPHUS_SYSTEM_PROMPT, SISYPHUS_SYNTH_SYS
 // 消除 orchestration.ts / index.ts 双 Map 漂移 —— 前端编辑 Prompt 后所有生产路径生效。
 import { getEffectivePrompt, getAllPrompts } from '../../lib/prompt-registry.js';
 import { truncateHistoryByTokenBudget } from '../../lib/context-window.js';
+import { rebuildProviderMessages } from '../../lib/message-history.js';
 import { AGENTS, routeMessage } from './agent-definitions.js';
 import { setupSse, cleanupSse, sendErrorAndEnd, type SseContext } from './sse-handler.js';
 import { runAgentToolLoop, type ToolLoopContext } from './tool-loop.js';
@@ -42,6 +43,112 @@ import { runCancellationRegistry } from '../../lib/run-cancellation-registry.js'
 import { createRunContext } from '../../core/runtime/index.js';
 import { RunLifecycleManager } from '../../core/runtime/index.js';
 
+type HistoryMessage = {
+  readonly role: 'user' | 'assistant' | 'tool'
+  readonly content: unknown
+}
+
+type StoredHistoryMessage = Parameters<typeof rebuildProviderMessages>[0][number]
+type AgentHistoryMessage = Record<string, unknown>
+
+type OrchestrationFile = {
+  readonly name: string
+  readonly dataUrl: string
+}
+
+type OrchestrationBody = {
+  readonly prompt: string
+  readonly conversationId?: string
+  readonly history: readonly HistoryMessage[]
+  readonly images: readonly string[]
+  readonly files: readonly OrchestrationFile[]
+  readonly deepThinking: boolean
+  readonly reasoningEffort: 'low' | 'medium' | 'high'
+  readonly webSearch: boolean
+  readonly loop: boolean
+}
+
+type AgentResult = {
+  readonly agentId: string
+  readonly name: string
+  readonly icon: string
+  readonly role: string
+  readonly status: 'done' | 'error'
+  readonly reply: string
+  readonly tokens: number
+  readonly toolSummary?: string
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function parseHistoryMessage(value: unknown): HistoryMessage | null {
+  if (!isRecord(value)) return null
+  const role = value.role
+  if (role !== 'user' && role !== 'assistant' && role !== 'tool') return null
+  if (!('content' in value)) return null
+  return { role, content: value.content }
+}
+
+function parseHistory(value: unknown): HistoryMessage[] {
+  if (!Array.isArray(value)) return []
+  return value.flatMap((item) => {
+    const message = parseHistoryMessage(item)
+    return message ? [message] : []
+  })
+}
+
+export function buildAgentHistory(
+  persistedRows: readonly StoredHistoryMessage[],
+  requestHistory: readonly HistoryMessage[],
+): AgentHistoryMessage[] {
+  if (persistedRows.length > 0) {
+    const boundedRows = truncateHistoryByTokenBudget([...persistedRows], 1000000, 0.7, 5)
+    return rebuildProviderMessages(boundedRows)
+  }
+  return truncateHistoryByTokenBudget(
+    requestHistory
+      .filter((message) => message.role === 'user' || message.role === 'assistant')
+      .map((message) => ({ role: message.role, content: message.content })),
+    1000000,
+    0.7,
+    5,
+  )
+}
+
+function parseFiles(value: unknown): OrchestrationFile[] {
+  if (!Array.isArray(value)) return []
+  return value.flatMap((item) => {
+    if (!isRecord(item) || typeof item.name !== 'string' || typeof item.dataUrl !== 'string') return []
+    return [{ name: item.name, dataUrl: item.dataUrl }]
+  })
+}
+
+function parseBody(value: unknown): OrchestrationBody {
+  if (!isRecord(value) || typeof value.prompt !== 'string') {
+    throw new Error('编排请求缺少 prompt')
+  }
+  const images = Array.isArray(value.images)
+    ? value.images.filter((image): image is string => typeof image === 'string')
+    : []
+  const conversationId = typeof value.conversationId === 'string' ? value.conversationId : undefined
+  const reasoningEffort = value.reasoningEffort === 'low' || value.reasoningEffort === 'high'
+    ? value.reasoningEffort
+    : 'medium'
+  return {
+    prompt: value.prompt,
+    ...(conversationId ? { conversationId } : {}),
+    history: parseHistory(value.history),
+    images,
+    files: parseFiles(value.files),
+    deepThinking: value.deepThinking === true,
+    reasoningEffort,
+    webSearch: value.webSearch !== false,
+    loop: value.loop === true,
+  }
+}
+
 // Aether 2.0 Model Runtime registry (FIX-6): shared registry warmed from the
 // providers table by handleOrchestrate; call sites can resolve runtimes here.
 const modelRuntimeRegistry = new ModelRegistry();
@@ -49,20 +156,10 @@ const modelRuntimeRegistry = new ModelRegistry();
 export async function handleOrchestrate(
   app: FastifyInstance,
   config: BackendConfig,
-  request: any,
+  request: FastifyRequest,
   reply: FastifyReply
 ): Promise<void> {
-  const body = request.body as {
-    prompt: string;
-    conversationId?: string;
-    history?: any[];
-    images?: string[];
-    files?: { name: string; dataUrl: string }[];
-    deepThinking?: boolean;
-    reasoningEffort?: 'low' | 'medium' | 'high';
-    webSearch?: boolean;
-    loop?: boolean;
-  };
+  const body = parseBody(request.body)
 
   clearReadFileCache();
   const db = getDb();
@@ -195,9 +292,21 @@ export async function handleOrchestrate(
     const defaultDir = agentSettings.defaultDir || allowedDirs[0] || process.cwd();
 
     // 加载 MCP 工具（与文件工具合并）— 统一走 tool-registry 的 buildAllTools（消除重复实现）
-    const getMcpServers = () => db.select().from(mcpServers).all() as any[];
+     const getMcpServers = () => db.select().from(mcpServers).all().map((server) => ({
+       ...server,
+       timeout: server.timeout ?? 5000,
+     }));
+
     const mcpTools = await listMcpTools(getMcpServers);
     const allTools = buildAllTools(mcpTools);
+
+    const persistedHistoryRows = body.conversationId
+      ? db.select().from(messages)
+        .where(eq(messages.conversationId, body.conversationId))
+        .orderBy(messages.createdAt)
+        .all()
+      : []
+    const agentHistory = buildAgentHistory(persistedHistoryRows, body.history)
 
     // 会话持久化：标记对话正在生成
     if (body.conversationId) {
@@ -220,10 +329,11 @@ export async function handleOrchestrate(
       // 极简 prompt——deepseek 模型对长 prompt 返回空，必须用极简格式
       // L26: 添加中文指令
       // C2: 注入历史尾部（帮助 AI 理解"继续/按上面的方案"等指代性请求）
-      const recentContext = (body.history || []).slice(-4)
-        .filter((m: any) => m.role === 'user' || m.role === 'assistant')
-        .map((m: any) => `${m.role === 'user' ? '用户' : 'AI'}: ${typeof m.content === 'string' ? m.content.slice(0, 200) : ''}`)
-        .join('\n');
+       const recentContext = body.history.slice(-4)
+         .filter((message) => message.role === 'user' || message.role === 'assistant')
+         .map((message) => `${message.role === 'user' ? '用户' : 'AI'}: ${typeof message.content === 'string' ? message.content.slice(0, 200) : ''}`)
+         .join('\n');
+
       const analysisPrompt = `你是AI编排器。分析任务该交给哪些Agent。Agent能力:atlas=架构设计,hephaestus=写代码构建,prometheus=规划,momus=审查,oracle=推理,librarian=搜索,explore=探索代码,metis=分析需求,multimodal-looker=图片分析,sisyphus-junior=子任务。任务:${body.prompt}${recentContext ? `\n上下文:\n${recentContext}` : ''}。只输出JSON数组，如["hephaestus","atlas"]。注意：简单问答不需要分配Agent，输出空数组[]即可。`;
 
       // P0-01/P0-02: 使用 Model Runtime Bridge 进行非流式完成（分析阶段）
@@ -371,7 +481,8 @@ void emitV2Event({ runId: runTaskId, sessionId: convId, taskId: runTaskId, agent
     }
 
     // 2. 每个 Agent 使用自己的配置模型并行调用，逐个发送结果
-    const results: any[] = [];
+     const results: Array<AgentResult | undefined> = [];
+
     // 不再提前群发 agent-start（旧协议 agent-start 保留兼容）；新协议按真实执行时机触发
     // 旧协议兼容：仍在循环前发送 agent-start
     for (const agent of targetAgents) {
@@ -403,7 +514,8 @@ void emitV2Event({ runId: runTaskId, sessionId: convId, taskId: runTaskId, agent
         });
       }
       if (!ep) {
-        const errResult = { agentId: agent.id, name: agent.name, icon: agent.icon, role: agent.role, status: 'error', reply: 'No provider configured', tokens: 0 };
+         const errResult: AgentResult = { agentId: agent.id, name: agent.name, icon: agent.icon, role: agent.role, status: 'error', reply: 'No provider configured', tokens: 0 };
+
         results[targetIndex] = errResult;
         sseSend('agent-result', JSON.stringify(errResult));
         if (body.conversationId) {
@@ -431,14 +543,12 @@ void emitV2Event({ runId: runTaskId, sessionId: convId, taskId: runTaskId, agent
         let agentMessages = [
           // §27 修复：统一从 Prompt Registry 读取运行时自定义提示词（前端编辑全路径生效）
           { role: 'system', content: MANDATORY_COMPLIANCE_PROMPT + '\n\n' + getEffectivePrompt(agent.id, agent.systemPrompt) + crossContext + memoryBlock + imageHint + permHint + fileAttachmentsHint + '\n\n## 任务清单\n- 执行多步骤任务时，先用 todo_write 建立待办清单，每完成一步更新一次（DeepSeek Harness 风格：计划先行、逐项勾选）。' },
-          ...(function() {
-            // 上下文窗口管理：限制历史消息 token 预算（共享实现，含 CJK 估算修正 AI-007）
-            const history2 = (body.history || []).filter((m: any) => m.role === 'user' || m.role === 'assistant');
-            return truncateHistoryByTokenBudget(history2, 1000000, 0.7, 5);
-          })(),
+          // 上下文重建：优先使用会话中持久化的完整 tool-call/tool-result 链
+          ...agentHistory,
           { role: 'user', content: body.prompt },
           // 修复3：图片作为多模态输入直接附加到本轮对话（AI 可见，无需截屏）
-          ...(hasImages ? body.images!.map(img => ({ role: 'user' as const, content: [{ type: 'image_url', image_url: { url: img } }] })) : []),
+           ...(hasImages ? body.images.map(img => ({ role: 'user' as const, content: [{ type: 'image_url', image_url: { url: img } }] })) : []),
+
         ];
 
         // 构建 ToolLoopContext 并调用 tool-loop
@@ -468,7 +578,8 @@ void emitV2Event({ runId: runTaskId, sessionId: convId, taskId: runTaskId, agent
           deepThinking: body.deepThinking ?? false,
           reasoningEffort: body.reasoningEffort ?? 'medium',
           webSearchEnabled: body.webSearch !== false,
-          epSupportsThinking: providerSupportsThinking({ baseUrl: ep.baseUrl, defaultModel: ep.model, models: [ep.model] } as never),
+           epSupportsThinking: providerSupportsThinking({ baseUrl: ep.baseUrl, defaultModel: ep.model, models: [ep.model] }),
+
           agentCtx,
           saveDb: () => saveDb(config),
         };
@@ -479,7 +590,8 @@ void emitV2Event({ runId: runTaskId, sessionId: convId, taskId: runTaskId, agent
         if (toolLoopResult.interrupted) {
           // SSE error 事件（旧协议：断流显式上报，前端据此显示"响应流中断"）
           sseSend('error', JSON.stringify({ message: toolLoopResult.agentReply || 'AI 响应流中断（未收到完整结束标记）' }));
-          const errResult = { agentId: agent.id, name: agent.name, icon: agent.icon, role: agent.role, status: 'error', reply: toolLoopResult.agentReply || '响应流中断' };
+           const errResult: AgentResult = { agentId: agent.id, name: agent.name, icon: agent.icon, role: agent.role, status: 'error', reply: toolLoopResult.agentReply || '响应流中断', tokens: toolLoopResult.agentTokens };
+
           results[targetIndex] = errResult;
           sseSend('agent-result', JSON.stringify(errResult));
           if (body.conversationId) {
@@ -491,7 +603,8 @@ void emitV2Event({ runId: runTaskId, sessionId: convId, taskId: runTaskId, agent
           return;
         }
 
-        const doneResult = {
+         const doneResult: AgentResult = {
+
           agentId: agent.id,
           name: agent.name,
           icon: agent.icon,
@@ -510,7 +623,8 @@ void emitV2Event({ runId: runTaskId, sessionId: convId, taskId: runTaskId, agent
           });
         }
       } catch (e: unknown) {
-        const errResult = { agentId: agent.id, name: agent.name, icon: agent.icon, role: agent.role, status: 'error', reply: (e instanceof Error ? e.message : String(e)) };
+         const errResult: AgentResult = { agentId: agent.id, name: agent.name, icon: agent.icon, role: agent.role, status: 'error', reply: (e instanceof Error ? e.message : String(e)), tokens: 0 };
+
         results[targetIndex] = errResult;
         sseSend('agent-result', JSON.stringify(errResult));
         if (body.conversationId) {
@@ -524,19 +638,23 @@ void emitV2Event({ runId: runTaskId, sessionId: convId, taskId: runTaskId, agent
 
     // 3. Sisyphus 汇总所有结果 — 流式输出
     // L21/P1-36：过滤失败 Agent 与预分配槽位可能残留的 undefined，保留目标顺序
-    const filledResults = results.filter((r: any) => r !== undefined);
-    const validResults = filledResults.filter((r: any) => r.status !== 'error');
-    const errorResults = filledResults.filter((r: any) => r.status === 'error');
-    const historyContext = (body.history || []).filter((m: any) => m.role === 'user' || m.role === 'assistant').slice(-6)
-      .map((m: any) => {
-        // 剥离图片 markdown URL（/data/chat-images/ 是服务端虚拟路径，AI 无法访问）
-        const txt = typeof m.content === 'string'
-          ? m.content
-            .replace(/!\[[^\]]*\]\(\/data\/chat-images\/[^)]+\)/g, '[图片]')
-            .replace(/!\[[^\]]*\]\((data:image\/[^)]+)\)/g, '[图片]')
-            .trim()
-          : m.content;
-        return `${m.role === 'user' ? '用户' : 'AI'}: ${txt}`;
+     const filledResults = results.filter((result): result is AgentResult => result !== undefined)
+     const validResults = filledResults.filter((result) => result.status !== 'error')
+     const errorResults = filledResults.filter((result) => result.status === 'error')
+     const historyContext = body.history
+       .filter((message) => message.role === 'user' || message.role === 'assistant')
+       .slice(-6)
+       .map((message) => {
+
+         // 剥离图片 markdown URL（/data/chat-images/ 是服务端虚拟路径，AI 无法访问）
+         const txt = typeof message.content === 'string'
+           ? message.content
+             .replace(/!\[[^\]]*\]\(\/data\/chat-images\/[^)]+\)/g, '[图片]')
+             .replace(/!\[[^\]]*\]\((data:image\/[^)]+)\)/g, '[图片]')
+             .trim()
+           : message.content;
+         return `${message.role === 'user' ? '用户' : 'AI'}: ${txt}`;
+
       }).join('\n');
     // L26: 添加中文指令 + 图片提示（修复3：用户上传的图片已可见，勿再用截屏工具）
     const synthPrompt = `请用简体中文回答。以下是多个专业 Agent 对用户问题的分析结果。请综合这些结果，给用户一个完整、连贯、统一的最终回答。
@@ -552,17 +670,23 @@ ${errorResults.length > 0 ? `\n注意：以下 Agent 执行失败，结果不可
 1. 覆盖所有 Agent 的有价值观点
 2. 逻辑连贯，避免重复
 3. 直接给出最终答案，不要提到"根据各Agent分析"等`;
-    let finalReply = '';
-    // P1-38 修复：token 统计基于过滤后的 filledResults（剔除预分配空槽 undefined）
-    let totalAgentTokens = filledResults.reduce((sum: number, r: any) => sum + (r.tokens || 0), 0);
+     let finalReply = '';
+     let synthesisFailed = false
+     let synthesisEndReason: 'interrupted' | 'error' = 'error'
+     // P1-38 修复：token 统计基于过滤后的 filledResults（剔除预分配空槽 undefined）
+     let totalAgentTokens = filledResults.reduce((sum, result) => sum + result.tokens, 0)
+
+
     // P1-37 修复：汇总失败 fallback —— 选择最高置信度成功结果，
     // 而不是简单的 results[0]（可能只是最先完成的 Agent，不一定最可信）。
     const bestValidFallback = (): string => {
-      const done = filledResults.filter((r: any) => r && r.status === 'done');
+       const done = filledResults.filter((result) => result.status === 'done')
+
       if (done.length === 0) return '处理完成';
       // 优先选带实际工具成果的结果（更可信），其次取最后一个成功的
-      const withTool = done.filter((r: any) => r.toolSummary && r.toolSummary.length > 0);
-      const pick = withTool.length > 0 ? withTool[withTool.length - 1] : done[done.length - 1];
+       const withTool = done.filter((result) => (result.toolSummary?.length ?? 0) > 0)
+       const pick = withTool.length > 0 ? withTool[withTool.length - 1] : done[done.length - 1]
+
       return pick?.reply || '处理完成';
     };
     try {
@@ -575,7 +699,8 @@ ${errorResults.length > 0 ? `\n注意：以下 Agent 执行失败，结果不可
           { role: 'system', content: MANDATORY_COMPLIANCE_PROMPT + '\n\n' + synthPromptText },
           { role: 'user', content: synthPrompt },
           // 修复3：汇总阶段也附加用户上传的图片（多模态可见，避免依赖子 Agent 文本转述）
-          ...(hasImages ? body.images!.map(img => ({ role: 'user' as const, content: [{ type: 'image_url', image_url: { url: img } }] })) : []),
+           ...(hasImages ? body.images.map(img => ({ role: 'user' as const, content: [{ type: 'image_url', image_url: { url: img } }] })) : []),
+
         ];
         const stream = sisyphusRuntime.runtime.stream({
           provider: sisyphusRuntime.config.type,
@@ -613,10 +738,21 @@ ${errorResults.length > 0 ? `\n注意：以下 Agent 执行失败，结果不可
                 totalAgentTokens += chunk.usage?.totalTokens ?? (chunk.usage?.inputTokens ?? 0) + (chunk.usage?.outputTokens ?? 0);
                 break;
               }
-              case 'finish': {
-                if (chunk.reason.kind === 'error') throw new Error(chunk.reason.message || '汇总生成失败');
-                break;
-              }
+               case 'finish': {
+                 if (chunk.reason.kind === 'error' || chunk.reason.kind === 'content_filter' || chunk.reason.kind === 'max-tokens') {
+                   if (chunk.reason.kind === 'content_filter' || chunk.reason.kind === 'max-tokens') {
+                     synthesisEndReason = 'interrupted'
+                   }
+                   const message = chunk.reason.kind === 'error'
+                     ? chunk.reason.message || '汇总生成失败'
+                     : chunk.reason.kind === 'content_filter'
+                       ? '汇总响应被内容过滤器中断'
+                       : '汇总响应因 token 上限被截断'
+                   throw new Error(message)
+                 }
+                 break;
+               }
+
               default: break;
             }
           }
@@ -655,7 +791,7 @@ ${errorResults.length > 0 ? `\n注意：以下 Agent 执行失败，结果不可
             { role: 'system', content: MANDATORY_COMPLIANCE_PROMPT + '\n\n' + synthPromptText },
             { role: 'user', content: synthPrompt },
             // 修复3：汇总阶段也附加用户上传的图片（多模态可见，避免依赖子 Agent 文本转述）
-            ...(hasImages ? body.images!.map(img => ({ role: 'user' as const, content: [{ type: 'image_url', image_url: { url: img } }] })) : []),
+            ...(hasImages ? body.images.map(img => ({ role: 'user' as const, content: [{ type: 'image_url', image_url: { url: img } }] })) : []),
           ],
           maxTokens: 2048,
           signal: clientAbort.signal,
@@ -711,12 +847,16 @@ ${errorResults.length > 0 ? `\n注意：以下 Agent 执行失败，结果不可
           throw e;
         }
       }
-    } catch { /* 汇总失败 → P1-37 修复：选最高置信度成功结果，而非 results[0]（可能只是最先完成的 Agent） */
-      finalReply = bestValidFallback();
-      sseSend('message', JSON.stringify({ content: finalReply }));
-    }
+     } catch {
+       synthesisFailed = true
+       finalReply = validResults.length === 0 ? 'AI 执行未正常结束' : bestValidFallback()
+       sseSend('message', JSON.stringify({ content: finalReply }))
+     }
 
-    // 保存 AI 汇总结果到对话（含 token 累计）
+
+     const orchestrationFailed = errorResults.length > 0 || synthesisFailed
+     // 保存 AI 汇总结果到对话（含 token 累计）
+
     // P1-14 修复：用户 abort 后不保存半截回复到 DB
     // 修复：若模型未返回 usage（流式接口部分不返回），用汇总内容长度估算兜底，确保 tokenTotal 不为 0
     if (body.conversationId && !clientAbort.signal.aborted) {
@@ -739,7 +879,8 @@ ${errorResults.length > 0 ? `\n注意：以下 Agent 执行失败，结果不可
           .run();
       }
 
-      db.update(conversations).set({ generationStatus: 'idle', updatedAt: now }).where(eq(conversations.id, body.conversationId)).run();
+       db.update(conversations).set({ generationStatus: orchestrationFailed ? 'interrupted' : 'idle', updatedAt: now }).where(eq(conversations.id, body.conversationId)).run();
+
     }
     // 持久化数据库（SSE 用 reply.raw 会绕过 Fastify 的 onResponse 钩子，需手动保存）
     try { saveDb(config); } catch (e: unknown) { console.error('[Agents] 持久化失败:', (e instanceof Error ? e.message : String(e)) || e); }
@@ -755,35 +896,64 @@ ${errorResults.length > 0 ? `\n注意：以下 Agent 执行失败，结果不可
       }
     }
 
-    // 统一协议：编排完成 → agent.completed(sisyphus) + task.completed
-    if (body.conversationId) {
-      eventBus.emit(convId, 'agent.completed', {
-        taskId: runTaskId, agentId: 'sisyphus', agentType: 'orchestrator',
-        status: 'completed', content: (finalReply || results[0]?.reply || '处理完成').slice(0, 500),
-      });
-      eventBus.emit(convId, 'task.completed', {
-        taskId: runTaskId, agentId: 'sisyphus', agentType: 'orchestrator',
-        status: 'completed', content: '完成',
-        // 结束原因：客户端中止 → aborted；其余正常 → completed
-        endReason: clientAbort.signal.aborted ? 'aborted' : 'completed',
-      });
-      // Aether 2.0 v2 mirror (FIX-1/FIX-2): finalize the runs row with terminal
-      // status + token snapshot, and emit run.completed / run.cancelled.
-      const terminalStatus = clientAbort.signal.aborted ? 'cancelled' as const : 'completed' as const;
-      try {
-        // P0-05: 状态机统一收口 —— 经 RunLifecycleManager 完成终态写入
-        if (terminalStatus === 'cancelled') {
-          runLifecycle.transition(runTaskId, 'cancel', { totalTokens: totalAgentTokens });
-        } else {
-          runLifecycle.transition(runTaskId, 'complete', { totalTokens: totalAgentTokens, endReason: 'completed' });
-        }
-        void emitV2Event({
-          runId: runTaskId, sessionId: convId, taskId: runTaskId, agentId: 'sisyphus',
-          type: terminalStatus === 'cancelled' ? 'run.cancelled' : 'run.completed',
-          payload: { endReason: terminalStatus === 'cancelled' ? 'aborted' : 'completed', tokenUsage: { inputTokens: 0, outputTokens: 0, totalTokens: totalAgentTokens } },
-        });
-      } catch { /* v2 runtime must never break legacy orchestration */ }
-    }
+     // 统一协议：编排完成、失败或取消都必须和真实终态一致。
+     if (body.conversationId) {
+       const content = finalReply || results[0]?.reply || '处理完成'
+       if (clientAbort.signal.aborted) {
+         eventBus.emit(convId, 'task.failed', {
+           taskId: runTaskId, agentId: 'sisyphus', agentType: 'orchestrator',
+           status: 'cancelled', content: '已停止', endReason: 'aborted',
+         })
+         try {
+           runLifecycle.transition(runTaskId, 'cancel', { totalTokens: totalAgentTokens })
+           void emitV2Event({
+             runId: runTaskId, sessionId: convId, taskId: runTaskId, agentId: 'sisyphus',
+             type: 'run.cancelled',
+             payload: { endReason: 'aborted', tokenUsage: { inputTokens: 0, outputTokens: 0, totalTokens: totalAgentTokens } },
+           })
+         } catch { /* v2 runtime must never break legacy orchestration */ }
+       } else if (orchestrationFailed) {
+         const endReason = synthesisFailed ? synthesisEndReason : 'error'
+         eventBus.emit(convId, 'agent.error', {
+           taskId: runTaskId, agentId: 'sisyphus', agentType: 'orchestrator',
+           status: endReason, content,
+         })
+         eventBus.emit(convId, 'task.failed', {
+           taskId: runTaskId, agentId: 'sisyphus', agentType: 'orchestrator',
+           status: endReason, content, endReason,
+         })
+         try {
+           runLifecycle.transition(runTaskId, 'fail', {
+             error: content,
+             endReason,
+             totalTokens: totalAgentTokens,
+           })
+           void emitV2Event({
+             runId: runTaskId, sessionId: convId, taskId: runTaskId, agentId: 'sisyphus',
+             type: 'run.failed',
+             payload: { endReason, error: { message: content }, tokenUsage: { inputTokens: 0, outputTokens: 0, totalTokens: totalAgentTokens } },
+           })
+         } catch { /* v2 runtime must never break legacy orchestration */ }
+       } else {
+         eventBus.emit(convId, 'agent.completed', {
+           taskId: runTaskId, agentId: 'sisyphus', agentType: 'orchestrator',
+           status: 'completed', content: content.slice(0, 500),
+         })
+         eventBus.emit(convId, 'task.completed', {
+           taskId: runTaskId, agentId: 'sisyphus', agentType: 'orchestrator',
+           status: 'completed', content: '完成', endReason: 'completed',
+         })
+         try {
+           runLifecycle.transition(runTaskId, 'complete', { totalTokens: totalAgentTokens, endReason: 'completed' })
+           void emitV2Event({
+             runId: runTaskId, sessionId: convId, taskId: runTaskId, agentId: 'sisyphus',
+             type: 'run.completed',
+             payload: { endReason: 'completed', tokenUsage: { inputTokens: 0, outputTokens: 0, totalTokens: totalAgentTokens } },
+           })
+         } catch { /* v2 runtime must never break legacy orchestration */ }
+       }
+     }
+
 
     // 发送结束标记
     sseSend('message', '[DONE]');

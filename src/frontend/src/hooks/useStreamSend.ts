@@ -96,9 +96,42 @@ export interface StreamSendOptions {
   mountedRef?: React.MutableRefObject<boolean>;
 }
 
+export interface StreamFailure {
+  readonly message: string
+  readonly retryable: boolean
+}
+
+export interface FailedStream {
+  readonly content: string
+  readonly failure: StreamFailure
+}
+
+const STREAM_TRUNCATED_MESSAGE = "响应流中断（未收到完整结束标记）"
+
+export function createStreamFailure(error: unknown): StreamFailure {
+  const rawMessage = error instanceof Error ? error.message : String(error)
+  const message = rawMessage === "stream-truncated" || rawMessage.startsWith("stream-truncated:")
+    ? STREAM_TRUNCATED_MESSAGE
+    : rawMessage.trim() || "AI 响应失败"
+
+  return { message, retryable: true }
+}
+
+export function createFailedStream(content: string, error: unknown): FailedStream {
+  return {
+    content,
+    failure: createStreamFailure(error),
+  }
+}
+
+export function isStreamAbortError(error: unknown): boolean {
+  return error instanceof Error && error.name === "AbortError"
+}
+
 export interface UseStreamSendReturn {
   sending: boolean;
   thinking: boolean;
+  failure: StreamFailure | null;
   streamTokens: { prompt_tokens: number; completion_tokens: number; total_tokens: number } | null;
   retryInfo: { attempt: number; maxRetries: number; status: number; delay: number } | null;
   liveReasoning: string;
@@ -145,9 +178,14 @@ export function useStreamSend(options: StreamSendOptions): UseStreamSendReturn {
 
   const [sending, setSending] = useState(false);
   const [thinking, setThinking] = useState(false);
+  const [failure, setFailure] = useState<StreamFailure | null>(null)
   const [streamTokens, setStreamTokens] = useState<{ prompt_tokens: number; completion_tokens: number; total_tokens: number } | null>(null);
   const [retryInfo, setRetryInfo] = useState<{ attempt: number; maxRetries: number; status: number; delay: number } | null>(null);
   const [liveReasoning, setLiveReasoning] = useState<string>('');
+
+  useEffect(() => {
+    setFailure(null)
+  }, [conversationId])
 
   // rAF flush state
   const rafPendingRef = useRef(false);
@@ -174,11 +212,6 @@ export function useStreamSend(options: StreamSendOptions): UseStreamSendReturn {
     }
   }, [flushUI]);
 
-  // FE-05: Check if error is user abort
-  const isAbortError = useCallback((e: unknown): boolean => {
-    return e instanceof Error && (e.name === 'AbortError' || (e.name === 'TypeError' && /abort|load failed/i.test(e.message)));
-  }, []);
-
   const handleSend = useCallback(async (contentOverride?: string) => {
     const currentConv = currentConvRef.current;
     if (!currentConv || sending) return;
@@ -189,6 +222,7 @@ export function useStreamSend(options: StreamSendOptions): UseStreamSendReturn {
 
     setSending(true);
     setThinking(true);
+    setFailure(null)
     onSendStart?.();
     setRetryInfo(null);
     onRetry?.(null);
@@ -271,8 +305,7 @@ export function useStreamSend(options: StreamSendOptions): UseStreamSendReturn {
                     accumulatedContentRef.current += ev.content;
                     scheduleFlush();
                   } else if (ev.eventType === 'agent.error' || ev.eventType === 'task.failed') {
-                    accumulatedContentRef.current += `\n❌ ${ev.content || '错误'}\n`;
-                    scheduleFlush();
+                    setFailure(createStreamFailure(ev.content || 'AI 响应失败'))
                   }
                   break;
                 }
@@ -298,14 +331,12 @@ export function useStreamSend(options: StreamSendOptions): UseStreamSendReturn {
                 }
                 case 'stream-truncated': {
                   if (currentConvRef.current !== sendConvId) return;
-                  accumulatedContentRef.current += '\n⚠️ 响应流中断（未收到完整结束标记）\n';
-                  scheduleFlush();
+                  setFailure(createStreamFailure('stream-truncated'));
                   break;
                 }
                 case 'error': {
                   if (currentConvRef.current !== sendConvId) return;
-                  accumulatedContentRef.current += `\n❌ ${event.message}\n`;
-                  scheduleFlush();
+                  setFailure(createStreamFailure(event.message));
                   break;
                 }
               }
@@ -363,6 +394,9 @@ export function useStreamSend(options: StreamSendOptions): UseStreamSendReturn {
                       } catch { /* ignore */ }
                     })();
                   }
+                  if (ev.eventType === 'agent.error' || ev.eventType === 'task.failed') {
+                    setFailure(createStreamFailure(ev.content || 'AI 响应失败'))
+                  }
                   break;
                 }
                 case 'text-delta': {
@@ -403,14 +437,12 @@ export function useStreamSend(options: StreamSendOptions): UseStreamSendReturn {
                 }
                 case 'stream-truncated': {
                   if (currentConvRef.current !== sendConvId) return;
-                  accumulatedContentRef.current += '\n⚠️ 响应流中断（未收到完整结束标记）\n';
-                  scheduleFlush();
+                  setFailure(createStreamFailure('stream-truncated'));
                   break;
                 }
                 case 'error': {
                   if (currentConvRef.current !== sendConvId) return;
-                  accumulatedContentRef.current += `\n❌ ${event.message}\n`;
-                  scheduleFlush();
+                  setFailure(createStreamFailure(event.message));
                   break;
                 }
               }
@@ -446,7 +478,7 @@ export function useStreamSend(options: StreamSendOptions): UseStreamSendReturn {
       if (onLoadConversations) await onLoadConversations();
       onSendEnd?.(true);
     } catch (e: unknown) {
-      if (isAbortError(e)) {
+      if (isStreamAbortError(e)) {
         if (currentConvRef.current === sendConvId && abortRef.current === sendController) {
           onMessagesUpdate(prev => prev.map(m =>
             m.id === 'temp-ai-streaming' ? { ...m, content: (m.content || '') + '\n\n⏹ 已停止生成' } : m
@@ -454,8 +486,10 @@ export function useStreamSend(options: StreamSendOptions): UseStreamSendReturn {
         }
       } else {
         if (currentConvRef.current === sendConvId && abortRef.current === sendController) {
+          const failedStream = createFailedStream(accumulatedContentRef.current, e)
+          setFailure(failedStream.failure)
           onMessagesUpdate(prev => prev.map(m =>
-            m.id === 'temp-ai-streaming' ? { ...m, content: (m.content || '') + `\n\n❌ 错误: ${e instanceof Error ? e.message : String(e)}` } : m
+            m.id === 'temp-ai-streaming' ? { ...m, content: failedStream.content } : m
           ));
         }
       }
@@ -492,7 +526,6 @@ export function useStreamSend(options: StreamSendOptions): UseStreamSendReturn {
     currentConvRef,
     abortRef,
     mountedRef,
-    isAbortError,
     flushUI,
     scheduleFlush,
   ]);
@@ -512,6 +545,7 @@ export function useStreamSend(options: StreamSendOptions): UseStreamSendReturn {
   return {
     sending,
     thinking,
+    failure,
     streamTokens,
     retryInfo,
     liveReasoning,

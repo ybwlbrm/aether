@@ -5,6 +5,13 @@
  * Pure TypeScript only.
  */
 
+export {
+  ToolRecoveryController,
+  isToolRetryable,
+  type ToolRecoveryOptions,
+  type ToolRecoveryRunOptions,
+} from '../runtime/execution-retry.js'
+
 // ToolResult types and helpers
 export {
   ToolResult,

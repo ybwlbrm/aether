@@ -177,7 +177,7 @@ export const workflows = sqliteTable('workflows', {
 export const workflowRuns = sqliteTable('workflow_runs', {
   id: text('id').primaryKey(),
   workflowId: text('workflow_id').notNull().references(() => workflows.id, { onDelete: 'cascade' }),
-  status: text('status', { enum: ['pending', 'running', 'completed', 'failed'] }).notNull().default('pending'),
+  status: text('status', { enum: ['pending', 'running', 'completed', 'failed', 'cancelled'] }).notNull().default('pending'),
   currentNodeId: text('current_node_id'),
   results: text('results').default('{}'), // JSON object: nodeId -> output
   error: text('error'),
@@ -213,13 +213,25 @@ export const activityEvents = sqliteTable('activity_events', {
 
 /**
  * Run 表 — 一次完整 AI 运行的根实体（对话消息 / 编排 / 工作流 / 后台任务统一入口）
- * 状态机：created → running ⇄ waiting → completed | failed | cancelled | interrupted
+ * 状态机：created → running ⇄ waiting → retry_waiting → retrying → running → verifying → completed
  */
 export const runs = sqliteTable('runs', {
   id: text('id').primaryKey(),
   conversationId: text('conversation_id').references(() => conversations.id, { onDelete: 'cascade' }),
   status: text('status', {
-    enum: ['created', 'running', 'waiting', 'completed', 'failed', 'cancelled', 'interrupted'],
+    enum: [
+      'created',
+      'running',
+      'waiting',
+      'retry_waiting',
+      'retrying',
+      'verifying',
+      'completed',
+      'failed',
+      'cancelled',
+      'interrupted',
+      'budget_exceeded',
+    ],
   }).notNull().default('created'),
   /** 运行模式：normal（单 Agent 直答）| super（多 Agent 编排）| workflow | background */
   mode: text('mode', { enum: ['normal', 'super', 'workflow', 'background'] }).notNull().default('normal'),
@@ -227,6 +239,11 @@ export const runs = sqliteTable('runs', {
   startedAt: text('started_at'),
   completedAt: text('completed_at'),
   endReason: text('end_reason'),
+  parentRunId: text('parent_run_id'),
+  retryOfRunId: text('retry_of_run_id'),
+  attempt: integer('attempt').notNull().default(1),
+  retryType: text('retry_type'),
+  lastUpdatedAt: text('last_updated_at'),
   inputTokens: integer('input_tokens').notNull().default(0),
   outputTokens: integer('output_tokens').notNull().default(0),
   totalTokens: integer('total_tokens').notNull().default(0),
@@ -247,6 +264,7 @@ export const tasks = sqliteTable('tasks', {
   status: text('status', {
     enum: ['pending', 'running', 'waiting', 'completed', 'failed', 'cancelled'],
   }).notNull().default('pending'),
+  attempt: integer('attempt').notNull().default(1),
   input: text('input'), // JSON
   output: text('output'), // JSON
   error: text('error'),

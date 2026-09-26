@@ -124,7 +124,7 @@ export interface WorkflowEdge {
 export interface WorkflowRun {
   id: string;
   workflowId: string;
-  status: 'pending' | 'running' | 'completed' | 'failed';
+  status: 'pending' | 'running' | 'completed' | 'failed' | 'cancelled';
   currentNodeId?: string;
   results: Record<string, unknown>;
   error?: string;

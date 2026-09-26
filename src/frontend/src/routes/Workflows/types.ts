@@ -26,9 +26,16 @@ export interface Workflow {
 
 export interface RunRecord {
   id: string;
-  status: 'pending' | 'running' | 'completed' | 'failed';
+  status: 'pending' | 'running' | 'completed' | 'failed' | 'cancelled';
   currentNodeId?: string;
-  results: Record<string, { label: string; type: string; output: string; data?: unknown }>;
+  results: Record<string, {
+    label: string
+    type: string
+    output: string
+    data?: unknown
+    status: 'completed' | 'failed'
+    error?: string
+  }>;
   error?: string;
   startedAt: string;
   completedAt?: string;

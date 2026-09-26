@@ -1,4 +1,4 @@
-import { CheckCircle2, AlertCircle, Loader2, X } from 'lucide-react';
+import { CheckCircle2, AlertCircle, CircleSlash2, Loader2, X } from 'lucide-react';
 import type { RunRecord, Workflow } from './types';
 import { NODE_META } from './constants';
 
@@ -37,8 +37,9 @@ export function RunHistory({ runs, editing, runResult, onSelectRun, onCloseRunRe
               <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, fontWeight: 600 }}>
                 {r.status === 'completed' ? <CheckCircle2 size={13} style={{ color: 'var(--color-success)' }} />
                   : r.status === 'failed' ? <AlertCircle size={13} style={{ color: 'var(--color-danger)' }} />
+                  : r.status === 'cancelled' ? <CircleSlash2 size={13} style={{ color: 'var(--text-tertiary)' }} />
                   : <Loader2 size={13} className="spin" />}
-                {r.status === 'completed' ? '已完成' : r.status === 'failed' ? '失败' : '运行中'}
+                {r.status === 'completed' ? '已完成' : r.status === 'failed' ? '失败' : r.status === 'cancelled' ? '已取消' : '运行中'}
                 <span style={{ color: 'var(--text-tertiary)', fontWeight: 400, marginLeft: 'auto' }}>
                   {new Date(r.startedAt).toLocaleString('zh-CN')}
                 </span>
@@ -66,8 +67,10 @@ export function RunResultPanel({ runResult, editing, onClose }: RunResultPanelPr
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12, fontSize: 13, fontWeight: 600 }}>
         {runResult.status === 'completed'
           ? <CheckCircle2 size={15} style={{ color: 'var(--color-success)' }} />
-          : <AlertCircle size={15} style={{ color: 'var(--color-danger)' }} />}
-        运行结果 · {runResult.status === 'completed' ? '成功' : '失败'}
+          : runResult.status === 'cancelled'
+            ? <CircleSlash2 size={15} style={{ color: 'var(--text-tertiary)' }} />
+            : <AlertCircle size={15} style={{ color: 'var(--color-danger)' }} />}
+        运行结果 · {runResult.status === 'completed' ? '成功' : runResult.status === 'cancelled' ? '已取消' : '失败'}
         <button className="btn btn-ghost" style={{ padding: 4, marginLeft: 'auto' }} onClick={onClose}><X size={14} /></button>
       </div>
       {runResult.error && (

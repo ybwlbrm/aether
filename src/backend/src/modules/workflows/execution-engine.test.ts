@@ -56,24 +56,41 @@ describe('workflows executeWorkflow — §41 受控并行 DAG + §42 条件边�
     id, source, target, ...(condition ? { condition } : {}),
   });
 
+  type TestNode = ReturnType<typeof node>
+  type TestNodeResult = {
+    readonly output: string
+    readonly data?: unknown
+    readonly error?: string
+  }
+
   /** 最小 executeWorkflow 上下文：用空 db/saveDb 桩 */
-  function makeOpts(nodes: ReturnType<typeof node>[], edges: ReturnType<typeof edge>[], executeNode: (n: any) => Promise<{ output: string; data?: unknown }>) {
+  function makeOpts(
+    nodes: TestNode[],
+    edges: ReturnType<typeof edge>[],
+    executeNode: (node: TestNode) => Promise<TestNodeResult | string>,
+    signal?: AbortSignal,
+  ) {
+    const fakeDb = {
+      update: () => ({ set: () => ({ where: () => ({ run: () => {} }) }) }),
+      select: () => ({ from: () => ({ where: () => ({ get: () => ({ status: 'running' }) }) }) }),
+      insert: () => ({ values: () => ({ run: () => {} }) }),
+    }
     return {
       workflowId: 'wf-test',
       nodes,
       edges,
       input: {},
       config: { workflowMaxParallel: 2 },
-      executeNode: (n: any, _cfg: any, ctx: Record<string, unknown>) => executeNode(n),
+      executeNode: (n: TestNode, _cfg: unknown, _ctx: Record<string, unknown>) => executeNode(n),
       db: {
-        update: () => ({ set: () => ({ where: () => ({ run: () => {} }) }) }),
-        select: () => ({ from: () => ({ where: () => ({ get: () => ({ status: 'running' }) }) }) }),
-        insert: () => ({ values: () => ({ run: () => {} }) }),
+        ...fakeDb,
+        transaction: (fn: (tx: typeof fakeDb) => unknown): unknown => fn(fakeDb),
       },
       saveDb: () => {},
       request: { raw: { socket: { destroyed: false } } },
       onEvent: () => {},
-    } as never;
+      signal,
+    } as never
   }
 
   it('§41: 多根并行节点均执行（非串行首根）', async () => {
@@ -156,4 +173,112 @@ describe('workflows executeWorkflow — §41 受控并行 DAG + §42 条件边�
     assert.ok(executed.includes('b'), 'b 应执行（随后失败）');
     assert.ok(!executed.includes('d'), 'b 失败时 d 不应运行（multi-parent join 保护）');
   });
+
+  it('节点返回错误字符串时 workflow 终态为 failed', async () => {
+    // Given: 首个节点返回结构化错误标记，后继节点仍可被调度
+    const executed: string[] = []
+    const nodes = [node('a'), node('b')]
+    const edges = [edge('e1', 'a', 'b')]
+    const errorOutput = 'AI 调用失败: provider unavailable'
+
+    // When
+    const result = await executeWorkflow(makeOpts(nodes, edges, async (n) => {
+      executed.push(n.id)
+      if (n.id === 'a') return { output: errorOutput, error: errorOutput }
+      return { output: `out-${n.id}` }
+    }))
+
+    // Then
+    assert.equal(result.status, 'failed')
+    assert.deepEqual(result.results.a, {
+      label: 'a',
+      type: 'tool',
+      output: errorOutput,
+      status: 'failed',
+      error: errorOutput,
+    })
+    assert.ok(!executed.includes('b'), '失败节点的下游不应继续执行')
+  })
+
+  it('同波节点单点抛错时等待其余节点收尾并阻断下游', async () => {
+    // Given: a/b 同波，a 等 b 启动后抛错；c 依赖 a+b
+    const executed: string[] = []
+    let markBStarted = (): void => {}
+    let releaseB = (): void => {}
+    const bStarted = new Promise<void>((resolve) => { markBStarted = resolve })
+    const bReleased = new Promise<void>((resolve) => { releaseB = resolve })
+    const nodes = [node('a'), node('b'), node('c')]
+    const edges = [edge('a-c', 'a', 'c'), edge('b-c', 'b', 'c')]
+
+    // When
+    const runPromise = executeWorkflow(makeOpts(nodes, edges, async (current) => {
+      executed.push(current.id)
+      if (current.id === 'a') {
+        await bStarted
+        throw new Error('a failed')
+      }
+      if (current.id === 'b') {
+        markBStarted()
+        await bReleased
+      }
+      return { output: `out-${current.id}` }
+    }))
+    await bStarted
+    setImmediate(releaseB)
+    const result = await runPromise
+
+    // Then
+    assert.equal(result.status, 'failed')
+    assert.equal((result.results.a as { status?: string } | undefined)?.status, 'failed')
+    assert.match(String((result.results.a as { error?: string } | undefined)?.error), /a failed/)
+    assert.equal((result.results.b as { status?: string } | undefined)?.status, 'completed')
+    assert.ok(!executed.includes('c'), '失败波次不得调度下游节点')
+  })
+
+  it('旧 executor 返回裸字符串时保守标记 failed', async () => {
+    // Given
+    const nodes = [node('legacy'), node('downstream')]
+    const edges = [edge('legacy-downstream', 'legacy', 'downstream')]
+
+    // When
+    const result = await executeWorkflow(makeOpts(nodes, edges, async (current) =>
+      current.id === 'legacy' ? 'legacy output' : { output: 'should not run' }
+    ))
+
+    // Then
+    assert.equal(result.status, 'failed')
+    assert.equal((result.results.legacy as { status?: string } | undefined)?.status, 'failed')
+    assert.match(String((result.results.legacy as { error?: string } | undefined)?.error), /未结构化/)
+  })
+
+  it('取消后不再推进后续节点', async () => {
+    // Given: 首个节点运行中，第二个节点位于下一波
+    const controller = new AbortController()
+    const executed: string[] = []
+    const nodes = [node('a'), node('b')]
+    const edges = [edge('e1', 'a', 'b')]
+    let markStarted = (): void => {}
+    let releaseFirst = (): void => {}
+    const firstStarted = new Promise<void>((resolve) => { markStarted = resolve })
+    const firstReleased = new Promise<void>((resolve) => { releaseFirst = resolve })
+
+    // When: 首节点未结束时取消，再允许当前波次收尾
+    const runPromise = executeWorkflow(makeOpts(nodes, edges, async (n) => {
+      executed.push(n.id)
+      if (n.id === 'a') {
+        markStarted()
+        await firstReleased
+      }
+      return { output: `out-${n.id}` }
+    }, controller.signal))
+    await firstStarted
+    controller.abort()
+    releaseFirst()
+    const result = await runPromise
+
+    // Then
+    assert.equal(result.status, 'cancelled')
+    assert.notEqual(result.status, 'completed')
+    assert.ok(!executed.includes('b'), '取消后下一波节点不应执行')
+  })
 });

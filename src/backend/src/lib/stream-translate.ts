@@ -27,6 +27,73 @@ export interface WireChunk {
   usage?: { prompt_tokens: number; completion_tokens: number; total_tokens: number };
 }
 
+type WireToolCall = {
+  readonly index?: number;
+  readonly id?: string;
+  readonly type?: string;
+  readonly function?: {
+    readonly name?: string;
+    readonly arguments?: string;
+  };
+};
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function parseWireToolCalls(value: unknown): WireToolCall[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((item) => {
+    if (!isRecord(item)) return [];
+    const fn = isRecord(item.function) ? item.function : undefined;
+    const call: WireToolCall = {
+      ...(typeof item.index === 'number' ? { index: item.index } : {}),
+      ...(typeof item.id === 'string' ? { id: item.id } : {}),
+      ...(typeof item.type === 'string' ? { type: item.type } : {}),
+      ...(fn
+        ? {
+            function: {
+              ...(typeof fn.name === 'string' ? { name: fn.name } : {}),
+              ...(typeof fn.arguments === 'string' ? { arguments: fn.arguments } : {}),
+            },
+          }
+        : {}),
+    };
+    return [call];
+  });
+}
+
+function parseWireChunk(value: unknown): WireChunk | null {
+  if (!isRecord(value)) return null;
+  const rawChoices = Array.isArray(value.choices) ? value.choices : [];
+  const choices = rawChoices.flatMap((choice) => {
+    if (!isRecord(choice)) return [];
+    const delta = isRecord(choice.delta) ? choice.delta : {};
+    const finishReason = typeof choice.finish_reason === 'string' ? choice.finish_reason : null;
+    return [{
+      index: typeof choice.index === 'number' ? choice.index : 0,
+      delta,
+      finish_reason: finishReason,
+    }];
+  });
+  const rawUsage = isRecord(value.usage) ? value.usage : undefined;
+  const usage = rawUsage
+    ? {
+        prompt_tokens: typeof rawUsage.prompt_tokens === 'number' ? rawUsage.prompt_tokens : 0,
+        completion_tokens: typeof rawUsage.completion_tokens === 'number' ? rawUsage.completion_tokens : 0,
+        total_tokens: typeof rawUsage.total_tokens === 'number' ? rawUsage.total_tokens : 0,
+      }
+    : undefined;
+  return {
+    id: typeof value.id === 'string' ? value.id : '',
+    object: typeof value.object === 'string' ? value.object : '',
+    created: typeof value.created === 'number' ? value.created : 0,
+    model: typeof value.model === 'string' ? value.model : '',
+    choices,
+    ...(usage ? { usage } : {}),
+  };
+}
+
 /** 内部打开的块 */
 interface OpenBlock {
   index: number;
@@ -46,6 +113,7 @@ export function mapFinishReason(fr: string): FinishReason {
     case 'function_call':
       return { kind: 'tool_calls' };
     case 'length': return { kind: 'max-tokens' };
+    case 'content_filter': return { kind: 'content_filter' };
     default:
       return { kind: 'error', message: `finish_reason: ${fr}`, code: fr.toUpperCase() };
   }
@@ -104,12 +172,17 @@ export async function* translate(payloads: AsyncIterable<string>): AsyncGenerato
   for await (const raw of payloads) {
     if (raw === SSE_DONE) { sawDone = true; break; }
 
-    let chunk: WireChunk;
-    try {
-      chunk = JSON.parse(raw) as WireChunk;
-    } catch {
-      throw new StreamError('MALFORMED_RESPONSE', `invalid JSON payload: ${raw.slice(0, 200)}`);
-    }
+     let chunk: WireChunk | null;
+     try {
+       const parsed: unknown = JSON.parse(raw);
+       chunk = parseWireChunk(parsed);
+     } catch {
+       throw new StreamError('MALFORMED_RESPONSE', `invalid JSON payload: ${raw.slice(0, 200)}`);
+     }
+     if (!chunk) {
+       throw new StreamError('MALFORMED_RESPONSE', `invalid wire chunk: ${raw.slice(0, 200)}`);
+     }
+
 
     const choice = chunk.choices?.[0];
     if (choice?.finish_reason != null) finishReasonRaw = choice.finish_reason;
@@ -117,9 +190,11 @@ export async function* translate(payloads: AsyncIterable<string>): AsyncGenerato
     const delta = choice?.delta;
     if (!delta) continue;
 
-    // 推理内容（DeepSeek: reasoning_content；其他: reasoning）
-    const reasoningDelta = (delta.reasoning_content ?? delta.reasoning) as string | undefined;
-    if (typeof reasoningDelta === 'string' && reasoningDelta.length > 0) {
+     // 推理内容（DeepSeek: reasoning_content；其他: reasoning）
+     const rawReasoning = delta.reasoning_content ?? delta.reasoning
+     const reasoningDelta = typeof rawReasoning === 'string' ? rawReasoning : undefined
+     if (reasoningDelta && reasoningDelta.length > 0) {
+
       let block = latestOfKind('reasoning');
       if (!block) {
         const opened = openBlock('reasoning');
@@ -129,9 +204,10 @@ export async function* translate(payloads: AsyncIterable<string>): AsyncGenerato
       for (const ev of pushText(block, 'reasoning', reasoningDelta)) yield ev;
     }
 
-    // 文本内容
-    const textDelta = delta.content as string | undefined;
-    if (typeof textDelta === 'string' && textDelta.length > 0) {
+     // 文本内容
+     const textDelta = typeof delta.content === 'string' ? delta.content : undefined
+     if (textDelta && textDelta.length > 0) {
+
       let block = latestOfKind('text');
       if (!block) {
         const opened = openBlock('text');
@@ -141,13 +217,10 @@ export async function* translate(payloads: AsyncIterable<string>): AsyncGenerato
       for (const ev of pushText(block, 'text', textDelta)) yield ev;
     }
 
-    // 工具调用
-    const toolCalls = delta.tool_calls as Array<{
-      index?: number; id?: string; type?: string;
-      function?: { name?: string; arguments?: string };
-    }> | undefined;
-    if (Array.isArray(toolCalls)) {
-      for (const tc of toolCalls) {
+     // 工具调用
+     const toolCalls = parseWireToolCalls(delta.tool_calls)
+     for (const tc of toolCalls) {
+
         const fn = tc.function;
         if (fn?.name) {
           // 新工具调用开始
@@ -164,11 +237,11 @@ export async function* translate(payloads: AsyncIterable<string>): AsyncGenerato
             for (const ev of pushArgs(block, fn?.arguments ?? '')) yield ev;
           }
         }
-      }
-    }
-  }
+       }
+     }
 
-  if (!sawDone) {
+   if (!sawDone) {
+
     throw new StreamError('STREAM_CLOSED', 'payload stream closed before [DONE]');
   }
 
@@ -185,7 +258,8 @@ export async function* translate(payloads: AsyncIterable<string>): AsyncGenerato
   }
   if (usage) yield { type: 'usage', usage };
 
-  const reason = finishReasonRaw != null ? mapFinishReason(finishReasonRaw) : { kind: 'stop' as const };
+   const reason: FinishReason = finishReasonRaw != null ? mapFinishReason(finishReasonRaw) : { kind: 'stop' }
+
   // stop / max-tokens 但无任何内容块 → 空响应错误
   if (!openedAny && (reason.kind === 'stop' || reason.kind === 'max-tokens')) {
     yield { type: 'finish', reason: { kind: 'error', message: 'empty response', code: 'EMPTY_RESPONSE' } };
@@ -236,11 +310,12 @@ export function buildChatRequestBody(args: BuildBodyArgs): ChatRequestBody {
  */
 export function parseToolArgsSafe(raw: string | null | undefined): { args: Record<string, unknown>; ok: boolean } {
   if (!raw || raw.trim() === '') return { args: {}, ok: true };
-  try {
-    const parsed = JSON.parse(raw) as unknown;
-    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-      return { args: parsed as Record<string, unknown>, ok: true };
-    }
+   try {
+     const parsed: unknown = JSON.parse(raw)
+     if (isRecord(parsed)) {
+       return { args: parsed, ok: true }
+     }
+
     return { args: {}, ok: true };
   } catch {
     return { args: {}, ok: false };

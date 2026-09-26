@@ -160,7 +160,7 @@ export interface AgentEventEnvelope {
   /** 扩展元数据（token 用量、耗时等） */
   metadata?: Record<string, unknown>;
   /** 任务结束原因（task.completed 携带：stop/tool_calls/max-tokens/error/aborted/max_turns/completed/budget_exceeded；task.failed 可携带 interrupted） */
-  endReason?: 'stop' | 'tool_calls' | 'max-tokens' | 'error' | 'aborted' | 'max_turns' | 'completed' | 'budget_exceeded' | 'interrupted';
+  endReason?: 'stop' | 'tool_calls' | 'max-tokens' | 'content_filter' | 'error' | 'aborted' | 'max_turns' | 'completed' | 'budget_exceeded' | 'interrupted';
 }
 
 /** 活动流渲染投影用的紧凑表示（前端可直接渲染的一条 Activity） */

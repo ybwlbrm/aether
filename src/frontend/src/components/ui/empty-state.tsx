@@ -1,25 +1,33 @@
-import type { ReactNode } from 'react';
+import type { HTMLAttributes, ReactNode } from "react"
 
-/**
- * 统一空状态组件（W4-6：消除 Chat/CodingHome/Knowledge/Projects 等页面的重复空状态实现）
- */
-interface EmptyStateProps {
-  icon?: ReactNode;
-  title: string;
-  description?: string;
-  action?: ReactNode;
-  className?: string;
+import { cn } from "@/lib/utils"
+
+export interface EmptyStateProps extends Omit<HTMLAttributes<HTMLDivElement>, "title"> {
+  readonly icon?: ReactNode
+  readonly title: ReactNode
+  readonly description?: ReactNode
+  readonly action?: ReactNode
 }
 
-export function EmptyState({ icon, title, description, action, className }: EmptyStateProps) {
+export function EmptyState({ icon, title, description, action, className, ...props }: EmptyStateProps) {
   return (
-    <div className={`glass-card ${className || ''}`}>
-      <div className="empty-state">
-        {icon && <div className="empty-state-icon">{icon}</div>}
-        <div className="empty-state-title">{title}</div>
-        {description && <div className="empty-state-desc">{description}</div>}
-        {action}
+    <div data-slot="empty-state" className={cn("ui-empty-state glass-card", className)} {...props}>
+      <div data-slot="empty-state-content" className="ui-state-content">
+        {icon ? (
+          <div data-slot="empty-state-icon" className="ui-state-icon" aria-hidden="true">
+            {icon}
+          </div>
+        ) : null}
+        <div data-slot="empty-state-title" className="ui-state-title">
+          {title}
+        </div>
+        {description ? (
+          <div data-slot="empty-state-description" className="ui-state-description">
+            {description}
+          </div>
+        ) : null}
+        {action ? <div data-slot="empty-state-action">{action}</div> : null}
       </div>
     </div>
-  );
+  )
 }

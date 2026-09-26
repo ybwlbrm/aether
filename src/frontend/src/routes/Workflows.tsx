@@ -9,18 +9,21 @@ import { NODE_META, PALETTE, uid } from './Workflows/constants';
 import { notificationCenter, buildTerminalDedupeKey } from '../lib/notification-center';
 
 /** P0 通知幂等化：工作流终态 → NotificationCenter（唯一入口，直接/编辑器/API 运行同一语义） */
-function notifyWorkflowTerminal(runId: string | undefined, wfName: string, status: string, error?: string): void {
+function notifyWorkflowTerminal(runId: string | undefined, wfName: string, status: RunRecord['status'], error?: string): void {
   const id = runId ?? `${wfName}:${Date.now()}`;
-  const terminalType = status === 'completed' ? 'completed' : 'failed';
+  const terminalType = status === 'completed' ? 'completed' : status === 'cancelled' ? 'cancelled' : 'failed';
+  const title = status === 'completed'
+    ? '✅ 工作流运行完成'
+    : status === 'cancelled' ? '工作流运行已取消' : '❌ 工作流运行失败';
   notificationCenter.notifyOnce({
     id: `wf-term-${id}`,
     type: terminalType,
-    title: status === 'completed' ? '✅ 工作流运行完成' : '❌ 工作流运行失败',
-    body: status === 'completed' ? `${wfName} 执行成功` : (error || '未知错误'),
+    title,
+    body: status === 'completed' ? `${wfName} 执行成功` : (error || (status === 'cancelled' ? '用户停止工作流' : '未知错误')),
     createdAt: new Date().toISOString(),
     dedupeKey: buildTerminalDedupeKey('workflow', id, terminalType),
     priority: terminalType === 'completed' ? 'low' : 'high',
-    always: terminalType === 'failed', // 失败即使页面聚焦也提示
+    always: terminalType === 'failed',
   });
 }
 

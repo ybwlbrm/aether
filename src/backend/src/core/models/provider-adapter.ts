@@ -5,12 +5,12 @@
  * Pure TypeScript — no Fastify, no SSE, no React, no zod-for-runtime deps.
  */
 
-import type { ModelRequest, ModelResponse } from './model-runtime.js';
-import type { StreamChunk, TokenUsage, FinishReason } from '@pacc/shared';
-import { ModelError } from '../errors/index.js';
-import { streamToComplete } from './model-runtime.js';
-import { createRetryPolicy, extractRetryAfterMs } from './retry-policy.js';
-import { createCircuitBreaker } from './circuit-breaker.js';
+import type { ModelRequest, ModelResponse } from './model-runtime.js'
+import type { StreamChunk, TokenUsage, FinishReason } from '@pacc/shared'
+import { ModelError, RetryExhaustedError } from '../errors/index.js'
+import { streamToComplete } from './model-runtime.js'
+import { createRetryPolicy, extractRetryAfterMs } from './retry-policy.js'
+import { createCircuitBreaker } from './circuit-breaker.js'
 
 /**
  * Provider adapter interface — implemented by each provider integration.
@@ -74,7 +74,27 @@ interface WireChunk {
 export type Transport = (
   request: ModelRequest,
   signal: AbortSignal | undefined
-) => AsyncIterable<Uint8Array>;
+) => AsyncIterable<Uint8Array>
+
+function providerRetryExhausted(
+  request: ModelRequest,
+  lastError: unknown,
+  maxAttempts: number,
+): RetryExhaustedError {
+  return new RetryExhaustedError(
+    `provider retry exhausted after ${maxAttempts} attempts`,
+    {
+      maxAttempts,
+      backoffMs: 0,
+      code: 'RETRY_EXHAUSTED',
+      lastError,
+      context: {
+        provider: request.provider,
+        model: request.model,
+      },
+    },
+  )
+}
 
 /** Options for createFetchTransport */
 export interface FetchTransportOptions {
@@ -125,7 +145,7 @@ export interface FetchTransportOptions {
   apiKey?: string;
   /** Custom fetch implementation (for testing / non-browser envs) */
   fetchImpl?: typeof fetch;
-  /** Retry policy（缺省创建：3 次重试 + jitter） */
+  /** Retry policy（缺省创建：5 次重试 + jitter） */
   retryPolicy?: import('./retry-policy.js').RetryPolicy;
   /** Circuit breaker（缺省创建：5 次失败熔断 30s） */
   circuitBreaker?: import('./circuit-breaker.js').CircuitBreaker;
@@ -146,17 +166,16 @@ export function createFetchTransport(opts: FetchTransportOptions): Transport {
   const circuitBreaker = opts.circuitBreaker ?? createCircuitBreaker();
 
   return async function* (request, signal): AsyncIterable<Uint8Array> {
-    const body = buildChatBody(request);
-    let attempt = 0;
+    const body = buildChatBody(request)
+    let attempt = 0
     for (;;) {
-      // 熔断检查（P0-10）
-      if (!circuitBreaker.allowRequest()) {
+      if (attempt === 0 && !circuitBreaker.allowRequest()) {
         throw new ModelError('provider circuit breaker open — 快速失败（连续失败过多）', {
           provider: request.provider,
           model: request.model,
           code: 'CIRCUIT_OPEN',
           retryable: false,
-        });
+        })
       }
       let response: Response;
       try {
@@ -172,64 +191,69 @@ export function createFetchTransport(opts: FetchTransportOptions): Transport {
       } catch (e: unknown) {
         // 网络错误（Abort 除外）→ 可重试
         if (signal?.aborted) throw e;
-        circuitBreaker.recordFailure();
-        const netErr = e instanceof Error ? e : new Error(String(e));
-        if (retryPolicy.shouldRetry(attempt, { code: 'NETWORK_ERROR', retryable: true })) {
-          // §14 修复：attempt 语义 = 当前失败次数（0 起）。先算 delay（attempt=0 → 2^0=base），
-          // 再 attempt += 1 进入下一次循环 —— 禁止先 +1 再算 delay（会跳过 2^0 档）。
-          const delay = retryPolicy.delayMs(attempt);
-          attempt += 1;
-          await retryPolicy.sleep(delay, signal);
-          continue;
-        }
-        throw new ModelError(`provider network error: ${netErr.message}`, {
+        const netErr = new ModelError(`provider network error: ${e instanceof Error ? e.message : String(e)}`, {
           provider: request.provider,
           model: request.model,
           code: 'NETWORK_ERROR',
           retryable: true,
-        });
+        })
+        if (retryPolicy.shouldRetry(attempt, netErr)) {
+          const delay = retryPolicy.delayMs(attempt)
+          attempt += 1
+          await retryPolicy.sleep(delay, signal)
+          continue
+        }
+        circuitBreaker.recordFailure()
+        throw providerRetryExhausted(request, netErr, retryPolicy.maxAttempts)
       }
 
       if (!response.ok) {
-        circuitBreaker.recordFailure();
         const text = await response.text().catch(() => '');
-        // Retry-After 头（秒）→ 毫秒
+        // Retry-After 头（支持秒数/HTTP-date/0；由 extractRetryAfterMs 统一解析）→ 毫秒
         const retryAfterHeader = response.headers.get('retry-after');
-        const retryAfterMs = retryAfterHeader !== null && Number(retryAfterHeader) > 0
-          ? Number(retryAfterHeader) * 1000
-          : undefined;
+        const retryAfterMs = retryAfterHeader !== null ? extractRetryAfterMs(retryAfterHeader) : undefined;
+        const retryable = response.status === 429 || response.status >= 500;
         const err = new ModelError(`provider request failed (${response.status}): ${text.slice(0, 200)}`, {
           provider: request.provider,
           model: request.model,
           code: response.status === 429 ? 'RATE_LIMIT' : 'PROVIDER_UNAVAILABLE',
           statusCode: response.status,
-          retryable: response.status === 429 || response.status >= 500,
+          retryable,
         });
-        // 附加 retryAfterMs（供 RetryPolicy 尊重 Retry-After）
-        const withRetryAfter = Object.assign(err, { retryAfterMs });
+        // 熔断只记录可重试的传输级失败（429/5xx）；4xx 属业务错误，不应累积熔断失败。
+        const withRetryAfter = Object.assign(err, { retryAfterMs })
         if (retryPolicy.shouldRetry(attempt, withRetryAfter)) {
-          // §14 修复：先按当前 attempt 计算 delay，再递增 —— 首次重试用 2^0 档
-          const delay = retryPolicy.delayMs(attempt, extractRetryAfterMs(withRetryAfter));
-          attempt += 1;
-          await retryPolicy.sleep(delay, signal);
-          continue;
+          const delay = retryPolicy.delayMs(attempt, retryAfterMs)
+          attempt += 1
+          await retryPolicy.sleep(delay, signal)
+          continue
         }
-        throw err;
+        if (retryable) {
+          circuitBreaker.recordFailure()
+          throw providerRetryExhausted(request, err, retryPolicy.maxAttempts)
+        }
+        throw err
       }
 
-      // 成功：重置熔断计数
-      circuitBreaker.recordSuccess();
-
       if (!response.body) {
-        throw new ModelError('provider returned an empty body', {
+        const emptyBodyError = new ModelError('provider returned an empty body', {
           provider: request.provider,
           model: request.model,
           code: 'PROVIDER_UNAVAILABLE',
           retryable: true,
-        });
+        })
+        if (retryPolicy.shouldRetry(attempt, emptyBodyError)) {
+          const delay = retryPolicy.delayMs(attempt)
+          attempt += 1
+          await retryPolicy.sleep(delay, signal)
+          continue
+        }
+        circuitBreaker.recordFailure()
+        throw providerRetryExhausted(request, emptyBodyError, retryPolicy.maxAttempts)
       }
 
-      const reader = response.body.getReader();
+      circuitBreaker.recordSuccess()
+      const reader = response.body.getReader()
       try {
         for (;;) {
           const { done, value } = await reader.read();
@@ -273,7 +297,7 @@ export interface OpenAICompatibleAdapterOptions {
    *  The transport should yield Uint8Array chunks from the SSE connection.
    */
   transport?: Transport;
-  /** P0-10: 自定义 RetryPolicy（缺省 3 次重试 + jitter） */
+  /** P0-10: 自定义 RetryPolicy（缺省 5 次重试 + jitter） */
   retryPolicy?: ReturnType<typeof createRetryPolicy>;
   /** P0-10: 自定义 CircuitBreaker（缺省 5 次失败熔断 30s） */
   circuitBreaker?: ReturnType<typeof createCircuitBreaker>;
@@ -301,8 +325,9 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
   private readonly transport?: Transport;
   private readonly mock?: (request: ModelRequest) => AsyncIterable<StreamChunk>;
   private readonly allowHttpTransport: boolean;
-  private readonly retryPolicy?: ReturnType<typeof createRetryPolicy>;
-  private readonly circuitBreaker?: ReturnType<typeof createCircuitBreaker>;
+  private readonly retryPolicy?: ReturnType<typeof createRetryPolicy>
+  private readonly circuitBreaker?: ReturnType<typeof createCircuitBreaker>
+  private readonly httpTransport?: Transport
 
   constructor(options: OpenAICompatibleAdapterOptions) {
     this.providerId = options.providerId;
@@ -312,8 +337,17 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
     this.transport = options.transport;
     this.mock = options.mock;
     this.allowHttpTransport = options.allowHttpTransport ?? false;
-    this.retryPolicy = options.retryPolicy;
-    this.circuitBreaker = options.circuitBreaker;
+    this.retryPolicy = options.retryPolicy
+    this.circuitBreaker = options.circuitBreaker
+    this.httpTransport = this.allowHttpTransport
+      ? createFetchTransport({
+        baseUrl: this.baseUrl,
+        apiKey: this.apiKey,
+        fetchImpl: this.fetchImpl,
+        retryPolicy: this.retryPolicy,
+        circuitBreaker: this.circuitBreaker,
+      })
+      : undefined
   }
 
   /**
@@ -366,17 +400,9 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
     }
 
     // 3. Real HTTP transport (opt-in)
-    if (this.allowHttpTransport) {
-      const httpTransport = createFetchTransport({
-        baseUrl: this.baseUrl,
-        apiKey: this.apiKey,
-        fetchImpl: this.fetchImpl,
-        // P0-10：自定义 RetryPolicy / CircuitBreaker 透传（缺省由 transport 内部创建）
-        retryPolicy: this.retryPolicy,
-        circuitBreaker: this.circuitBreaker,
-      });
-      yield* this.parseSSEStream(request, httpTransport);
-      return;
+    if (this.allowHttpTransport && this.httpTransport) {
+      yield* this.parseSSEStream(request, this.httpTransport)
+      return
     }
 
     // 4. No transport available
@@ -431,8 +457,13 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
         if (finishReason) {
           yield* finishOnce(finishReason);
         }
-      } catch {
-        // Ignore malformed JSON lines
+      } catch (error: unknown) {
+        const detail = error instanceof Error ? error.message : String(error)
+        yield* finishOnce({
+          kind: 'error',
+          message: `malformed provider JSON: ${detail}`,
+          code: 'MALFORMED_RESPONSE',
+        })
       }
     };
 
@@ -582,17 +613,23 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
       toolCallBuffers.clear();
 
       // Map finish reason
-      let finishKind: FinishReason['kind'] = 'stop';
-      switch (choice.finish_reason) {
-        case 'tool_calls':
-          finishKind = 'tool_calls';
+      let finishReason: FinishReason = { kind: 'stop' };
+       switch (choice.finish_reason) {
+         case 'stop':
+           finishReason = { kind: 'stop' };
+           break;
+         case 'tool_calls':
+
+          finishReason = { kind: 'tool_calls' };
           break;
         case 'length':
-          finishKind = 'max-tokens';
+          finishReason = { kind: 'max-tokens' };
           break;
         case 'content_filter':
+          finishReason = { kind: 'content_filter' };
+          break;
         default:
-          finishKind = 'stop';
+          finishReason = { kind: 'error', message: `finish_reason: ${choice.finish_reason ?? 'unknown'}`, code: 'PROVIDER_FINISH_REASON' };
           break;
       }
 
@@ -609,7 +646,7 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
         yield { type: 'usage', usage };
       }
 
-      return { kind: finishKind };
+      return finishReason;
     }
 
     return undefined;

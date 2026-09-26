@@ -24,6 +24,7 @@ export type FinishReason =
   | { kind: 'stop' }
   | { kind: 'tool_calls' }
   | { kind: 'max-tokens' }
+  | { kind: 'content_filter' }
   | { kind: 'error'; message: string; code?: StreamErrorCode | string };
 
 /** Token 用量（disjoint 计数：input 不含缓存命中） */
