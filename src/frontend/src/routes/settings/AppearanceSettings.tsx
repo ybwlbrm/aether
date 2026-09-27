@@ -1,363 +1,462 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
-import { Image, Trash2, FolderOpen, Palette, Plus, Check } from 'lucide-react';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import {
+  Image, Trash2, FolderOpen, Palette, Sun, Moon, Check,
+  PlayCircle, Shuffle, Upload, FolderX,
+} from 'lucide-react';
 import { api } from '../../api/client';
-import { confirm as confirmDialog } from '../../components/ui/confirm-dialog';
+import { useAppearanceStore, type UiTheme } from '../../store/appearance';
 
-const DEFAULT_GLASS = { blurRadius: 26, saturate: 200, vibrancyOpacity: 0.06 };
+/**
+ * AppearanceSettings — 外观引擎控制台（spec §45-54）。
+ *
+ * 三个独立维度：colorScheme（明暗）· material（Liquid Glass 参数）· wallpaper（环境层）。
+ * 直接消费 appearance store，不再接收 props 透传。
+ */
 
-function applyGlassToCSS(blur: number, saturate: number, opacity: number) {
-  const root = document.documentElement;
-  root.style.setProperty('--glass-blur-radius', `${blur}px`);
-  root.style.setProperty('--glass-saturate', `${saturate}%`);
-  root.style.setProperty('--glass-vibrancy-opacity', String(opacity));
-}
+const UI_THEMES: Array<{ id: UiTheme; label: string }> = [
+  { id: 'liquid-glass', label: 'Liquid Glass' },
+  { id: 'dark-minimal', label: 'Dark Minimal' },
+  { id: 'shadcn', label: 'shadcn' },
+  { id: 'geist', label: 'Geist' },
+  { id: 'magic', label: 'Magic' },
+  { id: 'origin', label: 'Origin' },
+  { id: 'light', label: 'Light' },
+];
 
-function loadGlassFromStorage() {
-  try {
-    const saved = localStorage.getItem('glassEffect');
-    if (saved) return JSON.parse(saved);
-  } catch (_e: unknown) { /* ignore - intentional */ }
-  return DEFAULT_GLASS;
-}
+const IMAGE_EXTS = ['jpg', 'jpeg', 'png', 'webp', 'avif'];
 
-interface AppearanceSettingsProps {
-  theme: string;
-  setTheme: (theme: string) => void;
-  activeTheme: string;
-  setActiveTheme: (theme: string) => void;
-  bgImage: string | null;
-  setBgImage: (image: string | null) => void;
-  bgFolder: string;
-  setBgFolder: (folder: string) => void;
-  bgImages: string[];
-  setBgImages: (images: string[]) => void;
-  bgInterval: number;
-  setBgInterval: (interval: number) => void;
-  bgIntervalInput: string;
-  setBgIntervalInput: (input: string) => void;
-  bgEnabled: boolean;
-  setBgEnabled: (enabled: boolean) => void;
-  bgMode: 'upload' | 'dir';
-  setBgMode: (mode: 'upload' | 'dir') => void;
-  bgDirInput: string;
-  setBgDirInput: (input: string) => void;
-  bgDirInfo: string;
-  setBgDirInfo: (info: string) => void;
-  fileInputRef: React.RefObject<HTMLInputElement>;
-  bgFolderInputRef: React.RefObject<HTMLInputElement | null>;
-  glassBlur: number;
-  setGlassBlur: (blur: number) => void;
-  glassSaturate: number;
-  setGlassSaturate: (saturate: number) => void;
-  glassOpacity: number;
-  setGlassOpacity: (opacity: number) => void;
-  glassEnabled: boolean;
-  setGlassEnabled: (enabled: boolean) => void;
-  handleImageUpload: (e: React.ChangeEvent<HTMLInputElement>) => void;
-  handleRemoveBg: () => void;
-  handleBgFolderSelect: (e: React.ChangeEvent<HTMLInputElement>) => void;
-  loadBgImages: () => Promise<void>;
-  handleEnableDirMode: () => Promise<void>;
-  handleSwitchToUpload: () => Promise<void>;
-  handleGlassBlur: (v: number) => void;
-  handleGlassSaturate: (v: number) => void;
-  handleGlassOpacity: (v: number) => void;
-  handleResetGlass: () => void;
-  handleToggleGlass: () => void;
-}
-
-export function AppearanceSettings({
-  theme,
-  setTheme,
-  activeTheme,
-  setActiveTheme,
-  bgImage,
-  setBgImage,
-  bgFolder,
-  setBgFolder,
-  bgImages,
-  setBgImages,
-  bgInterval,
-  setBgInterval,
-  bgIntervalInput,
-  setBgIntervalInput,
-  bgEnabled,
-  setBgEnabled,
-  bgMode,
-  setBgMode,
-  bgDirInput,
-  setBgDirInput,
-  bgDirInfo,
-  setBgDirInfo,
-  fileInputRef,
-  bgFolderInputRef,
-  glassBlur,
-  setGlassBlur,
-  glassSaturate,
-  setGlassSaturate,
-  glassOpacity,
-  setGlassOpacity,
-  glassEnabled,
-  setGlassEnabled,
-  handleImageUpload,
-  handleRemoveBg,
-  handleBgFolderSelect,
-  loadBgImages,
-  handleEnableDirMode,
-  handleSwitchToUpload,
-  handleGlassBlur,
-  handleGlassSaturate,
-  handleGlassOpacity,
-  handleResetGlass,
-  handleToggleGlass,
-}: AppearanceSettingsProps) {
+function Slider({
+  label, value, min, max, step = 1, unit = '', onChange,
+}: {
+  label: string; value: number; min: number; max: number; step?: number; unit?: string;
+  onChange: (v: number) => void;
+}) {
   return (
-    <div className="glass-card">
-      <h2 style={{ fontSize: 'var(--font-module-title)', fontWeight: 600, color: 'var(--text-primary)', marginBottom: 20 }}>Appearance</h2>
-      <div className="space-y-5">
-        <div>
-          <label className="block text-sm" style={{ color: 'var(--text-secondary)', marginBottom: 8 }}>Theme</label>
-          <select className="input select" value={theme} onChange={e => setTheme(e.target.value)}>
-            <option value="dark">Dark</option><option value="light">Light</option>
-          </select>
+    <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+      <span style={{ width: 76, fontSize: 12.5, color: 'var(--text-secondary)', flexShrink: 0 }}>{label}</span>
+      <input
+        type="range"
+        min={min}
+        max={max}
+        step={step}
+        value={value}
+        onChange={(e) => onChange(Number(e.target.value))}
+        aria-label={label}
+        style={{ flex: 1, accentColor: 'var(--accent-interactive)' }}
+      />
+      <span style={{ width: 48, fontSize: 12, color: 'var(--text-tertiary)', textAlign: 'right', flexShrink: 0 }}>
+        {value}{unit}
+      </span>
+    </div>
+  );
+}
+
+function Section({ title, children }: { title: string; children: React.ReactNode }) {
+  return (
+    <section style={{ padding: '16px 0', borderBottom: '1px solid var(--border-primary)' }}>
+      <h3 style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-primary)', marginBottom: 12 }}>{title}</h3>
+      {children}
+    </section>
+  );
+}
+
+export function AppearanceSettings() {
+  const colorScheme = useAppearanceStore((s) => s.colorScheme);
+  const setColorScheme = useAppearanceStore((s) => s.setColorScheme);
+  const uiTheme = useAppearanceStore((s) => s.uiTheme);
+  const setUiTheme = useAppearanceStore((s) => s.setUiTheme);
+  const material = useAppearanceStore((s) => s.material);
+  const setMaterialMode = useAppearanceStore((s) => s.setMaterialMode);
+  const setMaterialParam = useAppearanceStore((s) => s.setMaterialParam);
+  const resetMaterial = useAppearanceStore((s) => s.resetMaterial);
+  const wallpaper = useAppearanceStore((s) => s.wallpaper);
+  const setWallpaper = useAppearanceStore((s) => s.setWallpaper);
+  const resetWallpaper = useAppearanceStore((s) => s.resetWallpaper);
+
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const folderInputRef = useRef<HTMLInputElement>(null);
+  const [dirImages, setDirImages] = useState<string[]>([]);
+  const [dirInfo, setDirInfo] = useState('');
+  const [dirUnavailable, setDirUnavailable] = useState(false);
+
+  // ============================================================
+  // 壁纸：加载当前目录图片
+  // ============================================================
+  const loadBgImages = useCallback(async () => {
+    try {
+      const res = await api.getBackgrounds();
+      const images: string[] = res?.images ?? [];
+      setDirImages(images);
+      setDirUnavailable(images.length === 0);
+    } catch {
+      setDirUnavailable(true);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (wallpaper.source === 'directory') loadBgImages();
+  }, [wallpaper.source, loadBgImages]);
+
+  // 上传单图
+  const handleImageUpload = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(e.target.files ?? []);
+    if (files.length === 0) return;
+    try {
+      const urls = await Promise.all(
+        files.map((f) => new Promise<string>((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () => resolve(String(reader.result));
+          reader.onerror = reject;
+          reader.readAsDataURL(f);
+        })),
+      );
+      const res = await api.uploadBackgrounds(urls);
+      const all = res?.images ?? urls;
+      setDirImages(all);
+      setWallpaper({ source: 'upload', path: urls[0] ?? null });
+      setDirUnavailable(false);
+    } catch {
+      setDirUnavailable(true);
+    }
+    e.target.value = '';
+  }, [setWallpaper]);
+
+  // 选择目录（electron 环境）或手动输入
+  const handleBgFolderSelect = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const dir = e.target.files?.[0]?.webkitRelativePath ? e.target.value : e.target.value;
+    if (!dir) return;
+    setDirInfo(dir);
+    try {
+      await api.setBackgroundSource('dir', dir);
+      await loadBgImages();
+      const imgs = await api.getBackgrounds();
+      const images: string[] = imgs?.images ?? [];
+      if (images.length > 0) {
+        setWallpaper({ source: 'directory', activeItem: images[0] ?? null });
+      }
+    } catch {
+      setDirUnavailable(true);
+    }
+    e.target.value = '';
+  }, [loadBgImages, setWallpaper]);
+
+  const handleRemoveBg = useCallback(() => {
+    setWallpaper({ source: 'none', path: null, activeItem: null, slideshow: false });
+    setDirImages([]);
+  }, [setWallpaper]);
+
+  // Slideshow 定时推进（设置面板内预览）
+  useEffect(() => {
+    if (!wallpaper.slideshow || dirImages.length === 0) return;
+    const timer = setInterval(() => {
+      const cur = dirImages.indexOf(wallpaper.activeItem ?? '');
+      const next = wallpaper.randomize
+        ? Math.floor(Math.random() * dirImages.length)
+        : (cur + 1) % dirImages.length;
+      setWallpaper({ activeItem: dirImages[next] });
+    }, wallpaper.interval * 1000);
+    return () => clearInterval(timer);
+  }, [wallpaper.slideshow, wallpaper.interval, wallpaper.randomize, dirImages, wallpaper.activeItem, setWallpaper]);
+
+  const applySlideshow = useCallback(async () => {
+    if (wallpaper.slideshow && dirImages.length > 0) {
+      try {
+        await api.setBackgroundInterval(wallpaper.interval);
+      } catch { /* ignore */ }
+    }
+  }, [wallpaper.slideshow, wallpaper.interval, dirImages.length]);
+
+  return (
+    <div style={{ maxWidth: 'var(--content-standard)', margin: '0 auto', padding: '24px' }}>
+      {/* ================= Theme ================= */}
+      <Section title="Theme">
+        <div style={{ display: 'flex', gap: 8, marginBottom: 14 }}>
+          <button
+            onClick={() => setColorScheme('dark')}
+            data-active={colorScheme === 'dark'}
+            style={{
+              display: 'inline-flex', alignItems: 'center', gap: 8, height: 34, padding: '0 12px',
+              borderRadius: 'var(--radius-control)', border: '1px solid var(--border-primary)',
+              background: colorScheme === 'dark' ? 'var(--sidebar-item-active)' : 'var(--bg-surface)',
+              color: 'var(--text-primary)', fontSize: 12.5, cursor: 'pointer',
+            }}
+          >
+            <Moon size={14} /> Dark
+          </button>
+          <button
+            onClick={() => setColorScheme('light')}
+            data-active={colorScheme === 'light'}
+            style={{
+              display: 'inline-flex', alignItems: 'center', gap: 8, height: 34, padding: '0 12px',
+              borderRadius: 'var(--radius-control)', border: '1px solid var(--border-primary)',
+              background: colorScheme === 'light' ? 'var(--sidebar-item-active)' : 'var(--bg-surface)',
+              color: 'var(--text-primary)', fontSize: 12.5, cursor: 'pointer',
+            }}
+          >
+            <Sun size={14} /> Light
+          </button>
         </div>
-        <div>
-          <label className="block text-sm" style={{ color: 'var(--text-secondary)', marginBottom: 8 }}>Custom Background</label>
-          <input ref={fileInputRef} type="file" accept="image/*" className="hidden" onChange={handleImageUpload} />
-          <div className="flex items-center gap-3">
-            <button className="btn btn-primary" onClick={() => fileInputRef.current?.click()}>
-              <Image size={18} /> Upload Image
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+          {UI_THEMES.map((t) => (
+            <button
+              key={t.id}
+              onClick={() => setUiTheme(t.id)}
+              data-active={uiTheme === t.id}
+              style={{
+                display: 'inline-flex', alignItems: 'center', gap: 6, height: 30, padding: '0 10px',
+                borderRadius: 'var(--radius-control)', border: '1px solid var(--border-primary)',
+                background: uiTheme === t.id ? 'var(--sidebar-item-active)' : 'transparent',
+                color: uiTheme === t.id ? 'var(--text-primary)' : 'var(--text-secondary)',
+                fontSize: 12, cursor: 'pointer',
+              }}
+            >
+              {uiTheme === t.id && <Check size={12} />}
+              {t.label}
             </button>
-            {bgImage && (
-              <button className="btn btn-ghost" onClick={handleRemoveBg}>
-                <Trash2 size={18} /> Remove
+          ))}
+        </div>
+      </Section>
+
+      {/* ================= Liquid Glass ================= */}
+      <Section title="Liquid Glass">
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
+          <span style={{ fontSize: 13, color: 'var(--text-secondary)' }}>
+            Use Liquid Glass across Aether
+          </span>
+          <button
+            onClick={() => setMaterialMode(material.mode === 'glass' ? 'opaque' : 'glass')}
+            role="switch"
+            aria-checked={material.mode === 'glass'}
+            style={{
+              width: 40, height: 22, borderRadius: 11,
+              background: material.mode === 'glass' ? 'var(--accent-interactive)' : 'var(--bg-surface-hover)',
+              border: '1px solid var(--border-primary)', position: 'relative', cursor: 'pointer', padding: 0,
+            }}
+          >
+            <span
+              style={{
+                position: 'absolute', top: 2, width: 16, height: 16, borderRadius: 8,
+                background: '#fff',
+                left: material.mode === 'glass' ? 20 : 2,
+                transition: 'left 0.15s var(--motion-enter)',
+              }}
+            />
+          </button>
+        </div>
+        {material.mode === 'glass' && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+            <Slider label="Intensity" value={material.intensity} min={0} max={100} unit="%" onChange={(v) => setMaterialParam('intensity', v)} />
+            <Slider label="Blur" value={material.blur} min={0} max={36} unit="px" onChange={(v) => setMaterialParam('blur', v)} />
+            <Slider label="Saturation" value={material.saturation} min={100} max={160} unit="%" onChange={(v) => setMaterialParam('saturation', v)} />
+            <Slider label="Brightness" value={Math.round(material.brightness * 100)} min={95} max={115} unit="%" onChange={(v) => setMaterialParam('brightness', v / 100)} />
+            <Slider label="Rim" value={material.rim} min={0} max={100} unit="%" onChange={(v) => setMaterialParam('rim', v)} />
+            <div style={{ marginTop: 4 }}>
+              <button
+                onClick={resetMaterial}
+                style={{ fontSize: 12, color: 'var(--text-tertiary)', background: 'none', border: 'none', cursor: 'pointer', padding: 0 }}
+              >
+                Reset to defaults
               </button>
-            )}
-          </div>
-          {bgImage && (
-            <div className="mt-4 p-2 rounded-[14px]" style={{ background: 'var(--card-bg)', border: '1px solid var(--card-border)' }}>
-              <img src={bgImage} alt="Background preview" style={{ maxWidth: '100%', maxHeight: '200px', borderRadius: '8px', objectFit: 'cover' }} />
             </div>
-          )}
-          <p className="text-xs mt-2" style={{ color: 'var(--text-tertiary)' }}>Upload an image to use as custom background. Apple Liquid Glass style will be applied automatically.</p>
+          </div>
+        )}
+      </Section>
+
+      {/* ================= Wallpaper ================= */}
+      <Section title="Wallpaper">
+        {/* Source */}
+        <div style={{ display: 'flex', gap: 8, marginBottom: 14 }}>
+          {(
+            [
+              { id: 'none' as const, label: 'None', icon: <Image size={14} /> },
+              { id: 'upload' as const, label: 'Upload', icon: <Upload size={14} /> },
+              { id: 'directory' as const, label: 'Directory', icon: <FolderOpen size={14} /> },
+            ]
+          ).map((s) => (
+            <button
+              key={s.id}
+              onClick={() => setWallpaper({ source: s.id })}
+              data-active={wallpaper.source === s.id}
+              style={{
+                display: 'inline-flex', alignItems: 'center', gap: 8, height: 34, padding: '0 12px',
+                borderRadius: 'var(--radius-control)', border: '1px solid var(--border-primary)',
+                background: wallpaper.source === s.id ? 'var(--sidebar-item-active)' : 'var(--bg-surface)',
+                color: 'var(--text-primary)', fontSize: 12.5, cursor: 'pointer',
+              }}
+            >
+              {s.icon} {s.label}
+            </button>
+          ))}
         </div>
 
-        {/* 背景轮播 */}
-        <div style={{ borderTop: '1px solid var(--border-primary)', paddingTop: 24, marginTop: 24 }}>
-          <div className="flex items-center justify-between mb-4">
-            <h3 style={{ fontSize: 'var(--font-card-title)', fontWeight: 600, color: 'var(--text-primary)' }}>背景轮播</h3>
-            <div className="flex items-center gap-2">
-              <label style={{ fontSize: 12, color: 'var(--text-secondary)' }}>启用</label>
-              <button onClick={() => { const next = !bgEnabled; setBgEnabled(next); if (next && bgImages.length > 0) window.dispatchEvent(new CustomEvent('bg-slideshow-start', { detail: { images: bgImages, interval: bgInterval } })); else window.dispatchEvent(new CustomEvent('bg-slideshow-stop', {})); }}
-                role="switch" aria-checked={bgEnabled} aria-label="背景轮播开关"
-                style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: 20, color: bgEnabled ? 'var(--color-accent)' : 'var(--text-tertiary)' }}>
-                {bgEnabled ? '🔵' : '⚪'}
+        {wallpaper.source === 'upload' && (
+          <div
+            style={{
+              border: '1px dashed var(--border-strong)',
+              borderRadius: 'var(--radius-surface)',
+              padding: 20,
+              textAlign: 'center',
+            }}
+          >
+            <p style={{ fontSize: 13, color: 'var(--text-secondary)', marginBottom: 10 }}>
+              {wallpaper.path ? 'Current wallpaper active. Replace or remove:' : 'Drop image here (JPG / PNG / WebP / AVIF)'}
+            </p>
+            <div style={{ display: 'flex', gap: 8, justifyContent: 'center' }}>
+              <button
+                onClick={() => fileInputRef.current?.click()}
+                className="aether-ctx-btn"
+                style={{ height: 34, padding: '0 12px', border: '1px solid var(--border-primary)', borderRadius: 'var(--radius-control)', fontSize: 12.5 }}
+              >
+                <Image size={14} /> Choose Image
               </button>
-            </div>
-          </div>
-          <div className="space-y-4">
-            <div>
-              <label className="block text-sm" style={{ color: 'var(--text-secondary)', marginBottom: 8 }}>选择文件夹上传（JPG/PNG）</label>
-              <input type="file" className="hidden" onChange={handleBgFolderSelect} multiple accept="image/jpeg,image/png" ref={(el) => { bgFolderInputRef.current = el; }} />
-              <div className="flex items-center gap-3">
-                <button className="btn btn-primary" onClick={() => bgFolderInputRef.current?.click()}
-                  style={bgMode === 'dir' ? { opacity: 0.4, pointerEvents: 'none' } : undefined}
-                  title={bgMode === 'dir' ? '目录模式下不可上传，请先切回上传模式' : undefined}>
-                  <FolderOpen size={18} /> 选择文件夹
+              {wallpaper.path && (
+                <button
+                  onClick={handleRemoveBg}
+                  className="aether-ctx-btn"
+                  style={{ height: 34, padding: '0 12px', border: '1px solid var(--border-primary)', borderRadius: 'var(--radius-control)', fontSize: 12.5, color: 'var(--color-danger)' }}
+                >
+                  <Trash2 size={14} /> Remove
                 </button>
-                {bgMode === 'dir' && <span className="text-xs" style={{ color: 'var(--color-warning)' }}>目录模式下不可上传，请先切回上传模式</span>}
-                {bgFolder && <span className="text-sm" style={{ color: 'var(--text-secondary)' }}>{bgFolder}（{bgImages.length} 张）</span>}
-              </div>
-            </div>
-            {/* 目录模式：直接读取本地文件夹 */}
-            <div style={{ borderTop: '1px dashed var(--border-primary)', paddingTop: 16 }}>
-              <div className="flex items-center justify-between mb-2">
-                <label className="block text-sm" style={{ color: 'var(--text-secondary)' }}>目录模式（直接读取本地文件夹图片）</label>
-                {bgMode === 'dir' && (
-                  <button className="btn btn-ghost btn-sm" onClick={handleSwitchToUpload} style={{ fontSize: 12 }}>
-                    切回上传模式
-                  </button>
-                )}
-              </div>
-              <div className="flex items-center gap-2">
-                <input className="input flex-1" type="text" placeholder="输入图片文件夹路径，如 D:\壁纸"
-                  value={bgDirInput}
-                  onChange={e => setBgDirInput(e.target.value)}
-                  onKeyDown={e => { if (e.key === 'Enter' && !(e.nativeEvent as any).isComposing) handleEnableDirMode(); }} />
-                <button className="btn btn-secondary flex-shrink-0" onClick={handleEnableDirMode} style={{ color: bgMode === 'dir' ? 'var(--color-accent)' : undefined }}>
-                  {bgMode === 'dir' ? '重新扫描' : '启用目录模式'}
-                </button>
-              </div>
-              {bgDirInfo && <p className="text-xs mt-2" style={{ color: 'var(--color-accent)' }}>{bgDirInfo}</p>}
-              {bgMode === 'dir' && (
-                <div className="flex gap-2 overflow-x-auto" style={{ padding: '8px 0' }}>
-                  {bgImages.slice(0, 10).map((img, i) => (
-                    <img key={i} src={img} alt="" style={{ width: 60, height: 40, borderRadius: 4, objectFit: 'cover', border: '1px solid var(--card-border)' }} />
-                  ))}
-                  {bgImages.length === 0 && <span className="text-xs" style={{ color: 'var(--text-tertiary)', alignSelf: 'center' }}>该目录暂无图片（支持 png/jpg/jpeg/gif/webp/bmp/avif）</span>}
-                  {bgImages.length > 10 && <span className="text-xs" style={{ color: 'var(--text-tertiary)', alignSelf: 'center' }}>+{bgImages.length - 10}</span>}
-                </div>
               )}
             </div>
-            {/* 背景轮播：切换秒数 */}
-            <div>
-              <label className="block text-sm" style={{ color: 'var(--text-secondary)', marginBottom: 8 }}>切换秒数</label>
-              <input className="input" type="number" min="3" max="60" value={bgIntervalInput}
-                onChange={e => {
-                  setBgIntervalInput(e.target.value);
-                  const raw = parseInt(e.target.value, 10);
-                  if (!Number.isFinite(raw)) return;
-                  const v = Math.min(60, Math.max(3, raw));
-                  setBgInterval(v);
-                  window.dispatchEvent(new CustomEvent('bg-slideshow-interval', { detail: { interval: v } }));
-                }}
-                onBlur={() => {
-                  const raw = parseInt(bgIntervalInput, 10);
-                  const v = Number.isFinite(raw) ? Math.min(60, Math.max(3, raw)) : bgInterval;
-                  setBgInterval(v);
-                  setBgIntervalInput(String(v));
-                  window.dispatchEvent(new CustomEvent('bg-slideshow-interval', { detail: { interval: v } }));
-                  api.setBackgroundInterval(v).catch(() => { console.warn('[Settings] 间隔持久化失败'); });
-                }}
-                onKeyDown={e => { if (e.key === 'Enter' && !(e.nativeEvent as any).isComposing) (e.target as HTMLInputElement).blur(); }} />
-            </div>
-            {bgMode !== 'dir' && bgImages.length > 0 && (
-              <div className="flex gap-2 overflow-x-auto" style={{ padding: '8px 0' }}>
-                {bgImages.slice(0, 10).map((img, i) => (
-                  <img key={i} src={img} alt="" style={{ width: 60, height: 40, borderRadius: 4, objectFit: 'cover', border: '1px solid var(--card-border)' }} />
-                ))}
-                {bgImages.length > 10 && <span className="text-xs" style={{ color: 'var(--text-tertiary)', alignSelf: 'center' }}>+{bgImages.length - 10}</span>}
-              </div>
-            )}
-            {bgMode === 'upload' && bgImages.length > 0 && (
-              <button className="btn btn-ghost btn-sm" onClick={async () => {
-                if (!(await confirmDialog('确定清除所有轮播图片？此操作不可撤销。'))) return;
-                setBgImages([]); setBgFolder(''); setBgEnabled(false);
-                try { await api.clearBackgrounds(); } catch (_e: unknown) { console.warn("[SilentCatch]", _e); }
-                window.dispatchEvent(new CustomEvent('bg-slideshow-clear', {}));
-              }}
-                style={{ color: 'var(--color-danger)' }}>清除轮播图片</button>
-            )}
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept="image/jpeg,image/png,image/webp,image/avif"
+              multiple
+              style={{ display: 'none' }}
+              onChange={handleImageUpload}
+            />
           </div>
-        </div>
+        )}
 
-        {/* 玻璃效果滑块 */}
-        <div style={{ borderTop: '1px solid var(--border-primary)', paddingTop: 24, marginTop: 24 }}>
-          <div className="flex items-center justify-between mb-4">
-            <div className="flex items-center gap-3">
-              <h3 style={{ fontSize: 'var(--font-card-title)', fontWeight: 600, color: 'var(--text-primary)' }}>Liquid Glass 效果</h3>
-              <button onClick={handleToggleGlass}
-                role="switch" aria-checked={glassEnabled} aria-label="Liquid Glass 效果开关"
-                style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: 18, color: glassEnabled ? 'var(--color-accent)' : 'var(--text-tertiary)' }}>
-                {glassEnabled ? '🔵' : '⚪'}
-              </button>
-            </div>
-            <div className="flex items-center gap-2">
-              <button className="btn btn-ghost btn-sm" onClick={handleResetGlass} style={{ fontSize: 12 }}>重置默认</button>
-            </div>
-          </div>
-          <div className="space-y-5">
-            {/* 模糊半径 */}
-            <div>
-              <div className="flex items-center justify-between mb-2">
-                <label style={{ fontSize: 13, color: 'var(--text-secondary)' }}>模糊半径</label>
-                <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-primary)', fontFamily: 'var(--font-mono)', minWidth: 50, textAlign: 'right' }}>{glassBlur}px</span>
-              </div>
-              <input type="range" min="0" max="60" value={glassBlur} onChange={e => handleGlassBlur(parseInt(e.target.value))}
-                style={{ width: '100%', height: 6, borderRadius: 3, appearance: 'none', WebkitAppearance: 'none', background: 'linear-gradient(to right, var(--color-accent) ' + (glassBlur / 60 * 100) + '%, rgba(255,255,255,0.1) ' + (glassBlur / 60 * 100) + '%)', outline: 'none', cursor: 'pointer' }} />
-              <div className="flex justify-between text-xs" style={{ color: 'var(--text-tertiary)', marginTop: 4 }}><span>0px</span><span>60px</span></div>
-            </div>
-
-            {/* 饱和度 */}
-            <div>
-              <div className="flex items-center justify-between mb-2">
-                <label style={{ fontSize: 13, color: 'var(--text-secondary)' }}>饱和度</label>
-                <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-primary)', fontFamily: 'var(--font-mono)', minWidth: 50, textAlign: 'right' }}>{glassSaturate}%</span>
-              </div>
-              <input type="range" min="50" max="400" value={glassSaturate} onChange={e => handleGlassSaturate(parseInt(e.target.value))}
-                style={{ width: '100%', height: 6, borderRadius: 3, appearance: 'none', WebkitAppearance: 'none', background: 'linear-gradient(to right, var(--color-accent) ' + ((glassSaturate - 50) / 350 * 100) + '%, rgba(255,255,255,0.1) ' + ((glassSaturate - 50) / 350 * 100) + '%)', outline: 'none', cursor: 'pointer' }} />
-              <div className="flex justify-between text-xs" style={{ color: 'var(--text-tertiary)', marginTop: 4 }}><span>50%</span><span>400%</span></div>
-            </div>
-
-            {/* 透明度 */}
-            <div>
-              <div className="flex items-center justify-between mb-2">
-                <label style={{ fontSize: 13, color: 'var(--text-secondary)' }}>透明度</label>
-                <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-primary)', fontFamily: 'var(--font-mono)', minWidth: 50, textAlign: 'right' }}>{glassOpacity.toFixed(2)}</span>
-              </div>
-              <input type="range" min="0.02" max="0.30" step="0.01" value={glassOpacity} onChange={e => handleGlassOpacity(parseFloat(e.target.value))}
-                style={{ width: '100%', height: 6, borderRadius: 3, appearance: 'none', WebkitAppearance: 'none', background: 'linear-gradient(to right, var(--color-accent) ' + ((glassOpacity - 0.02) / 0.28 * 100) + '%, rgba(255,255,255,0.1) ' + ((glassOpacity - 0.02) / 0.28 * 100) + '%)', outline: 'none', cursor: 'pointer' }} />
-              <div className="flex justify-between text-xs" style={{ color: 'var(--text-tertiary)', marginTop: 4 }}><span>0.02</span><span>0.30</span></div>
-            </div>
-          </div>
-        </div>
-
-        {/* UI 主题选择 */}
-        <div style={{ borderTop: '1px solid var(--border-primary)', paddingTop: 24, marginTop: 24 }}>
-          <h3 style={{ fontSize: 'var(--font-card-title)', fontWeight: 600, color: 'var(--text-primary)', marginBottom: 16 }}>UI 主题</h3>
-          <div className="grid grid-cols-4 gap-3">
-            {[
-              { id: 'liquid-glass', label: 'Liquid Glass', desc: 'Apple 毛玻璃', colors: ['var(--color-accent)', '#a78bfa', '#0a0b10'] },
-              { id: 'shadcn', label: 'shadcn/ui', desc: '简洁中性', colors: ['#3b82f6', '#09090b', '#18181b'] },
-              { id: 'geist', label: 'Geist', desc: 'Vercel 极简', colors: ['#0070f3', '#000000', '#1a1a1a'] },
-              { id: 'magic', label: 'Magic UI', desc: '渐变光效', colors: ['#a78bfa', '#0a0a0f', '#1a1a2e'] },
-              { id: 'origin', label: 'Origin UI', desc: '圆润柔和', colors: ['#6366f1', '#0c0c10', '#1c1c24'] },
-              { id: 'dark-minimal', label: '简约暗色', desc: '纯黑低对比', colors: ['#666666', '#000000', '#111111'] },
-              { id: 'light', label: '简约亮色', desc: '纯白高对比', colors: ['#3b82f6', '#fafafa', '#ffffff'] },
-            ].map(t => (
+        {wallpaper.source === 'directory' && (
+          <div>
+            <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 10 }}>
               <button
-                key={t.id}
-                onClick={() => {
-                  setActiveTheme(t.id);
-                  localStorage.setItem('uiTheme', t.id);
-                  document.documentElement.setAttribute('data-theme', t.id === 'liquid-glass' ? 'dark' : t.id);
-                  const root = document.documentElement;
-                  root.style.removeProperty('--glass-blur-radius');
-                  root.style.removeProperty('--glass-saturate');
-                  root.style.removeProperty('--glass-vibrancy-opacity');
-                  const cs = getComputedStyle(root);
-                  const newBlur = parseInt(cs.getPropertyValue('--glass-blur-radius').trim()) || 26;
-                  const newSat = parseInt(cs.getPropertyValue('--glass-saturate').trim()) || 200;
-                  const newOp = parseFloat(cs.getPropertyValue('--glass-vibrancy-opacity').trim()) || 0.06;
-                  setGlassBlur(newBlur);
-                  setGlassSaturate(newSat);
-                  setGlassOpacity(newOp);
-                  const effect = { blurRadius: newBlur, saturate: newSat, vibrancyOpacity: newOp };
-                  localStorage.setItem('glassEffect', JSON.stringify(effect));
-                  const repaintEls = document.querySelectorAll<HTMLElement>('.glass-card, .sidebar-glass, .input, .select, .btn');
-                  repaintEls.forEach(el => {
-                      el.style.transform = 'translateZ(0.001px)';
-                      el.style.backdropFilter = 'none';
-                    });
-                  setTimeout(() => {
-                    repaintEls.forEach(el => {
-                      el.style.transform = '';
-                      el.style.backdropFilter = '';
-                    });
-                  }, 50);
-                }}
-                className="rounded-[14px] transition-all"
+                onClick={() => folderInputRef.current?.click()}
+                className="aether-ctx-btn"
+                style={{ height: 34, padding: '0 12px', border: '1px solid var(--border-primary)', borderRadius: 'var(--radius-control)', fontSize: 12.5 }}
+              >
+                <FolderOpen size={14} /> Choose Folder
+              </button>
+              <input
+                ref={folderInputRef}
+                type="file"
+                multiple
+                style={{ display: 'none' }}
+                onChange={handleBgFolderSelect}
+                {...({ webkitdirectory: '' } as React.InputHTMLAttributes<HTMLInputElement>)}
+              />
+              <span style={{ fontSize: 12, color: 'var(--text-tertiary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                {dirInfo || wallpaper.activeItem ? 'Folder selected' : 'Select a folder with images'}
+              </span>
+            </div>
+
+            {dirUnavailable ? (
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, color: 'var(--color-warning)', fontSize: 12.5, marginBottom: 10 }}>
+                <FolderX size={14} /> Folder unavailable — choose another folder
+              </div>
+            ) : dirImages.length > 0 && (
+              <div
                 style={{
-                  padding: 12,
-                  background: activeTheme === t.id ? `${t.colors[0]}15` : 'var(--card-bg)',
-                  border: activeTheme === t.id ? `2px solid ${t.colors[0]}` : '1px solid var(--card-border)',
-                  borderRadius: 14,
-                  display: 'flex', flexDirection: 'column', gap: 10,
+                  display: 'grid',
+                  gridTemplateColumns: 'repeat(auto-fill, minmax(72px, 1fr))',
+                  gap: 6,
+                  maxHeight: 180,
+                  overflowY: 'auto',
+                  marginBottom: 12,
                 }}
               >
-                <div style={{ display: 'flex', gap: 5 }}>
-                  {t.colors.map((c, ci) => (
-                    <span key={ci} style={{ width: 26, height: 18, borderRadius: 5, background: c, border: '1px solid rgba(255,255,255,0.15)', flexShrink: 0 }} />
-                  ))}
-                </div>
-                <div>
-                  <div style={{ fontSize: 13, fontWeight: 600, color: activeTheme === t.id ? t.colors[0] : 'var(--text-primary)' }}>{t.label}</div>
-                  <div style={{ fontSize: 11, color: 'var(--text-tertiary)', marginTop: 2 }}>{t.desc}</div>
-                </div>
+                {dirImages.map((img) => (
+                  <button
+                    key={img}
+                    onClick={() => setWallpaper({ activeItem: img })}
+                    title="Set as wallpaper"
+                    style={{
+                      width: 72,
+                      height: 48,
+                      padding: 0,
+                      border: wallpaper.activeItem === img
+                        ? '2px solid var(--accent-interactive)'
+                        : '1px solid var(--border-primary)',
+                      borderRadius: 6,
+                      overflow: 'hidden',
+                      cursor: 'pointer',
+                      background: `url(${img}) center/cover no-repeat`,
+                    }}
+                  />
+                ))}
+              </div>
+            )}
+
+            {/* Slideshow */}
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap', marginTop: 8 }}>
+              <button
+                onClick={() => { setWallpaper({ slideshow: !wallpaper.slideshow }); applySlideshow(); }}
+                data-active={wallpaper.slideshow}
+                style={{
+                  display: 'inline-flex', alignItems: 'center', gap: 8, height: 32, padding: '0 10px',
+                  borderRadius: 'var(--radius-control)', border: '1px solid var(--border-primary)',
+                  background: wallpaper.slideshow ? 'var(--sidebar-item-active)' : 'transparent',
+                  color: 'var(--text-secondary)', fontSize: 12, cursor: 'pointer',
+                }}
+              >
+                <PlayCircle size={14} /> Slideshow {wallpaper.slideshow ? 'ON' : 'OFF'}
               </button>
-            ))}
+              <button
+                onClick={() => setWallpaper({ randomize: !wallpaper.randomize })}
+                data-active={wallpaper.randomize}
+                style={{
+                  display: 'inline-flex', alignItems: 'center', gap: 8, height: 32, padding: '0 10px',
+                  borderRadius: 'var(--radius-control)', border: '1px solid var(--border-primary)',
+                  background: wallpaper.randomize ? 'var(--sidebar-item-active)' : 'transparent',
+                  color: 'var(--text-secondary)', fontSize: 12, cursor: 'pointer',
+                }}
+              >
+                <Shuffle size={14} /> Randomize
+              </button>
+              <label style={{ display: 'inline-flex', alignItems: 'center', gap: 8, fontSize: 12, color: 'var(--text-secondary)' }}>
+                Interval
+                <input
+                  type="number"
+                  min={1}
+                  max={3600}
+                  value={wallpaper.interval}
+                  onChange={(e) => setWallpaper({ interval: Math.max(1, Number(e.target.value) || 60) })}
+                  aria-label="Slideshow interval (seconds)"
+                  style={{
+                    width: 64,
+                    height: 30,
+                    borderRadius: 'var(--radius-control)',
+                    border: '1px solid var(--border-primary)',
+                    background: 'var(--input-bg)',
+                    color: 'var(--text-primary)',
+                    fontSize: 12,
+                    padding: '0 8px',
+                  }}
+                />
+                s
+              </label>
+            </div>
           </div>
-        </div>
+        )}
+
+        {/* 壁纸调整滑块（spec §52） */}
+        {wallpaper.source !== 'none' && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginTop: 14 }}>
+            <Slider label="Brightness" value={wallpaper.brightness} min={50} max={150} unit="%" onChange={(v) => setWallpaper({ brightness: v })} />
+            <Slider label="Contrast" value={wallpaper.contrast} min={50} max={150} unit="%" onChange={(v) => setWallpaper({ contrast: v })} />
+            <Slider label="Saturation" value={wallpaper.saturation} min={50} max={150} unit="%" onChange={(v) => setWallpaper({ saturation: v })} />
+            <Slider label="Overlay" value={wallpaper.overlay} min={0} max={100} unit="%" onChange={(v) => setWallpaper({ overlay: v })} />
+            <Slider label="Blur" value={wallpaper.blur} min={0} max={36} unit="px" onChange={(v) => setWallpaper({ blur: v })} />
+          </div>
+        )}
+      </Section>
+
+      <div style={{ padding: '16px 0', fontSize: 12, color: 'var(--text-tertiary)' }}>
+        <Palette size={13} style={{ display: 'inline', marginRight: 6, verticalAlign: -2 }} />
+        Wallpaper is the environment layer — Glass is a material, not a brand.
       </div>
     </div>
   );

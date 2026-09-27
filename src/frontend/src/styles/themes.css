@@ -20,41 +20,46 @@
   --input-border-focus: rgba(59, 130, 246, 0.5);
   --input-placeholder: rgba(255, 255, 255, 0.2);
 
-  /* ===== Apple Liquid Glass 变量（可被滑块动态覆盖） ===== */
-  /* 滑块可调：模糊半径 / 饱和度 / 透明度 */
-  --glass-blur-radius: 26px;
-  --glass-saturate: 200%;
-  --glass-brightness: 1.25;
+  /* ===== Liquid Glass 变量（克制默认，spec §48） =====
+     默认 Blur 14 · Saturate 130% · Brightness 1.05 ——
+     不再以 Blur 26 + Saturate 200 + Brightness 1.25 作为全用户视觉默认。
+     滑块可动态覆盖。 */
+  --glass-blur-radius: 14px;
+  --glass-saturate: 130%;
+  --glass-brightness: 1.05;
   --glass-fill-rgb: 20, 22, 28;
   --glass-fill: rgba(20, 22, 28, 0.08);
   --glass-fill-hover: rgba(20, 22, 28, 0.12);
-  --glass-border: 1px solid rgba(255, 255, 255, 0.12);
-  --glass-shadow: 
-    0 8px 32px rgba(0, 0, 0, 0.25),
+  --glass-border: 1px solid rgba(255, 255, 255, 0.1);
+  --glass-vibrancy-opacity: 0.08;
+  --glass-shadow:
+    0 4px 16px rgba(0, 0, 0, 0.18),
+    0 1px 3px rgba(0, 0, 0, 0.1),
+    inset 0 1px 0.5px rgba(255, 255, 255, 0.2),
+    inset 0 -1px 1px rgba(255, 255, 255, 0.1);
+  --glass-shadow-hover:
+    0 8px 24px rgba(0, 0, 0, 0.24),
     0 2px 6px rgba(0, 0, 0, 0.12),
-    inset 0 1px 0.5px rgba(255, 255, 255, 0.3),
-    inset 0 -1px 1px rgba(255, 255, 255, 0.15),
-    inset 1px 0 2px -1px rgba(255, 255, 255, 0.15),
-    inset -1px 0 2px -1px rgba(255, 255, 255, 0.15);
-  --glass-shadow-hover: 
-    0 12px 40px rgba(0, 0, 0, 0.35),
-    0 4px 10px rgba(0, 0, 0, 0.18),
-    inset 0 1px 0.5px rgba(255, 255, 255, 0.4),
-    inset 0 -1px 1px rgba(255, 255, 255, 0.2),
-    inset 1px 0 2px -1px rgba(255, 255, 255, 0.2),
-    inset -1px 0 2px -1px rgba(255, 255, 255, 0.2);
-  --glass-rim-border: rgba(255, 255, 255, 0.15);
-  --glass-sheen-1: rgba(255, 255, 255, 0.12);
-  --glass-sheen-2: rgba(255, 255, 255, 0.04);
-  --glass-drop-alpha: 0.25;
+    inset 0 1px 0.5px rgba(255, 255, 255, 0.25),
+    inset 0 -1px 1px rgba(255, 255, 255, 0.12);
+  --glass-rim-border: rgba(255, 255, 255, 0.1);
+  --glass-sheen-1: rgba(255, 255, 255, 0.06);
+  --glass-sheen-2: rgba(255, 255, 255, 0.03);
+  --glass-drop-alpha: 0.18;
 
   /* 兼容旧变量名 */
   --card-bg: var(--glass-fill);
-  --card-border: rgba(255, 255, 255, 0.12);
+  --card-border: rgba(255, 255, 255, 0.1);
   --card-hover-bg: var(--glass-fill-hover);
   --card-shadow: var(--glass-shadow);
   --card-hover-shadow: var(--glass-shadow-hover);
-  --card-radius: 14px;
+  --card-radius: var(--radius-lg);
+
+  /* 新 Surface 语义（spec §61） */
+  --surface-shell: rgba(255, 255, 255, 0.04);
+  --surface-content: transparent;
+  --surface-elevated: rgba(20, 22, 30, 0.85);
+  --surface-overlay: rgba(0, 0, 0, 0.55);
 
   /* Text */
   --text-primary: rgba(255, 255, 255, 0.92);
@@ -95,38 +100,43 @@
   --input-border-focus: rgba(59, 130, 246, 0.5);
   --input-placeholder: rgba(0, 0, 0, 0.2);
 
-  /* ===== Apple Liquid Glass 变量（浅色模式：淡白浅蒙版，高光偏冷白柔光） ===== */
+  /* ===== Liquid Glass 变量（浅色模式：淡白浅蒙版，克制默认） ===== */
   --glass-fill-rgb: 255, 255, 255;
   --glass-fill: rgba(255, 255, 255, 0.06);
   --glass-fill-hover: rgba(255, 255, 255, 0.10);
-  --glass-blur: blur(26px) saturate(200%) brightness(1.25);
-  --glass-border: 1px solid rgba(255, 255, 255, 0.35);
-  --glass-vibrancy-opacity: 0.12;
-  --glass-shadow: 
-    0 10px 40px rgba(0, 0, 0, 0.12),
+  --glass-blur-radius: 14px;
+  --glass-saturate: 130%;
+  --glass-brightness: 1.05;
+  --glass-blur: blur(14px) saturate(130%) brightness(1.05);
+  --glass-border: 1px solid rgba(255, 255, 255, 0.28);
+  --glass-vibrancy-opacity: 0.08;
+  --glass-shadow:
+    0 6px 20px rgba(0, 0, 0, 0.08),
+    0 1px 4px rgba(0, 0, 0, 0.04),
+    inset 0 1px 0.5px rgba(255, 255, 255, 0.5),
+    inset 0 -1px 1px rgba(255, 255, 255, 0.2);
+  --glass-shadow-hover:
+    0 10px 28px rgba(0, 0, 0, 0.12),
     0 2px 8px rgba(0, 0, 0, 0.06),
-    inset 0 1.5px 0.5px rgba(255, 255, 255, 0.7),
-    inset 0 -1.5px 1px rgba(255, 255, 255, 0.35),
-    inset 2px 0 3px -2px rgba(255, 255, 255, 0.3),
-    inset -2px 0 3px -2px rgba(255, 255, 255, 0.3);
-  --glass-shadow-hover: 
-    0 14px 48px rgba(0, 0, 0, 0.18),
-    0 4px 12px rgba(0, 0, 0, 0.08),
-    inset 0 1.5px 0.5px rgba(255, 255, 255, 0.8),
-    inset 0 -1.5px 1px rgba(255, 255, 255, 0.4),
-    inset 2px 0 3px -2px rgba(255, 255, 255, 0.35),
-    inset -2px 0 3px -2px rgba(255, 255, 255, 0.35);
-  --glass-rim-border: rgba(255, 255, 255, 0.35);
-  --glass-sheen-1: rgba(255, 255, 255, 0.28);
-  --glass-sheen-2: rgba(255, 255, 255, 0.08);
-  --glass-drop-alpha: 0.12;
+    inset 0 1px 0.5px rgba(255, 255, 255, 0.6),
+    inset 0 -1px 1px rgba(255, 255, 255, 0.25);
+  --glass-rim-border: rgba(255, 255, 255, 0.28);
+  --glass-sheen-1: rgba(255, 255, 255, 0.2);
+  --glass-sheen-2: rgba(255, 255, 255, 0.06);
+  --glass-drop-alpha: 0.08;
 
   --card-bg: rgba(255, 255, 255, 0.5);
   --card-border: rgba(0, 0, 0, 0.06);
   --card-hover-bg: rgba(255, 255, 255, 0.7);
-  --card-shadow: 0 8px 32px rgba(0, 0, 0, 0.06);
-  --card-hover-shadow: 0 12px 40px rgba(0, 0, 0, 0.1);
-  --card-radius: 14px;
+  --card-shadow: 0 6px 20px rgba(0, 0, 0, 0.05);
+  --card-hover-shadow: 0 10px 28px rgba(0, 0, 0, 0.08);
+  --card-radius: var(--radius-lg);
+
+  /* 新 Surface 语义（spec §61） */
+  --surface-shell: rgba(0, 0, 0, 0.03);
+  --surface-content: transparent;
+  --surface-elevated: rgba(255, 255, 255, 0.85);
+  --surface-overlay: rgba(0, 0, 0, 0.28);
 
   --text-primary: rgba(0, 0, 0, 0.88);
   --text-secondary: rgba(0, 0, 0, 0.62);
@@ -167,4 +177,70 @@
   --border-primary: rgba(0, 0, 0, 0.08);
   --border-secondary: rgba(0, 0, 0, 0.04);
   --card-border: rgba(0, 0, 0, 0.1);
+}
+
+/* ============================================================
+   Liquid Glass OFF —— data-material="opaque"（spec §47/§53）
+   材质不透明化，但保留 hierarchy/spacing/contrast/shadow/divider。
+   Shell / Sidebar / Workbench header / Overlay 全部转为实底。
+   ============================================================ */
+[data-material="opaque"][data-theme="dark"],
+[data-material="opaque"]:root {
+  --surface-shell: rgba(16, 17, 23, 0.98);
+  --surface-elevated: rgba(24, 26, 34, 0.98);
+  --surface-overlay: rgba(10, 11, 16, 0.82);
+  --bg-surface: rgba(255, 255, 255, 0.05);
+  --bg-surface-hover: rgba(255, 255, 255, 0.09);
+  --bg-elevated: rgba(24, 26, 34, 0.98);
+  --sidebar-bg: rgba(14, 15, 20, 0.98);
+  --sidebar-item-hover: rgba(255, 255, 255, 0.05);
+  --sidebar-item-active: rgba(94, 158, 255, 0.16);
+  --input-bg: rgba(24, 26, 34, 0.98);
+  --card-bg: rgba(22, 23, 30, 0.96);
+  --card-hover-bg: rgba(30, 32, 40, 0.96);
+  --card-border: rgba(255, 255, 255, 0.08);
+}
+
+[data-material="opaque"][data-theme="light"] {
+  --surface-shell: rgba(252, 252, 253, 0.98);
+  --surface-elevated: rgba(255, 255, 255, 0.98);
+  --surface-overlay: rgba(0, 0, 0, 0.35);
+  --bg-surface: rgba(0, 0, 0, 0.04);
+  --bg-surface-hover: rgba(0, 0, 0, 0.07);
+  --bg-elevated: rgba(255, 255, 255, 0.98);
+  --sidebar-bg: rgba(246, 246, 248, 0.98);
+  --sidebar-item-hover: rgba(0, 0, 0, 0.04);
+  --sidebar-item-active: rgba(94, 158, 255, 0.12);
+  --input-bg: rgba(255, 255, 255, 0.98);
+  --card-bg: rgba(255, 255, 255, 0.96);
+  --card-hover-bg: rgba(248, 248, 250, 0.96);
+  --card-border: rgba(0, 0, 0, 0.07);
+}
+
+/* Glass OFF 时移除玻璃类特效（LiquidGlassFilter 也被禁用） */
+[data-material="opaque"] .glass-card,
+[data-material="opaque"] .sidebar-glass,
+[data-material="opaque"] .glass-menu {
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  background-image: none;
+}
+
+[data-material="opaque"] .glass-card::before,
+[data-material="opaque"] .glass-card::after {
+  opacity: 0;
+}
+
+/* ============================================================
+   Wallpaper 环境层（spec §49/§53/§54）
+   html[data-wallpaper] 标记环境层状态；scrim 由 JS 自适应计算。
+   ============================================================ */
+[data-wallpaper="active"] {
+  /* 壁纸激活：环境层可见，内容层对比度由 data-bg-active 覆盖 */
+}
+
+/* 壁纸自适应 scrim —— 由 Appearance Engine 计算并写入 */
+html {
+  --wallpaper-scrim: transparent;
+  --wallpaper-scrim-strong: transparent;
 }

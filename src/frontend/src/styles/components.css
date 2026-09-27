@@ -1137,3 +1137,162 @@ table[data-streamdown="table"] tbody tr:nth-child(even) > td {
     backdrop-filter: blur(4px) saturate(1.2);
   }
 }
+
+/* ============================================
+   Aether UI Refactor — App Shell 组件类
+   spec §8 / §11 / §12 / §16
+   ============================================ */
+
+/* ---- ContextBar 按钮（spec §12 右侧操作）---- */
+.aether-ctx-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: var(--radius-control);
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: background var(--motion-fast) var(--motion-enter);
+}
+.aether-ctx-btn:hover {
+  background: var(--bg-surface-hover);
+  color: var(--text-primary);
+}
+.aether-ctx-btn:active {
+  background: var(--bg-surface);
+}
+
+/* ---- Sidebar 导航项（spec §11.2：安静、无亮蓝 pill）---- */
+.aether-nav-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  height: 34px;
+  padding: 0 10px;
+  border-radius: var(--radius-control);
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 13px;
+  cursor: pointer;
+  position: relative;
+  transition: background var(--motion-fast) var(--motion-enter);
+}
+.aether-nav-item:hover {
+  background: var(--sidebar-item-hover);
+  color: var(--text-primary);
+}
+.aether-nav-item[data-active="true"] {
+  background: var(--sidebar-item-active);
+  color: var(--text-primary);
+  font-weight: 500;
+}
+.aether-nav-item[data-active="true"]::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 7px;
+  bottom: 7px;
+  width: 2px;
+  border-radius: 2px;
+  background: var(--accent-interactive);
+}
+
+.aether-nav-group-label {
+  display: flex;
+  align-items: center;
+  padding: 10px 10px 4px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+}
+
+/* ---- Workbench（spec §16-18）---- */
+.aether-wb-tabbar {
+  display: flex;
+  align-items: center;
+  height: 40px;
+  padding: 0 8px;
+  border-bottom: 1px solid var(--border-primary);
+  background: var(--surface-shell);
+  flex-shrink: 0;
+}
+.aether-wb-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 30px;
+  padding: 0 10px;
+  border-radius: var(--radius-control);
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 12px;
+  cursor: pointer;
+  position: relative;
+  transition: background var(--motion-fast) var(--motion-enter);
+}
+.aether-wb-tab:hover {
+  background: var(--bg-surface-hover);
+  color: var(--text-primary);
+}
+.aether-wb-tab[data-active="true"] {
+  background: var(--sidebar-item-active);
+  color: var(--text-primary);
+  font-weight: 500;
+}
+.aether-wb-tab[data-active="true"]::after {
+  content: '';
+  position: absolute;
+  left: 8px;
+  right: 8px;
+  bottom: -5px;
+  height: 2px;
+  border-radius: 2px;
+  background: var(--accent-interactive);
+}
+.aether-wb-tabbar-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border-radius: var(--radius-control);
+  border: none;
+  background: transparent;
+  color: var(--text-tertiary);
+  cursor: pointer;
+  transition: background var(--motion-fast) var(--motion-enter);
+}
+.aether-wb-tabbar-btn:hover {
+  background: var(--bg-surface-hover);
+  color: var(--text-primary);
+}
+
+/* ---- Workbench 拖拽 divider ---- */
+.aether-wb-divider {
+  position: absolute;
+  left: -3px;
+  top: 0;
+  bottom: 0;
+  width: 7px;
+  cursor: col-resize;
+  z-index: 5;
+}
+.aether-wb-divider:hover::after,
+.aether-wb-divider[data-dragging="true"]::after {
+  content: '';
+  position: absolute;
+  left: 3px;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: var(--accent-interactive);
+  opacity: 0.6;
+}
