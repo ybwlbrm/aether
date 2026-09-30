@@ -1,5 +1,5 @@
 ﻿import { useEffect, useState, useRef } from 'react';
-import { PageHeader } from '../components/PageHeader';
+import { PageHeader } from '../components/ui';
 import { api } from '../api/client';
 import { Activity, Cpu, MemoryStick, Network, Bot, Coins, RefreshCw } from 'lucide-react';
 
@@ -79,7 +79,7 @@ export function Monitoring() {
   return (
     <div className="min-h-screen" style={{ background: 'var(--bg-base)', backgroundImage: 'var(--bg-gradient)' }}>
       <div style={{ maxWidth: 'var(--content-standard)', margin: '0 auto', padding: '0 24px' }}>
-        <PageHeader title="系统监控" description="实时监控系统资源、模型健康与 Token 消耗（每 5 秒自动刷新）" icon={<Activity size={22} />} color="#10b981"
+        <PageHeader title="系统监控" description="实时监控系统资源、模型健康与 Token 消耗（每 5 秒自动刷新）" icon={<Activity size={22} />}
           action={<div className="flex gap-2">
             <button className="btn btn-ghost" onClick={() => setAutoRefresh(!autoRefresh)}>
               {autoRefresh ? '⏸ 暂停' : '▶ 自动刷新'}

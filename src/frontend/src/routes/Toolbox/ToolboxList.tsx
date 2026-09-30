@@ -1,5 +1,4 @@
 import { Wrench } from 'lucide-react';
-import { PageHeader } from '../../components/PageHeader';
 import type { ConvertOption, ToolCategory } from './types';
 import { ToolCard } from './ToolCard';
 import { categories, catOf, convertOptions } from './constants';

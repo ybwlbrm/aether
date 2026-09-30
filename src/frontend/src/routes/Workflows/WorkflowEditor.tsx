@@ -1,6 +1,6 @@
 import { useState, useRef, useCallback } from 'react';
 import { motion } from 'framer-motion';
-import { PageHeader } from '../../components/PageHeader';
+import { PageHeader } from '../../components/ui';
 import { api } from '../../api/client';
 import { Workflow as WorkflowIcon, Play, Save, ChevronLeft, History, Loader2, HelpCircle, Link2, GripVertical, Trash, X, CheckCircle2, AlertCircle, Sparkles } from 'lucide-react';
 import type { Workflow, FlowNode, FlowEdge, NodeType, RunRecord } from './types';
@@ -68,7 +68,6 @@ export function WorkflowEditor({
         title={editing.name || '未命名工作流'}
         description={`${editing.nodes.length} 节点 · ${editing.edges.length} 连接 · 触发器: ${editing.trigger}`}
         icon={<WorkflowIcon size={22} />}
-        color="var(--color-accent)"
         action={
           <div className="flex items-center gap-3">
             <button className="btn btn-secondary" onClick={onBack}>

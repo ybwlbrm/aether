@@ -1,3 +1,7 @@
 export * from "./activity-stream"
+export * from "./approval-card"
+export * from "./conversation-thread"
 export * from "./message-bubble"
+export * from "./poll-status-banner"
 export * from "./stream-failure"
+export * from "./thinking-dots"

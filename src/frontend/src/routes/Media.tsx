@@ -1,7 +1,7 @@
 ﻿import { useEffect, useState, useCallback } from 'react';
 import { motion } from 'framer-motion';
 import { Palette, Plus, Search, RefreshCw, AlertCircle, CheckCircle2, Trash2 } from 'lucide-react';
-import { PageHeader } from '../components/PageHeader';
+import { PageHeader } from '../components/ui';
 import { confirm as confirmDialog } from '../components/ui/confirm-dialog';
 import { api } from '../api/client';
 import { MediaForm } from './Media/MediaForm';
@@ -155,7 +155,6 @@ export function Media() {
           title="AI Studio"
           description="图片、视频 AI 生成"
           icon={<Palette size={22} />}
-          color="#a78bfa"
           action={
             <button
               className="btn btn-primary"

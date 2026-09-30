@@ -19,7 +19,6 @@ interface GeneralSettingsProps {
   handleAddDir: () => void;
   handleRemoveDir: (dir: string) => Promise<void>;
   handleSetDefault: (dir: string) => Promise<void>;
-  uiMode: string;
   navigate: (path: string) => void;
 }
 
@@ -60,7 +59,6 @@ export function GeneralSettings({
   handleAddDir,
   handleRemoveDir,
   handleSetDefault,
-  uiMode,
   navigate,
 }: GeneralSettingsProps) {
   return (
@@ -122,16 +120,17 @@ export function GeneralSettings({
         </div>
       </div>
 
-      {/* Coding 模式：功能导航 */}
-      {uiMode === 'coding' && (
-        <div className="glass-card" style={{ padding: '24px', marginTop: 24 }}>
+      {/* 功能导航：侧边栏未展示的功能，点击卡片快速进入。
+          T24：原以 `uiMode === 'coding'` 为闸门 —— 模式 flag 已随路由切换离开渲染路径，
+          此面板改为常驻（它本来就不是"某模式专属"的功能，只是快捷入口）。 */}
+      <div className="glass-card" style={{ padding: '24px', marginTop: 24 }}>
           <div className="flex items-center gap-3">
             <div style={{ width: 36, height: 36, borderRadius: 10, background: 'rgba(94,158,255,0.12)', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
               <Compass size={18} style={{ color: 'var(--color-accent)' }} />
             </div>
             <div>
               <h2 style={{ fontSize: 'var(--font-module-title)', fontWeight: 600, color: 'var(--text-primary)' }}>功能导航</h2>
-              <p style={{ fontSize: '12px', color: 'var(--text-tertiary)', marginTop: 2 }}>Coding 模式下未在侧边栏展示的功能，点击卡片快速进入</p>
+              <p style={{ fontSize: '12px', color: 'var(--text-tertiary)', marginTop: 2 }}>侧边栏未展示的功能，点击卡片快速进入</p>
             </div>
           </div>
           <div className="space-y-5" style={{ marginTop: 20 }}>
@@ -171,8 +170,7 @@ export function GeneralSettings({
               </div>
             ))}
           </div>
-        </div>
-      )}
+      </div>
     </>
   );
 }

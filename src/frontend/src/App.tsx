@@ -41,7 +41,10 @@ class ErrorBoundary extends Component<{ children: ReactNode }, { hasError: boole
 }
 
 // 路由懒加载 — 减小首屏 bundle
-const CommandCenter = lazy(() => import('./routes/CommandCenter').then(m => ({ default: m.CommandCenter })));
+// T24 路由切换（D3 已批准）：/command-center 是 Thread 主线，旧 dashboard 移到 /dashboard。
+// ThreadPage 是同一个组件的两种能力档案（variant），因此 /chat 复用同一实现而非第二套接线。
+const ThreadPage = lazy(() => import('./routes/ThreadPage').then(m => ({ default: m.ThreadPage })));
+const Dashboard = lazy(() => import('./routes/Dashboard').then(m => ({ default: m.Dashboard })));
 const Providers = lazy(() => import('./routes/Providers').then(m => ({ default: m.Providers })));
 const Chat = lazy(() => import('./routes/Chat').then(m => ({ default: m.Chat })));
 const Media = lazy(() => import('./routes/Media').then(m => ({ default: m.Media })));
@@ -75,8 +78,8 @@ export function App() {
         <div className="app-drag-region" />
         <Routes>          <Route path="/" element={<Layout />}>
             <Route index element={<Navigate to="/command-center" replace />} />
-            <Route path="command-center" element={<Suspense fallback={<PageFallback />}><CommandCenter /></Suspense>} />
-            <Route path="dashboard" element={<Suspense fallback={<PageFallback />}><CommandCenter /></Suspense>} />
+            <Route path="command-center" element={<Suspense fallback={<PageFallback />}><ThreadPage variant="workbench" /></Suspense>} />
+            <Route path="dashboard" element={<Suspense fallback={<PageFallback />}><Dashboard /></Suspense>} />
             <Route path="providers" element={<Suspense fallback={<PageFallback />}><Providers /></Suspense>} />
             <Route path="chat" element={<Suspense fallback={<PageFallback />}><Chat /></Suspense>} />
             <Route path="media" element={<Suspense fallback={<PageFallback />}><Media /></Suspense>} />

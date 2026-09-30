@@ -69,9 +69,9 @@ export interface AppearanceState {
   toggleSlideshow: () => void;
 }
 
-const STORAGE_KEY = 'aether.appearance';
+export const STORAGE_KEY = 'aether.appearance';
 
-const DEFAULT_MATERIAL: MaterialState = {
+export const DEFAULT_MATERIAL: MaterialState = {
   mode: 'glass',
   intensity: 60,
   blur: 14,
@@ -80,7 +80,7 @@ const DEFAULT_MATERIAL: MaterialState = {
   rim: 40,
 };
 
-const DEFAULT_WALLPAPER: WallpaperState = {
+export const DEFAULT_WALLPAPER: WallpaperState = {
   source: 'none',
   path: null,
   activeItem: null,
@@ -94,8 +94,8 @@ const DEFAULT_WALLPAPER: WallpaperState = {
   blur: 0,
 };
 
-/** 从旧 localStorage key 迁移一次（幂等） */
-function migrateLegacy(): Partial<AppearanceState> | null {
+/** 从旧 localStorage key 迁移一次（幂等：aether.appearance 已存在则直接返回 null） */
+export function migrateLegacy(): Partial<AppearanceState> | null {
   try {
     const legacy = localStorage.getItem('aether.appearance');
     if (legacy) return null;
@@ -132,20 +132,57 @@ function migrateLegacy(): Partial<AppearanceState> | null {
   }
 }
 
+/**
+ * 持久化快照形态：顶层字段可缺，material / wallpaper 子对象**也可缺字段** ——
+ * 历史版本写进 localStorage 的 JSON 确实可能是半个子对象。
+ */
+export type AppearanceSnapshot = Omit<Partial<AppearanceState>, 'material' | 'wallpaper'> & {
+  material?: Partial<MaterialState>;
+  wallpaper?: Partial<WallpaperState>;
+};
+
+/**
+ * T25b：把持久化快照与默认值**深合并**。
+ *
+ * 修复前的写法是
+ *   `{ material: {...D, ...parsed.material}, wallpaper: {...D, ...parsed.wallpaper}, ...parsed }`
+ * —— `...parsed` 在最后展开，会用快照里的 material / wallpaper 子对象
+ * **整体覆盖**上面刚算好的深合并结果，使那两行成为死代码：任何非空快照
+ * 都会带来一个字段可能缺失的子对象（例如旧版本只写过 { mode, blur }），
+ * 于是 saturation / rim 等字段变成 undefined，CSS var 被写成 "undefined"。
+ *
+ * 正确顺序：先展开 parsed 铺平顶层标量，再让默认值参与子对象合并。
+ */
+export function mergeAppearanceSnapshot(parsed: AppearanceSnapshot): Partial<AppearanceState> {
+  return {
+    ...parsed,
+    material: { ...DEFAULT_MATERIAL, ...(parsed.material ?? {}) },
+    wallpaper: { ...DEFAULT_WALLPAPER, ...(parsed.wallpaper ?? {}) },
+  };
+}
+
+/**
+ * 解析 aether.appearance 的原始 JSON。抽出成独立函数以便单测直接验证
+ * 「落盘 → 重新加载」这条真实加载路径（loadInitial 逐字复用它）。
+ * 返回 null 表示该 key 缺失或 JSON 损坏 —— 调用方回退 migrateLegacy。
+ */
+export function parseAppearanceSnapshot(raw: string | null): Partial<AppearanceState> | null {
+  if (!raw) return null;
+  try {
+    return mergeAppearanceSnapshot(JSON.parse(raw) as AppearanceSnapshot);
+  } catch {
+    return null;
+  }
+}
+
 function loadInitial(): Partial<AppearanceState> {
   try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (raw) {
-      const parsed = JSON.parse(raw) as Partial<AppearanceState>;
-      return {
-        material: { ...DEFAULT_MATERIAL, ...(parsed.material ?? {}) },
-        wallpaper: { ...DEFAULT_WALLPAPER, ...(parsed.wallpaper ?? {}) },
-        ...parsed,
-      };
-    }
+    const parsed = parseAppearanceSnapshot(localStorage.getItem(STORAGE_KEY));
+    if (parsed) return parsed;
   } catch {
     /* ignore - intentional */
   }
+  // migrateLegacy 幂等性不变：aether.appearance 存在时已在上面 return，走不到这里
   return migrateLegacy() ?? {};
 }
 
@@ -184,10 +221,22 @@ export const useAppearanceStore = create<AppearanceState>((set, get) => ({
     }),
 }));
 
-/** 持久化（AppShell 订阅变化时调用） */
+/**
+ * 持久化（AppShell 订阅变化时调用）—— T26 显式字段白名单：原写法
+ * `JSON.stringify(state)` 会把 9 个 action 枚举成 key（值 undefined 被丢弃）。
+ * 只写回 loadInitial 会读回的状态字段。
+ */
 export function persistAppearance(state: AppearanceState): void {
   try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+    localStorage.setItem(
+      STORAGE_KEY,
+      JSON.stringify({
+        colorScheme: state.colorScheme,
+        uiTheme: state.uiTheme,
+        material: { ...state.material },
+        wallpaper: { ...state.wallpaper },
+      } satisfies AppearanceSnapshot),
+    );
   } catch {
     /* ignore - intentional */
   }

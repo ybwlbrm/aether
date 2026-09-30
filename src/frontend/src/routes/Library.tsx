@@ -2,7 +2,7 @@
 import { motion } from 'framer-motion';
 import { api } from '../api/client';
 import { Database, Image, Film, FileText, Trash2, Eye, Edit3, X, CheckSquare, Square } from 'lucide-react';
-import { PageHeader } from '../components/PageHeader';
+import { PageHeader } from '../components/ui';
 import { confirm as confirmDialog } from '../components/ui/confirm-dialog';
 
 export function Library() {
@@ -98,7 +98,7 @@ export function Library() {
   return (
     <div className="min-h-screen" style={{ background: 'var(--bg-base)', backgroundImage: 'var(--bg-gradient)' }}>
     <div style={{ maxWidth: 'var(--content-standard)', margin: '0 auto', padding: '0 24px' }}>
-      <PageHeader title="Library" description="Generated media, documents, and more" icon={<Database size={22} />} color="#60a5fa" />
+      <PageHeader title="Library" description="Generated media, documents, and more" icon={<Database size={22} />} />
 
       <div className="grid grid-cols-[repeat(auto-fill,minmax(260px,1fr))] gap-6" style={{ marginBottom: '32px' }}>
         {[

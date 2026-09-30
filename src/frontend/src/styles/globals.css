@@ -14,6 +14,7 @@
 @import './themes/light.css';
 @import './base.css';
 @import './components.css';
+@import './shell.css';
 
 /* Streamdown 官方要求：让 Tailwind 4 扫描 streamdown 及其插件的 utility 类。
    @source 必须位于所有 @import 之后，否则会破坏 globals 的 import 展开
@@ -29,6 +30,10 @@
    themes.css   — Theme variables (dark mode default, light mode)
    base.css     — Base reset, typography, utilities, animations
    components.css — Component classes (buttons, cards, inputs, badges)
+   shell.css    — Codex-style shell layer: content surfaces, typography
+                  rhythm, browser surfaces (selection/caret/scrollbars),
+                  the single authored motion pair. Imported last so it
+                  wins over base.css on shared browser pseudo-elements.
 */
 
 /* 无边框 Electron 窗口拖拽区域 — 覆盖顶部 36px，应用可拖动 */

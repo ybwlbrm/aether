@@ -1,25 +1,7 @@
 ﻿import { useState, useRef } from 'react';
 import { Globe, ExternalLink, ArrowRight, RotateCcw, Search } from 'lucide-react';
-import { PageHeader } from '../components/PageHeader';
-
-function normalizeUrl(input: string): string {
-  const trimmed = input.trim();
-  if (!trimmed) return '';
-  if (/^https?:\/\//i.test(trimmed)) return trimmed;
-  return `https://${trimmed}`;
-}
-
-/** 判断输入是「网址」还是「搜索关键词」：
- *  含点且无空格的形如 xxx.com → 网址；
- *  否则当作关键词走 DuckDuckGo 搜索（聚合搜索引擎已合并到浏览器）。
- */
-function isUrlLike(raw: string): boolean {
-  const t = raw.trim();
-  if (/^https?:\/\//i.test(t) || /^www\./i.test(t)) return true;
-  if (t.includes(' ')) return false;
-  if (t.includes('.')) return /^[\w-]+(\.[\w-]+)+/.test(t);
-  return false;
-}
+import { PageHeader } from '../components/ui';
+import { isUrlLike, normalizeUrl } from '../lib/url';
 
 export function Browser() {
   const [input, setInput] = useState('');
@@ -30,12 +12,12 @@ export function Browser() {
   const go = (raw?: string) => {
     const q = (raw ?? input).trim();
     if (!q) return;
-    // 网址：直接内嵌浏览
+    // 网址：直接内嵌浏览（isUrlLike 为真时 normalizeUrl 必非 null）
     if (isUrlLike(q)) {
       const target = normalizeUrl(q);
       setSrc(target);
       setBlocked(false);
-      setInput(target);
+      setInput(target ?? q);
       return;
     }
     // 关键词：走 DuckDuckGo 搜索（内嵌展示）
@@ -79,7 +61,6 @@ export function Browser() {
           title="Browser"
           description="内置浏览器与网页搜索"
           icon={<Globe size={22} />}
-          color="var(--color-success)"
         />
 
         <div className="flex items-center gap-2" style={{ marginBottom: 16 }}>

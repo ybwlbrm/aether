@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { PageHeader } from '../components/PageHeader';
+import { PageHeader } from '../components/ui';
 import { api } from '../api/client';
 import { Server, Plus, Trash2, Play, Power, PowerOff, ExternalLink, Terminal, Download, BookOpen, CheckCircle2, XCircle, Eye } from 'lucide-react';
 import { confirm as confirmDialog } from '../components/ui/confirm-dialog';
@@ -150,7 +150,7 @@ export function McpSettings() {
   return (
     <div className="min-h-screen" style={{ background: 'var(--bg-base)', backgroundImage: 'var(--bg-gradient)' }}>
       <div style={{ maxWidth: 'var(--content-standard)', margin: '0 auto', padding: '0 24px' }}>
-        <PageHeader title="MCP & Skill 管理中心" description="管理 MCP 服务器与 Skill 技能" icon={<Server size={22} />} color="#8b5cf6"
+        <PageHeader title="MCP & Skill 管理中心" description="管理 MCP 服务器与 Skill 技能" icon={<Server size={22} />}
           action={<div className="flex gap-2">
             <button className="btn btn-ghost" onClick={handleImport} disabled={importing}>
               <Download size={18} /> {importing ? '导入中...' : '从 OpenCode 导入'}

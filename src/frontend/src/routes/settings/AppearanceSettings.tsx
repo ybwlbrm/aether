@@ -4,13 +4,22 @@ import {
   PlayCircle, Shuffle, Upload, FolderX,
 } from 'lucide-react';
 import { api } from '../../api/client';
-import { useAppearanceStore, type UiTheme } from '../../store/appearance';
+import { dispatchAppEvent } from '../../lib/events';
+import { useAppearanceStore, type UiTheme, type WallpaperSource } from '../../store/appearance';
 
 /**
  * AppearanceSettings — 外观引擎控制台（spec §45-54）。
  *
  * 三个独立维度：colorScheme（明暗）· material（Liquid Glass 参数）· wallpaper（环境层）。
  * 直接消费 appearance store，不再接收 props 透传。
+ *
+ * T25a：本组件是 glass / wallpaper 的**唯一** UI —— 旧 Settings.tsx 里的第二套实现
+ * （内联的 glass 默认值 / CSS 变量直写 / 裸 CustomEvent）已退役。store 是唯一事实源，
+ * 但为了让 WallpaperLayer 现有的 5 个 legacy listener 保持原样不动（它要读
+ * `--glass-*` 之外的运行时图片列表），这里在**用户意图发生**的那一下补发同契约事件：
+ *   custombg-change / bg-slideshow-start / bg-slideshow-stop / bg-slideshow-clear / bg-slideshow-interval
+ * 事件一律走 lib/events 的 dispatchAppEvent（typed detail），事件名与 detail 形状
+ * 与旧 Settings.tsx 的裸 `new CustomEvent(...)` 逐字一致。
  */
 
 const UI_THEMES: Array<{ id: UiTheme; label: string }> = [
@@ -82,19 +91,21 @@ export function AppearanceSettings() {
   // ============================================================
   // 壁纸：加载当前目录图片
   // ============================================================
-  const loadBgImages = useCallback(async () => {
+  const loadBgImages = useCallback(async (): Promise<string[]> => {
     try {
       const res = await api.getBackgrounds();
       const images: string[] = res?.images ?? [];
       setDirImages(images);
       setDirUnavailable(images.length === 0);
+      return images;
     } catch {
       setDirUnavailable(true);
+      return [];
     }
   }, []);
 
   useEffect(() => {
-    if (wallpaper.source === 'directory') loadBgImages();
+    if (wallpaper.source === 'directory') void loadBgImages();
   }, [wallpaper.source, loadBgImages]);
 
   // 上传单图
@@ -112,37 +123,85 @@ export function AppearanceSettings() {
       );
       const res = await api.uploadBackgrounds(urls);
       const all = res?.images ?? urls;
+      const path = urls[0] ?? null;
       setDirImages(all);
-      setWallpaper({ source: 'upload', path: urls[0] ?? null });
+      setWallpaper({ source: 'upload', path });
       setDirUnavailable(false);
+      dispatchAppEvent('custombg-change', path);
     } catch {
       setDirUnavailable(true);
     }
     e.target.value = '';
   }, [setWallpaper]);
 
-  // 选择目录（electron 环境）或手动输入
+  // 选择目录（webkitdirectory）
   const handleBgFolderSelect = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const dir = e.target.files?.[0]?.webkitRelativePath ? e.target.value : e.target.value;
+    const dir = e.target.value;
     if (!dir) return;
     setDirInfo(dir);
     try {
       await api.setBackgroundSource('dir', dir);
-      await loadBgImages();
-      const imgs = await api.getBackgrounds();
-      const images: string[] = imgs?.images ?? [];
+      const images = await loadBgImages();
       if (images.length > 0) {
-        setWallpaper({ source: 'directory', activeItem: images[0] ?? null });
+        setWallpaper({ source: 'directory', activeItem: images[0] ?? null, interval: wallpaper.interval });
+        dispatchAppEvent('bg-slideshow-start', { images, interval: wallpaper.interval });
+      } else {
+        setWallpaper({ source: 'directory' });
+        dispatchAppEvent('bg-slideshow-clear');
       }
     } catch {
       setDirUnavailable(true);
     }
     e.target.value = '';
-  }, [loadBgImages, setWallpaper]);
+  }, [loadBgImages, setWallpaper, wallpaper.interval]);
 
   const handleRemoveBg = useCallback(() => {
     setWallpaper({ source: 'none', path: null, activeItem: null, slideshow: false });
     setDirImages([]);
+    setDirInfo('');
+    dispatchAppEvent('custombg-change', null);
+    dispatchAppEvent('bg-slideshow-clear');
+  }, [setWallpaper]);
+
+  // 切换壁纸来源
+  const handleSelectSource = useCallback((source: WallpaperSource) => {
+    if (source === 'none') {
+      handleRemoveBg();
+      return;
+    }
+    setWallpaper({ source });
+    if (source === 'upload') {
+      // 只有已有 path 才需要通知环境层；path 为空时派发 null 会把 source 打回 none
+      if (wallpaper.path) dispatchAppEvent('custombg-change', wallpaper.path);
+    } else {
+      void loadBgImages();
+    }
+  }, [handleRemoveBg, loadBgImages, setWallpaper, wallpaper.path]);
+
+  // Slideshow 开关：把完整图片列表交给 WallpaperLayer（旧 Settings 同契约）
+  const handleToggleSlideshow = useCallback(async () => {
+    const next = !wallpaper.slideshow;
+    setWallpaper({ slideshow: next });
+    if (!next) {
+      dispatchAppEvent('bg-slideshow-stop');
+      return;
+    }
+    try {
+      await api.setBackgroundInterval(wallpaper.interval);
+    } catch { /* ignore */ }
+    // 空列表派发 start 会让 WallpaperLayer 走 else 分支清空壁纸，故改派 clear
+    if (dirImages.length > 0) {
+      dispatchAppEvent('bg-slideshow-start', { images: dirImages, interval: wallpaper.interval });
+    } else {
+      dispatchAppEvent('bg-slideshow-clear');
+    }
+  }, [dirImages, setWallpaper, wallpaper.interval, wallpaper.slideshow]);
+
+  // Slideshow 间隔
+  const handleIntervalChange = useCallback((raw: string) => {
+    const interval = Math.max(1, Number(raw) || 60);
+    setWallpaper({ interval });
+    dispatchAppEvent('bg-slideshow-interval', { interval });
   }, [setWallpaper]);
 
   // Slideshow 定时推进（设置面板内预览）
@@ -158,16 +217,10 @@ export function AppearanceSettings() {
     return () => clearInterval(timer);
   }, [wallpaper.slideshow, wallpaper.interval, wallpaper.randomize, dirImages, wallpaper.activeItem, setWallpaper]);
 
-  const applySlideshow = useCallback(async () => {
-    if (wallpaper.slideshow && dirImages.length > 0) {
-      try {
-        await api.setBackgroundInterval(wallpaper.interval);
-      } catch { /* ignore */ }
-    }
-  }, [wallpaper.slideshow, wallpaper.interval, dirImages.length]);
-
   return (
-    <div style={{ maxWidth: 'var(--content-standard)', margin: '0 auto', padding: '24px' }}>
+    // T25a: 页面宽度 / 内边距由 routes/Settings.tsx 的 shell 独占，
+    // 此处不再自带 maxWidth + padding（消除嵌套 wrapper 双 padding）
+    <div>
       {/* ================= Theme ================= */}
       <Section title="Theme">
         <div style={{ display: 'flex', gap: 8, marginBottom: 14 }}>
@@ -275,7 +328,7 @@ export function AppearanceSettings() {
           ).map((s) => (
             <button
               key={s.id}
-              onClick={() => setWallpaper({ source: s.id })}
+              onClick={() => handleSelectSource(s.id)}
               data-active={wallpaper.source === s.id}
               style={{
                 display: 'inline-flex', alignItems: 'center', gap: 8, height: 34, padding: '0 12px',
@@ -393,7 +446,7 @@ export function AppearanceSettings() {
             {/* Slideshow */}
             <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap', marginTop: 8 }}>
               <button
-                onClick={() => { setWallpaper({ slideshow: !wallpaper.slideshow }); applySlideshow(); }}
+                onClick={() => { void handleToggleSlideshow(); }}
                 data-active={wallpaper.slideshow}
                 style={{
                   display: 'inline-flex', alignItems: 'center', gap: 8, height: 32, padding: '0 10px',
@@ -423,7 +476,7 @@ export function AppearanceSettings() {
                   min={1}
                   max={3600}
                   value={wallpaper.interval}
-                  onChange={(e) => setWallpaper({ interval: Math.max(1, Number(e.target.value) || 60) })}
+                  onChange={(e) => handleIntervalChange(e.target.value)}
                   aria-label="Slideshow interval (seconds)"
                   style={{
                     width: 64,

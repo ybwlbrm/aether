@@ -1,4 +1,5 @@
 import { renderToStaticMarkup } from "react-dom/server"
+import { MemoryRouter } from "react-router-dom"
 import { describe, expect, it, vi } from "vitest"
 
 import * as ChatModule from "./Chat"
@@ -36,8 +37,14 @@ vi.mock("../hooks", () => ({
 }))
 
 describe("Chat shared UI integration", () => {
+  // T24：Chat 现在只是 ThreadPage 的 chat 能力档案，渲染的是带路由读数的表面，
+  // 因此需要一个 Router（此前 Chat 自带接线，不读路由）。
   it("renders the shared page header contract in Chat", () => {
-    const markup = renderToStaticMarkup(<ChatModule.Chat />)
+    const markup = renderToStaticMarkup(
+      <MemoryRouter initialEntries={["/chat"]}>
+        <ChatModule.Chat />
+      </MemoryRouter>,
+    )
 
     expect(markup).toContain('data-slot="page-header"')
     expect(markup).toContain('data-slot="page-header-title"')

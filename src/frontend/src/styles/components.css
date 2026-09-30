@@ -48,11 +48,9 @@
     background: rgba(var(--glass-fill-rgb), 0.92) !important;
   }
 }
-/* Glass 关闭时：移除 url(#liquid-lens) 折射特效，但 blur/saturate 仍由滑块控制 */
-[data-glass-off] .glass-card {
-  -webkit-backdrop-filter: blur(var(--glass-blur-radius)) saturate(var(--glass-saturate)) brightness(var(--glass-brightness));
-  backdrop-filter: blur(var(--glass-blur-radius)) saturate(var(--glass-saturate)) brightness(var(--glass-brightness));
-}
+/* Glass 关闭（data-material=opaque）的实底化由 themes.css 的 [data-material="opaque"] 块处理。
+   历史遗留 [data-glass-off] 选择器已无任何代码设置该属性（Settings 双轨 glass 已合并退役），
+   此处删除以免与 appearance store 新轨并存造成契约混乱。 */
 .glass-card::after {
   content: '';
   position: absolute;
@@ -117,10 +115,6 @@
   isolation: isolate;
   will-change: transform;
   transition: box-shadow 0.25s ease, background 0.3s ease, backdrop-filter 0.01s ease;
-}
-[data-glass-off] .glass-menu {
-  -webkit-backdrop-filter: blur(var(--glass-blur-radius)) saturate(var(--glass-saturate));
-  backdrop-filter: blur(var(--glass-blur-radius)) saturate(var(--glass-saturate));
 }
 
 /* ===== 输入框 ===== */
@@ -298,35 +292,11 @@
   backdrop-filter: blur(var(--glass-blur-radius)) saturate(var(--glass-saturate));
 }
 
-/* ===== Section Header ===== */
-.section-header {
-  display: flex;
-  align-items: center;
-  gap: var(--space-3);
-  margin-bottom: var(--space-5);
-}
-
-.section-header-icon {
-  display: flex;
-  flex-shrink: 0;
-  align-items: center;
-  justify-content: center;
-  width: var(--space-10);
-  height: var(--space-10);
-  border-radius: var(--radius-sm);
-}
-
-.section-header-title {
-  color: var(--text-primary);
-  font-size: var(--font-size-subtitle);
-  font-weight: var(--font-weight-semibold);
-}
-
-.section-header-subtitle {
-  margin-top: var(--space-1);
-  color: var(--text-tertiary);
-  font-size: var(--font-size-caption);
-}
+/* T26：删除 ===== Section Header ===== 整块 29 行（.section-header /
+   .section-header-icon / .section-header-title / .section-header-subtitle）——
+   0 消费者。`components/ui/section.tsx` 已迁到 shadcn 风格 `ui-section-*` 家族
+   （ui-section / ui-section-header / ui-section-title / ui-section-description），
+   旧命名整组遗留。 */
 
 /* ===== List Row ===== */
 .list-row {
@@ -1202,97 +1172,23 @@ table[data-streamdown="table"] tbody tr:nth-child(even) > td {
   background: var(--accent-interactive);
 }
 
+/* T6a：导航分组标签去掉「小字 + 全大写 + 宽字距」的小标题喊话形态。
+   改用 caption 字号 + normal 字距 + sentence case，语义层级不变（仍是
+   最弱一级），但颜色走 --content-text-quiet：它承担 --text-tertiary 的角色，
+   同时满足正文级 4.5:1 对比度并带 6% 品牌暖色相 tint（非纯灰）。
+   --text-tertiary 在暗色画布上约 3.1:1，详见 DESIGN-READ.md §Contrast。 */
 .aether-nav-group-label {
   display: flex;
   align-items: center;
   padding: 10px 10px 4px;
-  font-size: 10px;
-  font-weight: 600;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  color: var(--text-tertiary);
+  font-size: var(--font-size-caption);
+  font-weight: var(--font-weight-medium);
+  letter-spacing: var(--letter-spacing-normal);
+  color: var(--content-text-quiet);
 }
 
-/* ---- Workbench（spec §16-18）---- */
-.aether-wb-tabbar {
-  display: flex;
-  align-items: center;
-  height: 40px;
-  padding: 0 8px;
-  border-bottom: 1px solid var(--border-primary);
-  background: var(--surface-shell);
-  flex-shrink: 0;
-}
-.aether-wb-tab {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  height: 30px;
-  padding: 0 10px;
-  border-radius: var(--radius-control);
-  border: none;
-  background: transparent;
-  color: var(--text-secondary);
-  font-size: 12px;
-  cursor: pointer;
-  position: relative;
-  transition: background var(--motion-fast) var(--motion-enter);
-}
-.aether-wb-tab:hover {
-  background: var(--bg-surface-hover);
-  color: var(--text-primary);
-}
-.aether-wb-tab[data-active="true"] {
-  background: var(--sidebar-item-active);
-  color: var(--text-primary);
-  font-weight: 500;
-}
-.aether-wb-tab[data-active="true"]::after {
-  content: '';
-  position: absolute;
-  left: 8px;
-  right: 8px;
-  bottom: -5px;
-  height: 2px;
-  border-radius: 2px;
-  background: var(--accent-interactive);
-}
-.aether-wb-tabbar-btn {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 26px;
-  height: 26px;
-  border-radius: var(--radius-control);
-  border: none;
-  background: transparent;
-  color: var(--text-tertiary);
-  cursor: pointer;
-  transition: background var(--motion-fast) var(--motion-enter);
-}
-.aether-wb-tabbar-btn:hover {
-  background: var(--bg-surface-hover);
-  color: var(--text-primary);
-}
+/* T26：删除 .aether-wb-tabbar / -tab / -tabbar-btn / -divider 共 84 行 ——
+   grep 全仓 `aether-wb-` 在任何 .tsx 中 0 命中。T22 新 Workbench 用
+   .aether-workbench / .aether-workbench-sheet，tab 走 components/workbench 自己的
+   class，拖拽手柄是内联 style（RESIZE_HANDLE_WIDTH）。 */
 
-/* ---- Workbench 拖拽 divider ---- */
-.aether-wb-divider {
-  position: absolute;
-  left: -3px;
-  top: 0;
-  bottom: 0;
-  width: 7px;
-  cursor: col-resize;
-  z-index: 5;
-}
-.aether-wb-divider:hover::after,
-.aether-wb-divider[data-dragging="true"]::after {
-  content: '';
-  position: absolute;
-  left: 3px;
-  top: 0;
-  bottom: 0;
-  width: 1px;
-  background: var(--accent-interactive);
-  opacity: 0.6;
-}

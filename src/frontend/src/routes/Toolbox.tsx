@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect } from 'react';
 import { motion } from 'framer-motion';
-import { PageHeader } from '../components/PageHeader';
+import { PageHeader } from '../components/ui';
 import { Wrench, Upload, Download, Loader2, CheckCircle2, AlertCircle, X } from 'lucide-react';
 import type { ConvertOption } from './Toolbox/types';
 import { ToolboxList } from './Toolbox/ToolboxList';
@@ -393,7 +393,7 @@ export function Toolbox() {
   return (
     <div className="min-h-screen" style={{ background: 'var(--bg-base)', backgroundImage: 'var(--bg-gradient)' }}>
       <div style={{ maxWidth: 'var(--content-standard)', margin: '0 auto', padding: '0 24px' }}>
-        <PageHeader title="工具箱" description="格式转换 · 文档处理 · 音频工具" icon={<Wrench size={22} />} color="var(--color-warning)" />
+        <PageHeader title="工具箱" description="格式转换 · 文档处理 · 音频工具" icon={<Wrench size={22} />} />
 
         {/* AEX-P1-017：依赖探测失败必须显式告知 —— 否则用户选了"视频提取音频"失败时
             无从判断是缺 ffmpeg 还是后端没起来（原先 catch 静默，界面与"依赖齐全"完全一致）。 */}
