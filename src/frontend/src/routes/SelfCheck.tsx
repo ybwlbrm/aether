@@ -1,5 +1,5 @@
 ﻿import { useEffect, useState } from 'react';
-import { PageHeader } from '../components/ui';
+import { PageHeader } from '../components/PageHeader';
 import { api } from '../api/client';
 import { Shield, CheckCircle2, XCircle, AlertTriangle, RefreshCw } from 'lucide-react';
 
@@ -73,7 +73,7 @@ export function SelfCheck() {
   return (
     <div className="min-h-screen" style={{ background: 'var(--bg-base)', backgroundImage: 'var(--bg-gradient)' }}>
       <div style={{ maxWidth: 'var(--content-standard)', margin: '0 auto', padding: '0 24px' }}>
-        <PageHeader title="AI 自检系统" description="检查项目完整性、数据一致性、依赖状态" icon={<Shield size={22} />}
+        <PageHeader title="AI 自检系统" description="检查项目完整性、数据一致性、依赖状态" icon={<Shield size={22} />} color="#10b981"
           action={<button className="btn btn-primary" onClick={run} disabled={loading}>
             <RefreshCw size={18} className={loading ? 'animate-spin' : ''} /> {loading ? '检查中...' : '重新检查'}
           </button>}

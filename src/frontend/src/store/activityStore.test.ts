@@ -1,7 +1,6 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import type { AgentEventEnvelope, RunStatus } from '@pacc/shared';
-import { RUN_STATUSES } from '@pacc/shared';
-import { projectToRecords, type ActivityRecord, type RunMeta, useActivityStore, projectTaskProgress, getEventIdentity, resetEventsCacheForTest } from './activityStore';
+import type { AgentEventEnvelope } from '@pacc/shared';
+import { projectToRecords, type ActivityRecord, useActivityStore, projectTaskProgress, getEventIdentity, resetEventsCacheForTest } from './activityStore';
 import { parseSseFrame } from '../api/streamClient';
 
 function env(partial: Partial<AgentEventEnvelope> & { eventType: AgentEventEnvelope['eventType'] }): AgentEventEnvelope {
@@ -420,119 +419,5 @@ describe('activityStore · getEvents 引用缓存 (UX-004 / React #185 回归)',
     expect(store.getEvents('conv1')[0].taskId).toBe('r2');
     store.clearConv('conv1');
     expect(store.getEvents('conv1')).toHaveLength(0);
-  });
-});
-
-describe('activityStore — RunMeta 11 态扩宽（T9）', () => {
-  beforeEach(() => {
-    useActivityStore.setState({ eventsByRun: {}, cursorByRun: {}, _eventIdentitySetByRun: {}, taskCardCache: {}, reasoningCache: {}, runMetaById: {}, runsByConversation: {} });
-    resetEventsCacheForTest();
-  });
-
-  /**
-   * v2 的 run.* 事件类型不在 v1 AgentEventType 闭集内（前端按运行时字符串消费 SSE 帧），
-   * 这里双断言构造真实帧形态；不改动既有 env 助手。
-   */
-  function runEnv(partial: {
-    eventType: string;
-    seq: number;
-    taskId?: string;
-    timestamp?: string;
-    endReason?: AgentEventEnvelope['endReason'];
-  }): AgentEventEnvelope {
-    return {
-      eventId: `run-e-${partial.seq}`,
-      sessionId: 's-1',
-      taskId: partial.taskId ?? 'run-1',
-      agentId: 'main',
-      agentType: 'orchestrator',
-      timestamp: partial.timestamp ?? '2026-08-24T00:00:00Z',
-      seq: partial.seq,
-      eventType: partial.eventType,
-      endReason: partial.endReason,
-    } as unknown as AgentEventEnvelope;
-  }
-
-  it('run.completed 更新 runMetaById.status = completed 且设置 endedAt', () => {
-    const store = useActivityStore.getState();
-    store.appendEvent('conv1', runEnv({ eventType: 'run.started', seq: 1, taskId: 'run-1', timestamp: '2026-01-01T00:00:00Z' }));
-    store.appendEvent('conv1', runEnv({ eventType: 'run.completed', seq: 2, taskId: 'run-1', timestamp: '2026-01-01T00:02:00Z', endReason: 'completed' }));
-
-    const meta = store.getRunMeta('s-1:run-1');
-    expect(meta?.status).toBe('completed');
-    expect(meta?.endedAt).toBe('2026-01-01T00:02:00Z');
-    expect(meta?.endReason).toBe('completed');
-    expect(meta?.startedAt).toBe('2026-01-01T00:00:00Z');
-  });
-
-  it('run.failed / run.cancelled / run.interrupted 三个终态均设置 endedAt', () => {
-    const cases: ReadonlyArray<[string, RunStatus]> = [
-      ['run.failed', 'failed'],
-      ['run.cancelled', 'cancelled'],
-      ['run.interrupted', 'interrupted'],
-    ];
-    cases.forEach(([eventType, expected], i) => {
-      const taskId = `run-${i}`;
-      const store = useActivityStore.getState();
-      store.appendEvent('conv1', runEnv({ eventType: 'run.started', seq: 1, taskId }));
-      store.appendEvent('conv1', runEnv({ eventType, seq: 2, taskId, timestamp: '2026-01-01T00:03:00Z' }));
-      const meta = store.getRunMeta(`s-1:${taskId}`);
-      expect(meta?.status).toBe(expected);
-      expect(meta?.endedAt).toBe('2026-01-01T00:03:00Z');
-    });
-  });
-
-  it('run.paused 是非终态迁移：status = waiting 且不设置 endedAt', () => {
-    const store = useActivityStore.getState();
-    store.appendEvent('conv1', runEnv({ eventType: 'run.started', seq: 1, taskId: 'run-p' }));
-    store.appendEvent('conv1', runEnv({ eventType: 'run.paused', seq: 2, taskId: 'run-p', timestamp: '2026-01-01T00:04:00Z' }));
-    const meta = store.getRunMeta('s-1:run-p');
-    expect(meta?.status).toBe('waiting');
-    expect(meta?.endedAt).toBeUndefined();
-  });
-
-  it('appendEvents 批量路径同样按 run.* 事件迁移 runMeta', () => {
-    const store = useActivityStore.getState();
-    store.appendEvents('conv1', [
-      runEnv({ eventType: 'run.created', seq: 1, taskId: 'run-b' }),
-      runEnv({ eventType: 'run.completed', seq: 2, taskId: 'run-b', timestamp: '2026-01-01T00:05:00Z' }),
-    ]);
-    const meta = store.getRunMeta('s-1:run-b');
-    expect(meta?.status).toBe('completed');
-    expect(meta?.endedAt).toBe('2026-01-01T00:05:00Z');
-  });
-
-  it('replaceEvents 重放路径同样按 run.* 事件迁移 runMeta', () => {
-    const store = useActivityStore.getState();
-    store.replaceEvents('conv1', [
-      runEnv({ eventType: 'run.started', seq: 1, taskId: 'run-r' }),
-      runEnv({ eventType: 'run.interrupted', seq: 2, taskId: 'run-r', timestamp: '2026-01-01T00:06:00Z' }),
-    ]);
-    const meta = store.getRunMeta('s-1:run-r');
-    expect(meta?.status).toBe('interrupted');
-    expect(meta?.endedAt).toBe('2026-01-01T00:06:00Z');
-  });
-
-  it('task.* 边界事件语义不变（run.* 扩宽不回归既有终态）', () => {
-    const store = useActivityStore.getState();
-    store.appendEvent('conv1', env({ eventType: 'task.started', seq: 1, taskId: 'run-t', eventId: 't1' }));
-    store.appendEvent('conv1', env({ eventType: 'task.cancelled', seq: 2, taskId: 'run-t', eventId: 't2', timestamp: '2026-01-01T00:07:00Z' }));
-    const meta = store.getRunMeta('s-1:run-t');
-    expect(meta?.status).toBe('cancelled');
-    expect(meta?.endedAt).toBe('2026-01-01T00:07:00Z');
-  });
-
-  it('RunMeta.status 可容纳 shared 权威集合的全部 11 态', () => {
-    // 编译期断言：status 若仍是手写 4 态联合，此处 RUN_STATUSES.map 会直接报错
-    const metas: RunMeta[] = RUN_STATUSES.map((status) => ({
-      runId: 'r',
-      conversationId: 'conv1',
-      taskId: 't',
-      sessionId: 's-1',
-      startedAt: '2026-01-01T00:00:00Z',
-      status,
-    }));
-    expect(metas).toHaveLength(11);
-    expect(metas.map(m => m.status)).toEqual([...RUN_STATUSES]);
   });
 });

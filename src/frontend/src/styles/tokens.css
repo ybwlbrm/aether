@@ -11,17 +11,8 @@
      spec §61 / §62 / §66 / §67
      ============================================ */
 
-  /* ---- Functional accent（交互/链接/选中态）----
-   * T6b（D2 决策落地）：去饱和的蓝靛，替代原 #5e9eff（S=100%）。
-   * 色相 215.2°，与原 216.1° 同族 —— 视觉上仍是 Aether 的蓝靛，不向紫漂移。
-   * 暗色底实测对比度：bg-base 5.33:1 / bg-elevated(玻璃) 4.97:1 /
-   * bg-elevated(opaque) 4.72:1，三者均 ≥4.5:1。
-   * 亮色底另需一值：WCAG 上近黑与近白要求的相对亮度区间
-   * [0.1904, 0.1643] 为空，单一不透明色在数学上无法同时守住两端，
-   * 故 [data-theme="light"] 在 themes.css 覆写同色相的更深值 #35609e。
-   * 本行是暗色（:root）默认值的唯一来源；下游一律 color-mix 派生，
-   * 未来重调 accent 只需改这一行（外加亮色那一行）。 */
-  --color-accent: #4f86d4;
+  /* ---- Functional accent（交互/链接/选中态）---- */
+  --color-accent: #5e9eff;
   --color-accent-hover: color-mix(in oklab, var(--color-accent) 86%, white);
   --color-accent-subtle: color-mix(in oklab, var(--color-accent) 14%, transparent);
   --color-accent-glow: color-mix(in oklab, var(--color-accent) 30%, transparent);
@@ -135,9 +126,6 @@
   --status-cancelled: var(--color-neutral);
   --status-interrupted: var(--color-warning);
   --status-budget-exceeded: var(--color-danger);
-  --status-created: var(--color-neutral);
-  --status-waiting: var(--color-warning);
-  --status-retry-waiting: var(--color-warning);
 
   /* ---- Typography ---- */
   --font-family-sans: 'Geist Variable', -apple-system, BlinkMacSystemFont, 'Inter', sans-serif;
@@ -193,17 +181,6 @@
   --card-padding: var(--space-6);
   --title-body-gap: var(--space-4);
   --body-button-gap: var(--space-5);
-
-  /* ---- 标题节奏（T6a）----
-   * 间距归属「上一段」：标题上方的留白由 --heading-margin-top 承担，
-   * 标题下方的留白继续用 --title-body-gap。
-   * 因此标题上方空间恒大于下方（32 : 16），视觉上标题归属它所引出的内容，
-   * 而不是漂在上一段的尾巴上。
-   * 下面的 heading-* 只在新内容层（shell.css .content-surface）落地，
-   * 存量路由的间距由各自任务迁移。 */
-  --heading-margin-top: var(--space-8);
-  --heading-margin-bottom: var(--title-body-gap);
-
   --button-gap: var(--space-3);
   --icon-text-gap: var(--space-3);
   --input-toolbar-gap: var(--space-5);
@@ -251,12 +228,6 @@
   --content-wide: min(100%, 1260px);
   --content-full: 100%;
   --page-content-max-width: var(--content-standard);
-
-  /* ---- 正文行宽（T6a）----
-   * 68ch ≈ 65–75ch 的可读区间，专供 Thread 消息正文 / 叙述性段落使用。
-   * 数据密集面板（表格、workbench 列表、日志流）继续用 --content-standard /
-   * --content-wide —— 行宽是排版量度，不是栅格约束。 */
-  --content-prose: 68ch;
 
   /* ---- Motion ---- */
   --anim-duration-fast: 150ms;

@@ -1,20 +1,707 @@
-/**
- * Chat —— `/chat` 路由的薄组合。
- *
- * ## T24：本文件为何只剩组合
- * 此前 Chat 自带一整套页面级接线（会话列表 / 流状态 / 审批 / 模板 / 权限工具条），
- * 与 CodingHome 并列维护两份。现在 `/chat` 只是 **ThreadPage 的 chat 能力档案**：
- * 最小能力集 + 内联会话列表，渲染的实现与 `/command-center` 逐行相同。
- * 行为差异全部集中在 `routes/ThreadPage.tsx` 的 `CHAT_PROFILE` 常量里。
- *
- * 保留 `ChatStreamFailure` 导出：既有 import 处（Chat.test.tsx）依赖这个名字。
- */
-import { ThreadPage } from './ThreadPage';
-import { StreamFailureState } from '../components/conversation';
+﻿import { useEffect, useState, useRef, useMemo, useCallback } from 'react';
+import { motion, AnimatePresence } from 'framer-motion';
+import { Send, Plus, MessageSquare, Trash2, Bot, PanelLeftClose, PanelLeftOpen, XCircle, Edit3, Bookmark } from 'lucide-react';
+import {
+  EmptyState,
+  PageHeader,
+  PageShell,
+  Panel,
+  Stack,
+} from '../components/ui';
+// Phase 5：会话视图收敛到共享实现（CodingHome 复用同一气泡/活动流/失败态）
+import {
+  ConversationActivityStream,
+  ConversationMessageBubble,
+  StreamFailureState,
+} from '../components/conversation';
+import { PromptTemplateSelector } from '../components/PromptTemplateSelector';
+import { ReasoningBar } from '../components/ReasoningBar';
+import { useActivityStore } from '../store/activityStore';
+// P0 通知幂等化：统一经 NotificationCenter（权限收敛到 App Shell/Layout，业务页不再散调）
+import { notificationCenter } from '../lib/notification-center';
+import { api } from '../api/client';
+import { fetchEvents } from '../api/streamClient';
+import { useConversations, useStreamSend, useMessagePolling } from '../hooks';
+import { createStreamFailure, type StreamFailure } from '../hooks/useStreamSend'
 
 /** 失败态渲染统一走共享 conversation 组件（保留既有导出名，避免调用方破坏） */
-export const ChatStreamFailure = StreamFailureState;
+export const ChatStreamFailure = StreamFailureState
 
 export function Chat() {
-  return <ThreadPage variant="chat" />;
+  const [providers, setProviders] = useState<any[]>([]);
+  // 整改计划第 8 章（P1）：Provider 选择按 providerId（原实现用 conversationId 匹配
+  // provider.id —— conversationId 是 UUID，永远匹配不上，导致 selectedProvider 恒为 null）
+  const [chatSelectedProvider, setChatSelectedProvider] = useState<any>(null);
+  // 标记是否已初始化默认 provider（防止 load 覆盖用户手动选择）
+  const chatProviderInitRef = useRef(false);
+  const [listCollapsed, setListCollapsed] = useState(false);
+  const [mode, setMode] = useState<'normal' | 'super'>('normal');
+  const [deepThinking, setDeepThinking] = useState(false);
+  const [webSearch, setWebSearch] = useState(true);
+  const [loopMode, setLoopMode] = useState(false);
+  const [workspacePath, setWorkspacePath] = useState<string>('');
+  const [currentConvTokenTotal, setCurrentConvTokenTotal] = useState<number>(0);
+  const [permissionLevel, setPermissionLevel] = useState<number>(2);
+  const [templateOpen, setTemplateOpen] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [directFailure, setDirectFailure] = useState<StreamFailure | null>(null)
+  const [input, setInput] = useState('');
+
+  const currentConvRef = useRef<string | null>(null);
+  const abortRef = useRef<AbortController | null>(null);
+  const mountedRef = useRef(true);
+  const msgPollReqIdRef = useRef(0);
+  const activityPollReqIdRef = useRef(0);
+  const initDoneRef = useRef(false);
+  const messagesEndRef = useRef<HTMLDivElement>(null);
+
+  // 整改计划第 3 章（P0）：setActiveConversation — 同步 state + ref（+ 中断旧请求 + 递增轮询代次）。
+  // 原实现仅 setState，currentConvRef 由 useEffect 延迟同步；新建对话后立即发送时
+  // ref 尚未更新 → useStreamSend 内 currentConvRef.current !== convId 守卫丢弃首条消息 SSE 事件。
+  const setActiveConversation = useCallback((id: string | null) => {
+    currentConvRef.current = id;
+    if (abortRef.current) {
+      try { abortRef.current.abort(); } catch { /* ignore */ }
+      abortRef.current = null;
+    }
+    msgPollReqIdRef.current += 1;
+    activityPollReqIdRef.current += 1;
+    setCurrentConv(id);
+  }, []);
+
+  // useConversations hook
+  const {
+    conversations,
+    convLoading,
+    load: loadConversations,
+    handleNew: handleNewConversation,
+    handleSelect: handleSelectConversation,
+    handleDelete: handleDeleteConversation,
+    handleRename,
+    setConversations,
+  } = useConversations({
+    onSelect: (id) => {
+      setActiveConversation(id);
+      loadMessages(id);
+    },
+    onCreate: (conv) => {
+      setActiveConversation(conv.id);
+      setMessages([]);
+      setCurrentConvTokenTotal(0);
+      setDirectFailure(null)
+    },
+    onChange: () => {},
+  });
+
+  const [currentConv, setCurrentConv] = useState<string | null>(null);
+  const [messages, setMessages] = useState<any[]>([]);
+  const [sending, setSending] = useState(false);
+  const [thinking, setThinking] = useState(false);
+  const [liveReasoning, setLiveReasoning] = useState<string>('');
+  const [retryInfo, setRetryInfo] = useState<{ attempt: number; maxRetries: number; status: number; delay: number } | null>(null);
+  const [streamTokens, setStreamTokens] = useState<{ prompt_tokens: number; completion_tokens: number; total_tokens: number } | null>(null);
+  // 整改计划第 5 章（P1）：循环模式指标 —— 已用轮数/时长/工具调用（从 task.completed/failed metadata 读取）
+  const [loopMetrics, setLoopMetrics] = useState<{ turnsUsed: number; elapsedMs: number; toolCalls: number; budgetExceeded: string | null } | null>(null);
+
+  const loadMessages = useCallback(async (id: string) => {
+    const reqId = ++msgPollReqIdRef.current;
+    setActiveConversation(id);
+    setStreamTokens(null);
+    setRetryInfo(null);
+    setLoadError(null);
+    setDirectFailure(null)
+    setLiveReasoning('');
+    try {
+      const conv = await api.getConversation(id);
+      if (reqId !== msgPollReqIdRef.current) return;
+      const processed = (conv.messages || []).map((m: any) => {
+        if (m.toolResults) {
+          try {
+            const tr = JSON.parse(m.toolResults);
+            if (tr.reasoning) return { ...m, reasoning: tr.reasoning };
+          } catch { /* ignore */ }
+        }
+        return m;
+      });
+      setMessages(processed);
+      const tokenTotal = typeof conv.tokenTotal === 'number' ? conv.tokenTotal : 0;
+      setCurrentConvTokenTotal(tokenTotal);
+      try {
+        const events = await fetchEvents(id);
+        if (reqId !== msgPollReqIdRef.current) return;
+        useActivityStore.getState().replaceEvents(id, events);
+      } catch { /* ignore */ }
+    } catch (e: unknown) {
+      if (reqId !== msgPollReqIdRef.current) return;
+      setLoadError(e instanceof Error ? e.message : String(e));
+    }
+  }, []);
+
+  // useStreamSend hook
+  const {
+    handleSend,
+    stopGeneration,
+    failure,
+  } = useStreamSend({
+    conversationId: currentConv,
+    mode,
+    messages,
+    deepThinking,
+    webSearch,
+    loopMode,
+    selectedProvider: chatSelectedProvider,
+    selectedModel: undefined,
+    attachments: [],
+    onSendStart: () => {
+      setSending(true);
+      setThinking(true);
+      setRetryInfo(null);
+      setStreamTokens(null);
+      setLiveReasoning('');
+      setDirectFailure(null)
+      setLoopMetrics(null); // 整改计划第 5 章：新一轮清空循环指标
+    },
+    onSendEnd: (success) => {
+      if (success) {
+        setSending(false);
+        setThinking(false);
+        setLiveReasoning('');
+      }
+    },
+    onTokens: setStreamTokens,
+    onRetry: setRetryInfo,
+    onLiveReasoning: setLiveReasoning,
+    onMessagesUpdate: setMessages,
+    onLoadMessages: loadMessages,
+    onLoadConversations: loadConversations,
+    currentConvRef,
+    abortRef,
+    mountedRef,
+  });
+  const visibleFailure = failure ?? directFailure
+
+  /** 失败重试：重新发送最后一条用户指令（共享失败态按钮的实际语义） */
+  const retryLastSend = useCallback(() => {
+    const lastUser = [...messages].reverse().find(m => m?.role === 'user');
+    const content = typeof lastUser?.content === 'string' ? lastUser.content.trim() : '';
+    if (!content) return;
+    void handleSend(content);
+  }, [messages, handleSend]);
+
+  // 整改计划第 3 章（P0）修复：发送必须传入输入框内容。
+  // 原实现调用 handleSend() 不带参数，而 useStreamSend 的 handleSend(contentOverride?)
+  // 内部 `content = (contentOverride ?? '').trim()` → 恒为空 → 被守卫拦截，
+  // POST /messages 从不发出 → 新对话首条消息 AI 不回复。
+  const sendMessage = useCallback(() => {
+    const content = input.trim();
+    if (!content) return;
+    setInput(''); // 发送后清空输入框
+    handleSend(content);
+  }, [input, handleSend]);
+
+  // useMessagePolling hook
+  // 整改计划第 3 章（P0）：显式状态机 {idle,polling,error,retrying} + AbortController + retry
+  const { pollStatus: msgPollStatus, pollErrorInfo: msgPollErrorInfo, retry: retryPolling } = useMessagePolling({
+    conversationId: currentConv,
+    enabled: !!currentConv,
+    intervalMs: 2000,
+    onMessagesUpdate: setMessages,
+    onTokenTotalUpdate: setCurrentConvTokenTotal,
+    onSendingUpdate: (generating) => {
+      setSending(generating);
+      setThinking(generating);
+    },
+    onLiveReasoningUpdate: setLiveReasoning,
+    currentConvRef,
+    msgPollReqIdRef,
+    activityPollReqIdRef,
+    mountedRef,
+    pollActivityEvents: true,
+    // 会话维度游标：fetchEvents 的 afterSeq 是后端"会话内单调序号"，必须取全会话最大值
+    getLastSeq: (convId) => useActivityStore.getState().getLastSeq(convId),
+  });
+
+  // 整改计划第 5 章（P1）：循环模式指标 —— 从 activityStore 终态事件（task.completed/failed）读取
+  // Run 作用域回溯：每个 Run 的 seq 独立，跨 Run 合并排序不可靠，必须逐 Run 逆序找终态。
+  useEffect(() => {
+    if (!currentConv) { setLoopMetrics(null); return; }
+    const store = useActivityStore.getState();
+    const runIds = store.getRunsForConversation(currentConv);
+    for (let i = runIds.length - 1; i >= 0; i--) {
+      const events = store.getEventsByRun(runIds[i]);
+      for (let j = events.length - 1; j >= 0; j--) {
+        const ev = events[j];
+        if ((ev.eventType === 'task.completed' || ev.eventType === 'task.failed') && ev.metadata && typeof ev.metadata.turnsUsed === 'number') {
+          setLoopMetrics({
+            turnsUsed: Number(ev.metadata.turnsUsed),
+            elapsedMs: Number(ev.metadata.elapsedMs || 0),
+            toolCalls: Number(ev.metadata.toolCalls || 0),
+            budgetExceeded: ev.metadata.budgetExceeded ? String(ev.metadata.budgetExceeded) : null,
+          });
+          return;
+        }
+      }
+    }
+  }, [currentConv, sending]);
+
+  // Unified initialization
+  useEffect(() => {
+    if (initDoneRef.current) return;
+    initDoneRef.current = true;
+
+    loadConversations();
+    // P0 通知幂等化：权限请求统一由 App Shell/Layout 发起（单一入口），业务页不再散调
+
+    api.getProviders().then((data: any[]) => {
+      const list = Array.isArray(data) ? data : [];
+      setProviders(list);
+      // 整改计划第 8 章（P1）：默认选择 text 能力的第一个 provider（按 providerId 记录）
+      if (!chatProviderInitRef.current && list.length > 0) {
+        const textProv = list.find((p: any) => p.capabilities?.includes?.('text')) || list[0];
+        setChatSelectedProvider(textProv);
+        chatProviderInitRef.current = true;
+      }
+    }).catch(() => {});
+    api.getWorkspace().then((res: any) => setWorkspacePath(res?.defaultDir || '')).catch(() => {});
+    api.getPermissions().then((res: any) => setPermissionLevel(res?.level ?? 2)).catch(() => {});
+
+    const params = new URLSearchParams(window.location.search);
+    const q = params.get('q');
+    const isNew = params.get('new') === 'true';
+    if (!isNew) return;
+    window.history.replaceState({}, '', '/chat');
+
+    if (q) {
+      const tempUserMsg = { id: `temp-user-url-${Date.now()}`, role: 'user', content: q, createdAt: new Date().toISOString() };
+      setMessages([tempUserMsg]);
+      (async () => {
+        const provs = await api.getProviders().catch(() => []);
+        const dp = Array.isArray(provs) && provs.length > 0 ? provs[0] : null;
+        if (!dp) {
+          setDirectFailure(createStreamFailure('尚未配置 AI Provider。请前往左侧“设置” → “AI Provider”添加您的 API Key。'))
+          return
+        }
+        const model = Array.isArray(dp.models) && dp.models[0] ? dp.models[0] : (dp.defaultModel || 'gpt-4o');
+        try {
+          const conv = await api.createConversation({ title: q.slice(0, 30), providerId: dp.id, model });
+          setActiveConversation(conv.id);
+          const res = await api.sisyphusReply({ prompt: q, conversationId: conv.id, providerId: dp.id, model });
+          if (res?.conversationId) {
+            await loadMessages(res.conversationId);
+            // P0 通知幂等化：URL 直达 Sisyphus 回复 → 统一终态通知（dedupeKey 幂等）
+            notificationCenter.notifyOnce({
+              id: `sisyphus-url-${res.conversationId}`,
+              type: 'completed',
+              title: 'AI 回复完成',
+              body: String(res.reply || res.content || q).slice(0, 100),
+              conversationId: res.conversationId,
+              createdAt: new Date().toISOString(),
+              dedupeKey: `run:${res.conversationId}:completed`,
+            });
+          }
+        } catch (e: unknown) {
+          setDirectFailure(createStreamFailure(e))
+        }
+      })();
+    } else {
+      (async () => {
+        const provs = await api.getProviders().catch(() => []);
+        if (Array.isArray(provs) && provs.length > 0) {
+          await handleNewConversation(provs);
+        } else {
+          setDirectFailure(createStreamFailure('尚未配置 AI Provider。请在设置中添加 API Key 后重试。'))
+        }
+      })();
+    }
+  }, [loadConversations, handleNewConversation, loadMessages]);
+
+  useEffect(() => { currentConvRef.current = currentConv; }, [currentConv]);
+  useEffect(() => { mountedRef.current = true; return () => { mountedRef.current = false; }; }, []);
+
+  // 整改计划第 4 章（P1）：用户滚动意图锁 —— 用户手动上滑则停止自动滚底
+  const messageListRef = useRef<HTMLDivElement>(null);
+  const [userScrolledUp, setUserScrolledUp] = useState(false);
+  const isNearBottom = useCallback(() => {
+    const el = messageListRef.current;
+    if (!el) return true;
+    // 整改计划：阈值 40px（原 100px 太大，小幅上滑被误判"在底部"→ 被拉回）
+    return el.scrollHeight - el.scrollTop - el.clientHeight < 40;
+  }, []);
+  const handleScroll = useCallback(() => {
+    setUserScrolledUp(!isNearBottom());
+  }, [isNearBottom]);
+  // 用户发送/接收新消息时视为主动回到底部
+  const scrollToBottom = useCallback(() => {
+    setUserScrolledUp(false);
+    const el = messageListRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, []);
+
+  useEffect(() => {
+    // 整改计划第 4 章（P1）：只让消息列表容器负责滚动 ——
+    // 用户上滑阅读历史时不得被新 token/轮询/状态变化拉回底部；
+    // 仅当用户处于底部附近（或主动点了"回到底部"）才自动滚动。
+    if (userScrolledUp) return;
+    const el = messagesEndRef.current;
+    if (el) {
+      // 使用同一容器的 scrollTop/scrollHeight（scrollIntoView 会滚动祖先，行为不可控）
+      const container = el.parentElement;
+      if (container) container.scrollTop = container.scrollHeight;
+    }
+  }, [messages, sending, userScrolledUp]);
+
+  const handleDelete = useCallback(async (id: string) => {
+    await handleDeleteConversation(id);
+    if (currentConv === id) {
+      setActiveConversation(null);
+      setMessages([]);
+      setCurrentConvTokenTotal(0);
+      setDirectFailure(null)
+    }
+  }, [handleDeleteConversation, currentConv]);
+
+  const contextTokens = Math.round(messages
+    .filter(m => m.role !== 'tool')
+    .reduce((sum, m) => sum + (typeof m.content === 'string' ? m.content.length : 0), 0) / 4);
+  const hasTokenData = currentConvTokenTotal > 0;
+
+  const messageList = useMemo(() => messages, [messages]);
+
+  return (
+    <PageShell
+      // AEX-P0-047: 宽度收敛到语义 token（--content-wide = min(100%, 1260px)），
+      // 不再硬编码 1280px（此前被 Layout 全局 1120px 截断，双重复位 bug 已解）
+      className="h-screen px-4!"
+      contentClassName="overflow-hidden! p-0!"
+      style={{ maxWidth: 'var(--content-wide)', margin: '0 auto', background: 'var(--bg-base)', backgroundImage: 'var(--bg-gradient)' }}
+      header={(
+        <PageHeader
+          title="对话"
+          description="与 AI 助手交流，管理多轮对话"
+          icon={<MessageSquare size={22} />}
+          actions={(
+            <button className="btn btn-primary" onClick={() => handleNewConversation(providers)} title="新建对话">
+              <Plus size={18} /> 新建对话
+            </button>
+          )}
+        />
+      )}
+    >
+      <Stack direction="row" gap="6" className="flex min-h-0 flex-1">
+        {/* 左侧 — 对话列表（可折叠） */}
+        <AnimatePresence initial={false}>
+          {!listCollapsed && (
+            <motion.div key="conv-list" className="w-72 flex-shrink-0 flex flex-col min-h-0"
+              initial={{ opacity: 0, width: 0 }} animate={{ opacity: 1, width: 288 }} exit={{ opacity: 0, width: 0 }} transition={{ duration: 0.2 }}>
+              <Panel tone="subtle" className="flex min-h-0 flex-1 flex-col p-0!">
+                <div className="flex min-h-0 flex-1 flex-col p-3!">
+                  <div className="flex items-center justify-between" style={{ padding: '8px 8px 12px' }}>
+                  <span style={{ fontSize: 'var(--font-module-title)', fontWeight: 600, color: 'var(--text-primary)', letterSpacing: '-0.02em' }}>对话列表</span>
+                  <div className="flex items-center gap-1">
+                    <button className="btn btn-primary" onClick={() => handleNewConversation(providers)} title="新建对话" style={{ width: 44, padding: 0 }}>
+                      <Plus size={18} />
+                    </button>
+                    <button onClick={() => setListCollapsed(true)} className="flex items-center justify-center w-8 h-8 rounded-lg transition-colors hover:bg-white/[0.08]"
+                      style={{ color: 'var(--text-tertiary)' }} title="收起" aria-label="收起对话列表"><PanelLeftClose size={16} /></button>
+                  </div>
+                </div>
+                <div className="flex-1 overflow-y-auto min-h-0" style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                  {conversations.map((conv, i) => (
+                    <motion.div
+                      key={conv.id}
+                      onClick={() => handleSelectConversation(conv.id)}
+                      className="cursor-pointer group"
+                      style={{
+                        padding: '12px',
+                        borderRadius: '8px',
+                        background: currentConv === conv.id ? 'var(--card-hover-bg)' : 'transparent',
+                        border: 'none',
+                      }}
+                      initial={{ opacity: 0, y: 8 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      transition={{ delay: i * 0.04, duration: 0.4 }}
+                      whileHover={{ y: -1, transition: { duration: 0.2 } }}
+                    >
+                      <div className="flex items-start gap-3">
+                        <div className="flex items-center justify-center flex-shrink-0" style={{ width: 34, height: 34, borderRadius: 10, background: currentConv === conv.id ? 'rgba(94, 158, 255, 0.18)' : 'var(--bg-surface)' }}>
+                          <MessageSquare size={15} style={{ color: currentConv === conv.id ? 'var(--color-accent)' : 'var(--text-secondary)' }} />
+                        </div>
+                        <div className="min-w-0 flex-1">
+                          <div className="truncate" title={conv.title} style={{ fontSize: '13px', fontWeight: 500, color: 'var(--text-primary)' }}>{conv.title}</div>
+                          <div className="mt-1 truncate" style={{ fontSize: '11px', color: 'var(--text-tertiary)' }}>
+                            {new Date(conv.updatedAt).toLocaleString()}
+                            {typeof conv.tokenTotal === 'number' && conv.tokenTotal > 0 && ` · ⚡ ${conv.tokenTotal.toLocaleString()} tokens`}
+                          </div>
+                        </div>
+                        <button
+                          className="flex items-center justify-center w-8 h-8 rounded-lg opacity-0 group-hover:opacity-100 transition-opacity hover:bg-white/[0.08] flex-shrink-0"
+                          onClick={async (e) => {
+                            e.stopPropagation();
+                            const newTitle = prompt('重命名对话:', conv.title);
+                            if (newTitle && newTitle.trim() && newTitle.trim() !== conv.title) {
+                              await handleRename(conv.id, newTitle.trim());
+                            }
+                          }}
+                          title="重命名对话"
+                          aria-label="重命名对话"
+                          style={{ color: 'var(--text-tertiary)' }}
+                        >
+                          <Edit3 size={14} />
+                        </button>
+                        <button
+                          className="flex items-center justify-center w-8 h-8 rounded-lg opacity-0 group-hover:opacity-100 transition-opacity hover:bg-white/[0.08] flex-shrink-0"
+                          onClick={(e) => { e.stopPropagation(); handleDelete(conv.id); }}
+                          title="删除对话"
+                          aria-label="删除对话"
+                          style={{ color: 'var(--text-tertiary)' }}
+                        >
+                          <Trash2 size={14} />
+                        </button>
+                      </div>
+                    </motion.div>
+                  ))}
+                  {convLoading && conversations.length === 0 && (
+                    <div className="empty-state">
+                      <div className="spinner" style={{ width: 20, height: 20, margin: '0 auto 8px' }} />
+                      <div className="empty-state-title" style={{ fontSize: 13 }}>加载中...</div>
+                    </div>
+                  )}
+                  {!convLoading && conversations.length === 0 && (
+                    <EmptyState
+                      icon={<MessageSquare size={28} />}
+                      title="暂无对话"
+                      className="border-0 bg-transparent p-4! shadow-none"
+                    />
+                  )}
+                  </div>
+                </div>
+              </Panel>
+            </motion.div>
+          )}
+        </AnimatePresence>
+
+        {/* 折叠后的小图标按钮 */}
+        {listCollapsed && (
+          <motion.div className="flex-shrink-0 flex flex-col items-center pt-2"
+            initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ duration: 0.2 }}>
+            <div style={{ padding: '8px', borderRadius: 12, display: 'flex', flexDirection: 'column', gap: 8 }}>
+              <button onClick={() => setListCollapsed(false)} className="flex items-center justify-center w-10 h-10 rounded-lg hover:bg-white/[0.08]" style={{ color: 'var(--text-tertiary)' }} title="展开对话列表" aria-label="展开对话列表">
+                <PanelLeftOpen size={18} />
+              </button>
+              <button onClick={() => handleNewConversation(providers)} className="flex items-center justify-center w-10 h-10 rounded-lg hover:bg-white/[0.08]" style={{ color: 'var(--color-accent)' }} title="新建对话" aria-label="新建对话">
+                <Plus size={18} />
+              </button>
+              <div className="text-center" style={{ fontSize: 10, color: 'var(--text-tertiary)' }}>{conversations.length}</div>
+            </div>
+          </motion.div>
+        )}
+
+        {/* 右侧 — 聊天区域 */}
+          {currentConv ? (
+            <Panel className="flex min-h-0 flex-1 flex-col p-4!">
+              <div ref={messageListRef} onScroll={handleScroll} className="flex-1 overflow-y-auto min-h-0" style={{ display: 'flex', flexDirection: 'column', gap: 16, padding: '8px 8px 16px', overflowAnchor: 'none', position: 'relative' }} aria-live="polite">
+                {/* 整改计划第 4 章（P1）：用户上滑阅读时提供"回到底部"按钮 */}
+                {userScrolledUp && (
+                  <button
+                    onClick={scrollToBottom}
+                    style={{
+                      position: 'sticky', bottom: 8, alignSelf: 'center', zIndex: 5,
+                      fontSize: '12px', padding: '4px 14px', borderRadius: 99, cursor: 'pointer',
+                      background: 'var(--bg-surface)', color: 'var(--color-accent)',
+                      border: '1px solid var(--border-primary)', boxShadow: '0 2px 12px rgba(0,0,0,0.3)',
+                      transition: 'opacity 0.2s',
+                    }}
+                    title="回到最新消息"
+                    aria-label="回到底部"
+                  >
+                    ⬇ 回到底部
+                  </button>
+                )}
+                {loadError && (
+                  <div className="flex flex-col items-center justify-center py-12" style={{ gap: 12 }}>
+                    <div style={{ fontSize: '13px', color: 'var(--color-danger)' }}>⚠️ 消息加载失败: {loadError}</div>
+                    <button className="btn btn-ghost" onClick={() => currentConv && loadMessages(currentConv)} style={{ fontSize: '13px' }}>
+                      重试
+                    </button>
+                  </div>
+                )}
+                {/* 整改计划第 3 章（P0）：轮询失败显式状态机 —— 重试按钮调用 poll()（而非 load()） */}
+                {(msgPollStatus === 'error' || msgPollStatus === 'retrying') && msgPollErrorInfo && (
+                  <div className="flex items-center justify-center" style={{ gap: 8, padding: '6px 0', fontSize: '12px', color: 'var(--color-warning)' }}>
+                    {msgPollStatus === 'error' ? '⚠️ 消息轮询失败' : '🔄 消息轮询重试中'}：{msgPollErrorInfo.message}
+                    {msgPollErrorInfo.lastSuccessAt && <span style={{ opacity: 0.7 }}>（最后成功 {new Date(msgPollErrorInfo.lastSuccessAt).toLocaleTimeString()}）</span>}
+                    {msgPollStatus === 'error' && (
+                      <button className="btn btn-ghost" onClick={() => { setLoadError(null); retryPolling(); }} style={{ fontSize: '12px', padding: '2px 10px' }}>
+                        立即重试
+                      </button>
+                    )}
+                  </div>
+                )}
+                {!loadError && messageList.map((msg, i) => (
+                  <ConversationMessageBubble key={msg.id} message={msg} index={i} />
+                ))}
+                {/* 活动流：会话定位活动 Run，时间线由 Run 自己拥有（AEX-P0-012） */}
+                <ConversationActivityStream conversationId={currentConv} />
+                {thinking && (
+                  <div className="flex items-center justify-center py-4">
+                    <div className="flex items-center gap-3">
+                      <div className="flex gap-1">
+                        <motion.div className="w-2 h-2 rounded-full" style={{ background: 'var(--color-accent)' }}
+                          animate={{ scale: [1, 1.5, 1], opacity: [0.5, 1, 0.5] }}
+                          transition={{ duration: 1.2, repeat: Infinity, delay: 0 }} />
+                        <motion.div className="w-2 h-2 rounded-full" style={{ background: 'var(--color-accent)' }}
+                          animate={{ scale: [1, 1.5, 1], opacity: [0.5, 1, 0.5] }}
+                          transition={{ duration: 1.2, repeat: Infinity, delay: 0.2 }} />
+                        <motion.div className="w-2 h-2 rounded-full" style={{ background: 'var(--color-accent)' }}
+                          animate={{ scale: [1, 1.5, 1], opacity: [0.5, 1, 0.5] }}
+                          transition={{ duration: 1.2, repeat: Infinity, delay: 0.4 }} />
+                      </div>
+                      <span style={{ fontSize: '13px', color: 'var(--text-tertiary)' }}>
+                        处理中...
+                      </span>
+                    </div>
+                  </div>
+                )}
+                {visibleFailure && <ChatStreamFailure failure={visibleFailure} onRetry={retryLastSend} />}
+                {/* P1-007: 活跃 reasoning 渲染（liveReasoning 由 useStreamSend onLiveReasoning 维护） */}
+                {liveReasoning.trim() && <ReasoningBar content={liveReasoning} />}
+                <div ref={messagesEndRef} />
+              </div>
+              <div className="flex items-center justify-between" style={{ padding: '6px 8px 4px', borderTop: '1px solid var(--border-primary)' }}>
+<div className="flex items-center gap-3" style={{ fontSize: '11px', color: 'var(--text-tertiary)' }}>
+                     <span>📖 上下文: {contextTokens > 0 ? `${contextTokens.toLocaleString()} tokens` : `${messages.length} 条消息`}</span>
+                     <span>⚡ 对话累计: {hasTokenData ? `${currentConvTokenTotal.toLocaleString()} tokens` : '暂无数据'}</span>
+                     {streamTokens && <span>· 本次: {streamTokens.total_tokens.toLocaleString()} tokens</span>}
+                     {/* 整改计划第 5 章（P1）：循环模式指标 —— 已用轮数/时长/工具调用 */}
+                     {loopMode && loopMetrics && !sending && (
+                       <span style={{ color: 'var(--color-warning)' }} title={loopMetrics.budgetExceeded ? `预算耗尽: ${loopMetrics.budgetExceeded}` : undefined}>
+                         ♾️ {loopMetrics.turnsUsed} 轮 · {(loopMetrics.elapsedMs / 1000).toFixed(1)}s · {loopMetrics.toolCalls} 次工具{loopMetrics.budgetExceeded ? ' · ⚠️ 预算耗尽' : ''}
+                       </span>
+                     )}
+                   </div>
+                <div className="flex items-center gap-2" style={{ fontSize: '11px', color: 'var(--text-tertiary)' }}>
+                  {workspacePath && <span className="flex items-center gap-1">📁 <span className="truncate" style={{ maxWidth: 120, display: 'inline-block' }}>{workspacePath}</span></span>}
+                </div>
+              </div>
+              {retryInfo && (
+                <div style={{ padding: '6px 8px 0', fontSize: '12px', color: 'var(--color-warning)' }}>
+                  请求失败 ({retryInfo.status})，{retryInfo.attempt}/{retryInfo.maxRetries} 次重试中...
+                </div>
+              )}
+              <div className="flex gap-3" style={{ padding: '8px 8px 4px' }}>
+                <input className="input flex-1" value={input} onChange={e => setInput(e.target.value)}
+                  onKeyDown={e => {
+                    if (e.key === 'Enter' && !e.shiftKey && !(e.nativeEvent as any).isComposing) sendMessage();
+                  }}
+                  placeholder="输入消息，按 Enter 发送..." />
+                {sending ? (
+                  <button className="btn btn-ghost" onClick={stopGeneration} title="停止生成" aria-label="停止生成" style={{ width: 44, padding: 0, flexShrink: 0, color: 'var(--color-danger)' }}>
+                    <XCircle size={18} />
+                  </button>
+                ) : null}
+                <button className="btn btn-ghost" onClick={() => setTemplateOpen(true)} title="提示词模板" aria-label="提示词模板" style={{ width: 44, padding: 0, flexShrink: 0, color: 'var(--text-secondary)' }}>
+                  <Bookmark size={18} />
+                </button>
+                <button className="btn btn-primary" onClick={() => sendMessage()} disabled={sending} title="发送" aria-label="发送" style={{ width: 44, padding: 0, flexShrink: 0 }}>
+                  {sending ? <div className="spinner spinner-sm" /> : <Send size={18} />}
+                </button>
+              </div>
+              <div className="flex items-center justify-between" style={{ padding: '8px 8px 0', borderTop: 'none' }}>
+<div className="flex items-center gap-2">
+                     <button onClick={() => setMode('normal')}
+                       className="flex items-center gap-1.5 px-3 py-1 rounded-full transition-all"
+                       style={{
+                         fontSize: '11px', fontWeight: 600,
+                         color: mode === 'normal' ? 'var(--color-accent)' : 'var(--text-tertiary)',
+                         background: mode === 'normal' ? 'rgba(94,158,255,0.12)' : 'var(--bg-surface)',
+                         border: `1px solid ${mode === 'normal' ? 'rgba(94,158,255,0.3)' : 'transparent'}`,
+                       }}>
+                       ⊥ 普通模式
+                     </button>
+                     <button onClick={() => setMode('super')}
+                       className="flex items-center gap-1.5 px-3 py-1 rounded-full transition-all"
+                       style={{
+                         fontSize: '11px', fontWeight: 600,
+                         color: mode === 'super' ? '#a78bfa' : 'var(--text-tertiary)',
+                         background: mode === 'super' ? 'rgba(167,139,250,0.12)' : 'var(--bg-surface)',
+                         border: `1px solid ${mode === 'super' ? 'rgba(167,139,250,0.3)' : 'transparent'}`,
+                       }}>
+                       ⊥ 超级模式
+                     </button>
+                     <span className="mx-1" style={{ color: 'var(--border-primary)' }}>|</span>
+                     <button onClick={() => setDeepThinking(d => !d)}
+                       className="flex items-center gap-1.5 px-3 py-1 rounded-full transition-all"
+                       style={{
+                         fontSize: '11px', fontWeight: 600,
+                         color: deepThinking ? 'var(--color-accent)' : 'var(--text-tertiary)',
+                         background: deepThinking ? 'rgba(94,158,255,0.12)' : 'var(--bg-surface)',
+                         border: `1px solid ${deepThinking ? 'rgba(94,158,255,0.3)' : 'transparent'}`,
+                       }}>
+                       🧠 深度思考
+                     </button>
+                     <button onClick={() => setWebSearch(w => !w)}
+                       className="flex items-center gap-1.5 px-3 py-1 rounded-full transition-all"
+                       style={{
+                         fontSize: '11px', fontWeight: 600,
+                         color: webSearch ? 'var(--color-success)' : 'var(--text-tertiary)',
+                         background: webSearch ? 'rgba(52,211,153,0.12)' : 'var(--bg-surface)',
+                         border: `1px solid ${webSearch ? 'rgba(52,211,153,0.3)' : 'transparent'}`,
+                       }}>
+                        🌐 联网搜索
+                      </button>
+                      <button onClick={() => setLoopMode(l => !l)}
+                        className="flex items-center gap-1.5 px-3 py-1 rounded-full transition-all"
+                        title="循环模式：AI 持续执行直到完整完成任务"
+                        style={{
+                          fontSize: '11px', fontWeight: 600,
+                          color: loopMode ? 'var(--color-warning)' : 'var(--text-tertiary)',
+                          background: loopMode ? 'rgba(245,158,11,0.12)' : 'var(--bg-surface)',
+                          border: `1px solid ${loopMode ? 'rgba(245,158,11,0.3)' : 'transparent'}`,
+                        }}>
+                        ♾️ 循环
+                      </button>
+                      <span className="mx-1" style={{ color: 'var(--border-primary)' }}>|</span>
+                      <button onClick={() => {
+                        // P1-4 修复（审计）：Chat 权限切换支持 Level 3（1→2→3→1），与 CodingHome 一致
+                        const newLevel = permissionLevel >= 3 ? 1 : permissionLevel + 1;
+                        api.setPermissions(newLevel).then(() => setPermissionLevel(newLevel)).catch(() => {});
+                      }}
+                        className="flex items-center gap-1 px-3 py-1 rounded-full transition-all"
+                        style={{
+                          fontSize: '11px', fontWeight: 600,
+                          color: permissionLevel === 3 ? 'var(--color-danger)' : permissionLevel === 2 ? 'var(--color-success)' : '#f59e0b',
+                          background: permissionLevel === 3 ? 'rgba(239,68,68,0.12)' : permissionLevel === 2 ? 'rgba(52,211,153,0.12)' : 'rgba(245,158,11,0.12)',
+                          border: `1px solid ${permissionLevel === 3 ? 'rgba(239,68,68,0.3)' : permissionLevel === 2 ? 'rgba(52,211,153,0.3)' : 'rgba(245,158,11,0.3)'}`,
+                        }}>
+                        {permissionLevel === 3 ? '🔴 Level 3' : permissionLevel === 2 ? '🔓 Level 2' : '🔒 Level 1'}
+                      </button>
+                      </div>
+                   </div>
+            </Panel>
+          ) : (
+            <Panel
+              tone="subtle"
+              className="flex min-h-0 flex-1 items-center justify-center"
+            >
+              {visibleFailure ? (
+                <ChatStreamFailure failure={visibleFailure} onRetry={retryLastSend} />
+              ) : (
+                <EmptyState
+                  icon={<Bot size={48} />}
+                  title="选择一个对话或新建一个"
+                  description="与 AI 助手交流，完成任务"
+                  className="border-0 bg-transparent shadow-none"
+                />
+              )}
+            </Panel>
+          )}
+      </Stack>
+      <PromptTemplateSelector
+        open={templateOpen}
+        onClose={() => setTemplateOpen(false)}
+        onSelect={(content) => setInput(content)}
+        currentInput={input}
+      />
+    </PageShell>
+  );
 }

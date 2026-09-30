@@ -2,7 +2,7 @@
 import { motion } from 'framer-motion';
 import { api } from '../api/client';
 import { Bot, Save, CheckCircle2, Wrench, Brain, Clock, Search, FileText, Database, GitBranch } from 'lucide-react';
-import { PageHeader } from '../components/ui';
+import { PageHeader } from '../components/PageHeader';
 import { useSafeTimeout } from '../hooks/useSafeTimeout';
 import { promptDialog } from '../components/ui/confirm-dialog';
 
@@ -90,7 +90,7 @@ export function AgentSettings() {
   return (
     <div className="min-h-screen" style={{ background: 'var(--bg-base)', backgroundImage: 'var(--bg-gradient)' }}>
       <div style={{ maxWidth: 'var(--content-standard)', margin: '0 auto', padding: '0 24px' }}>
-        <PageHeader title="Agent 设置" description="为每个 Agent 配置使用的 AI 模型" icon={<Bot size={22} />} />
+        <PageHeader title="Agent 设置" description="为每个 Agent 配置使用的 AI 模型" icon={<Bot size={22} />} color="#a78bfa" />
 
         <div className="glass-card" style={{ padding: '24px' }}>
           <div className="flex items-center justify-between mb-6">

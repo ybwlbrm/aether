@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { motion } from 'framer-motion';
 import { Terminal as TerminalIcon, Play, Trash2, Clock, ChevronRight, AlertCircle } from 'lucide-react';
-import { PageHeader } from '../components/ui';
+import { PageHeader } from '../components/PageHeader';
 import { api } from '../api/client';
 import type { TerminalEntry as CommandEntry } from '../api/types';
 

@@ -20,10 +20,12 @@ export interface WorkbenchState {
 export interface WorkspaceState {
   /** 侧边栏模式：expanded | compact | hidden */
   sidebarMode: 'expanded' | 'compact' | 'hidden';
+  projectId: string | null;
   conversationId: string | null;
   workbench: WorkbenchState;
 
   setSidebarMode: (mode: 'expanded' | 'compact' | 'hidden') => void;
+  toggleSidebar: () => void;
   openWorkbench: (tab?: WorkbenchTab) => void;
   closeWorkbench: () => void;
   toggleWorkbench: () => void;
@@ -31,19 +33,16 @@ export interface WorkspaceState {
   setWorkbenchWidth: (width: number) => void;
   toggleWorkbenchPin: () => void;
   toggleWorkbenchMaximize: () => void;
+  setProjectId: (id: string | null) => void;
   setConversationId: (id: string | null) => void;
 }
 
 const STORAGE_KEY = 'aether.workspace';
 
-/**
- * T26：读回路径与 `persistWorkspace` 白名单共用 `WorkspaceSnapshot` ——
- * 落盘对象永远只有状态字段，解析结果不可能含 action。
- */
-function loadInitial(): WorkspaceSnapshot {
+function loadInitial(): Partial<WorkspaceState> {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
-    if (raw) return JSON.parse(raw) as WorkspaceSnapshot;
+    if (raw) return JSON.parse(raw) as Partial<WorkspaceState>;
   } catch {
     /* ignore - intentional */
   }
@@ -52,10 +51,9 @@ function loadInitial(): WorkspaceSnapshot {
 
 const initial = loadInitial();
 
-// T26：删 projectId / setProjectId / toggleSidebar（grep 全仓 0 外部引用）。
-// 保留 conversationId / setConversationId：T21 useActiveRunId 与 ThreadPage 真实消费。
 export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   sidebarMode: initial.sidebarMode ?? 'expanded',
+  projectId: initial.projectId ?? null,
   conversationId: initial.conversationId ?? null,
   workbench: {
     open: initial.workbench?.open ?? false,
@@ -66,6 +64,10 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   },
 
   setSidebarMode: (sidebarMode) => set({ sidebarMode }),
+  toggleSidebar: () =>
+    set({
+      sidebarMode: get().sidebarMode === 'hidden' ? 'expanded' : 'hidden',
+    }),
   openWorkbench: (tab) =>
     set({
       workbench: {
@@ -96,38 +98,15 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     set({
       workbench: { ...get().workbench, maximized: !get().workbench.maximized },
     }),
+  setProjectId: (projectId) => set({ projectId }),
   setConversationId: (conversationId) => set({ conversationId }),
 }));
 
-/**
- * 持久化 —— T26 显式字段白名单：原写法 `JSON.stringify(state)` 会把 8 个 action
- * 枚举成 key（值 undefined 被丢弃），落盘体积翻倍且形状随 store 定义漂移。
- * 白名单只写回 loadInitial 会读回的状态字段。
- */
+/** 持久化 */
 export function persistWorkspace(state: WorkspaceState): void {
   try {
-    localStorage.setItem(
-      STORAGE_KEY,
-      JSON.stringify({
-        sidebarMode: state.sidebarMode,
-        conversationId: state.conversationId,
-        workbench: {
-          open: state.workbench.open,
-          activeTab: state.workbench.activeTab,
-          width: state.workbench.width,
-          pinned: state.workbench.pinned,
-          maximized: state.workbench.maximized,
-        },
-      } satisfies WorkspaceSnapshot),
-    );
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
   } catch {
     /* ignore - intentional */
   }
 }
-
-/** 落盘快照形态：顶层与 workbench 子对象均可缺字段（历史版本写过的形状）。 */
-export type WorkspaceSnapshot = Partial<
-  Pick<WorkspaceState, 'sidebarMode' | 'conversationId' | 'workbench'>
-> & {
-  workbench?: Partial<WorkbenchState>;
-};

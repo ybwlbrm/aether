@@ -1,6 +1,6 @@
 ﻿import { useEffect, useState } from 'react';
 import { motion } from 'framer-motion';
-import { PageHeader } from '../components/ui';
+import { PageHeader } from '../components/PageHeader';
 import { api } from '../api/client';
 import { FolderKanban, Plus, Trash2, Play, ExternalLink, Terminal, Globe, X, Eye, Edit3, FileCode, FileText, FileType } from 'lucide-react';
 import { confirm as confirmDialog } from '../components/ui/confirm-dialog';
@@ -94,7 +94,7 @@ export function Projects() {
   return (
     <div className="min-h-screen" style={{ background: 'var(--bg-base)', backgroundImage: 'var(--bg-gradient)' }}>
     <div style={{ maxWidth: 'var(--content-standard)', margin: '0 auto', padding: '0 24px' }}>
-      <PageHeader title="Projects" description="项目管理 · URL / 脚本 / 命令执行" icon={<FolderKanban size={22} />}
+      <PageHeader title="Projects" description="项目管理 · URL / 脚本 / 命令执行" icon={<FolderKanban size={22} />} color="var(--color-danger)"
         action={<button className="btn btn-primary" onClick={() => setShowForm(!showForm)}><Plus size={18} /> New Project</button>}
       />
 

@@ -1,6 +1,6 @@
 import { useState, useRef, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { PageHeader } from '../../components/ui';
+import { PageHeader } from '../../components/PageHeader';
 import { confirm as confirmDialog } from '../../components/ui/confirm-dialog';
 import { api } from '../../api/client';
 import { Workflow as WorkflowIcon, Play, Save, Plus, Trash, Bot, FileText, Loader2, ChevronLeft, X } from 'lucide-react';
@@ -46,6 +46,7 @@ export function WorkflowList({
         title="工作流"
         description="可视化编排 AI 工作流：拖拽节点、连接、配置、一键运行"
         icon={<WorkflowIcon size={22} />}
+        color="var(--color-accent)"
         action={
           <div className="flex items-center gap-2 flex-wrap">
             <input

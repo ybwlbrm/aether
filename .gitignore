@@ -60,6 +60,3 @@ pack_*.log
 # release artifacts (not committed - uploaded to GitHub Release)
 dist_release/
 
-
-test-results/
-playwright-report/

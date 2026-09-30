@@ -2,7 +2,6 @@ import { useLocation } from 'react-router-dom';
 import { Command, PanelRightOpen, PanelRightClose, Sun, Moon } from 'lucide-react';
 import { useWorkspaceStore } from '../../store/workspace';
 import { useAppearanceStore } from '../../store/appearance';
-import { dispatchAppEvent } from '../../lib/events';
 
 /**
  * ContextBar — 顶部上下文栏（spec §12/§58）。
@@ -13,8 +12,8 @@ import { dispatchAppEvent } from '../../lib/events';
  */
 
 const ROUTE_LABELS: Record<string, string> = {
-  '/command-center': 'Thread',
-  '/dashboard': 'Dashboard',
+  '/command-center': 'Home',
+  '/dashboard': 'Home',
   '/chat': 'Chat',
   '/media': 'Media',
   '/documents': 'Documents',
@@ -46,8 +45,7 @@ export function ContextBar() {
   const label = ROUTE_LABELS[location.pathname] ?? 'Aether';
 
   const openPalette = () => {
-    // T1 契约：命令面板开关走 lib/events（等价于原 CustomEvent('toggle-command-palette')）
-    dispatchAppEvent('toggle-command-palette');
+    window.dispatchEvent(new CustomEvent('toggle-command-palette'));
   };
 
   const toggleTheme = () => {

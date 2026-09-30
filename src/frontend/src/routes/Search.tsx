@@ -1,6 +1,6 @@
 ﻿import { useState, useEffect, useRef } from 'react';
 import { motion } from 'framer-motion';
-import { PageHeader } from '../components/ui';
+import { PageHeader } from '../components/PageHeader';
 import { api } from '../api/client';
 import { Search as SearchIcon, Globe, FileText, ExternalLink, Download, Filter, Clock, Bookmark, X, BookOpen, Database, MessageSquare } from 'lucide-react';
 
@@ -235,7 +235,7 @@ export function Search() {
   return (
     <div className="min-h-screen" style={{ background: 'var(--bg-base)', backgroundImage: 'var(--bg-gradient)' }}>
       <div style={{ maxWidth: 'var(--content-standard)', margin: '0 auto', padding: '0 24px' }}>
-        <PageHeader title="搜索引擎" description="聚合多源搜索 · 知识库 · 媒体库 · 无广告" icon={<SearchIcon size={22} />} />
+        <PageHeader title="搜索引擎" description="聚合多源搜索 · 知识库 · 媒体库 · 无广告" icon={<SearchIcon size={22} />} color="var(--color-success)" />
 
         {/* Search Bar */}
         <div className="glass-card" style={{ padding: '24px', marginBottom: 24 }}>

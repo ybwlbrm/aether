@@ -1,6 +1,5 @@
-import type { AgentEventEnvelope, AgentEventType, EventStatus, RunStatus } from '@pacc/shared';
+import type { AgentEventEnvelope, AgentEventType, EventStatus } from '@pacc/shared';
 import { create } from 'zustand';
-import { RUN_EVENT_TYPE_TO_STATUS, isRunLifecycleEventType, isTerminalRunStatus } from '../lib/run-status';
 
 /**
  * Activity Store — Event-driven Agent Activity Stream 的前端状态层。
@@ -52,10 +51,7 @@ interface TaskCardCacheEntry {
   lastProcessedSeq: number;
 }
 
-/**
- * Run 元数据（用于聚合索引与调试）
- * T9：status 扩宽为 shared 的 11 态权威集合（RunStatus），不再手写 4 态闭集。
- */
+/** Run 元数据（用于聚合索引与调试） */
 export interface RunMeta {
   runId: string;
   conversationId: string;
@@ -63,12 +59,13 @@ export interface RunMeta {
   sessionId: string;
   startedAt: string;
   endedAt?: string;
-  status: RunStatus;
+  status: 'running' | 'completed' | 'failed' | 'cancelled';
   endReason?: string;
 }
 
-/** 推理缓存增量水位（每个 run 记录已处理到的 seq；推理文本本身由 TaskCard 投影持有） */
+/** 推理缓存：每个 run 下按 agentId 隔离的 reasoning 累积 */
 interface ReasoningCacheEntry {
+  byAgent: Map<string, string>;
   lastProcessedSeq: number;
 }
 
@@ -159,54 +156,6 @@ function getConversationId(ev: AgentEventEnvelope): string {
   return ev.sessionId;
 }
 
-/**
- * T9：task.* 边界事件 → Run 状态。
- * 只覆盖 v1 协议里能终结 run 的 3 个 task 事件。新增 task 事件时必须显式在此表加一行
- * ——判定走 Object.hasOwn 正向成员测试（与 run-status.isRunLifecycleEventType 同构），
- * 不用 default 兜底，避免新状态被静默吞掉。
- */
-const TASK_BOUNDARY_STATUS: Readonly<Record<'task.completed' | 'task.failed' | 'task.cancelled', RunStatus>> = {
-  'task.completed': 'completed',
-  'task.failed': 'failed',
-  'task.cancelled': 'cancelled',
-};
-
-type TaskBoundaryType = keyof typeof TASK_BOUNDARY_STATUS;
-
-function isTaskBoundaryType(type: AgentEventType): type is TaskBoundaryType {
-  return Object.hasOwn(TASK_BOUNDARY_STATUS, type);
-}
-
-function taskBoundaryStatus(type: AgentEventType): RunStatus | null {
-  return isTaskBoundaryType(type) ? TASK_BOUNDARY_STATUS[type] : null;
-}
-
-/**
- * T9：把单个事件迁移到 RunMeta（run.* 生命周期优先，其次 task.* 边界）。
- *
- * - run.* 走 T5 的 RUN_EVENT_TYPE_TO_STATUS（11 态权威），仅终态写 endedAt；
- * - task.* 边界一律终结 run（v1 语义），同时写 endedAt。
- *
- * @returns 迁移后是否进入终态（批量路径据此提前停止，终态是吸收态）
- */
-function applyRunMetaTransition(meta: RunMeta, ev: AgentEventEnvelope): boolean {
-  if (isRunLifecycleEventType(ev.eventType)) {
-    const status = RUN_EVENT_TYPE_TO_STATUS[ev.eventType];
-    meta.status = status;
-    if (isTerminalRunStatus(status)) {
-      meta.endedAt = ev.timestamp;
-      if (ev.endReason !== undefined) meta.endReason = ev.endReason;
-    }
-    return isTerminalRunStatus(status);
-  }
-  const taskStatus = taskBoundaryStatus(ev.eventType);
-  if (taskStatus === null) return false;
-  meta.status = taskStatus;
-  meta.endedAt = ev.timestamp;
-  if (ev.endReason !== undefined) meta.endReason = ev.endReason;
-  return true;
-}
-
 export const useActivityStore = create<ActivityState>((set, get) => ({
   eventsByRun: {},
   cursorByRun: {},
@@ -250,8 +199,12 @@ export const useActivityStore = create<ActivityState>((set, get) => ({
         startedAt: event.timestamp,
         status: 'running',
       };
-      // run.* 生命周期 / task.* 边界事件驱动状态迁移
-      applyRunMetaTransition(newMeta, event);
+      // 如果是任务边界事件，更新结束状态
+      if (event.eventType === 'task.completed' || event.eventType === 'task.failed' || event.eventType === 'task.cancelled') {
+        newMeta.status = event.eventType === 'task.failed' ? 'failed' : event.eventType === 'task.cancelled' ? 'cancelled' : 'completed';
+        newMeta.endedAt = event.timestamp;
+        newMeta.endReason = event.endReason;
+      }
 
       // P1-39：维护 per-run identity Set（避免重复 list.some 扫描）
       const identitySet = new Set(s._eventIdentitySetByRun?.[runKey] ?? []);
@@ -326,9 +279,14 @@ export const useActivityStore = create<ActivityState>((set, get) => ({
           startedAt: firstEv.timestamp,
           status: 'running',
         };
-        // 检查 run.* 生命周期 / task.* 边界事件（终态即吸收态，命中即停）
+        // 检查是否有任务边界事件
         for (const ev of runEvents) {
-          if (applyRunMetaTransition(newMeta, ev)) break;
+          if (ev.eventType === 'task.completed' || ev.eventType === 'task.failed' || ev.eventType === 'task.cancelled') {
+            newMeta.status = ev.eventType === 'task.failed' ? 'failed' : ev.eventType === 'task.cancelled' ? 'cancelled' : 'completed';
+            newMeta.endedAt = ev.timestamp;
+            newMeta.endReason = ev.endReason;
+            break;
+          }
         }
         newRunMetaById[runKey] = newMeta;
       }
@@ -384,7 +342,7 @@ export const useActivityStore = create<ActivityState>((set, get) => ({
         newEventsByRun[runKey] = sorted;
         newCursorByRun[runKey] = maxSeq;
         newTaskCardCache[runKey] = { card: null, lastProcessedSeq: -1 };
-        newReasoningCache[runKey] = { lastProcessedSeq: -1 };
+        newReasoningCache[runKey] = { byAgent: new Map(), lastProcessedSeq: -1 };
 
         // 更新 runsByConversation 聚合索引
         const runs = newRunsByConversation[convId] ?? [];
@@ -403,7 +361,12 @@ export const useActivityStore = create<ActivityState>((set, get) => ({
           status: 'running',
         };
         for (const ev of runEvents) {
-          if (applyRunMetaTransition(newMeta, ev)) break;
+          if (ev.eventType === 'task.completed' || ev.eventType === 'task.failed' || ev.eventType === 'task.cancelled') {
+            newMeta.status = ev.eventType === 'task.failed' ? 'failed' : ev.eventType === 'task.cancelled' ? 'cancelled' : 'completed';
+            newMeta.endedAt = ev.timestamp;
+            newMeta.endReason = ev.endReason;
+            break;
+          }
         }
         newRunMetaById[runKey] = newMeta;
       }
@@ -752,8 +715,14 @@ export const useActivityStore = create<ActivityState>((set, get) => ({
 
 // ---- 纯工具：事件投影（SSE 解析已统一收敛到 api/streamClient.ts 的 parseSseFrame） ----
 
-// T26：删除 isToolEvent / isTaskBoundary —— grep 全仓 0 引用（外部 0，本文件内部也 0：
-// task 边界判定走私有 isTaskBoundaryType，工具事件判定改由 api/streamClient 承担）。
+/** 事件类型细分——用于渲染判定 */
+export function isToolEvent(type: AgentEventType): boolean {
+  return type.startsWith('tool.');
+}
+
+export function isTaskBoundary(type: AgentEventType): boolean {
+  return type === 'task.completed' || type === 'task.cancelled' || type === 'task.failed';
+}
 
 export interface ActivityRecord {
   kind: 'tool' | 'agent' | 'task' | 'message' | 'reasoning' | 'meta';

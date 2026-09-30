@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { motion } from 'framer-motion';
 import { api } from '../api/client';
 import { Plus, Trash2, RefreshCw, Bot, Cable, Check, CheckCircle2, Star, X, Eye, Copy, KeyRound, Calendar, Link2, Cpu, Tag } from 'lucide-react';
-import { PageHeader } from '../components/ui';
+import { PageHeader } from '../components/PageHeader';
 import { confirm as confirmDialog } from '../components/ui/confirm-dialog';
 import { useSafeTimeout } from '../hooks/useSafeTimeout';
 
@@ -155,7 +155,7 @@ const [testingId, setTestingId] = useState<string | null>(null);
   return (
     <div className="min-h-screen" style={{ background: 'var(--bg-base)', backgroundImage: 'var(--bg-gradient)' }}>
       <div style={{ maxWidth: 'var(--content-standard)', margin: '0 auto', padding: '0 24px' }}>
-        <PageHeader title="AI Providers" description="管理 AI 模型连接" icon={<Cable size={22} />} action={<button className="btn btn-primary" onClick={() => setShowForm(!showForm)}>{showForm ? <X size={18} /> : <Plus size={18} />}{showForm ? '关闭' : '添加 Provider'}</button>} />
+        <PageHeader title="AI Providers" description="管理 AI 模型连接" icon={<Cable size={22} />} color="var(--color-accent)" action={<button className="btn btn-primary" onClick={() => setShowForm(!showForm)}>{showForm ? <X size={18} /> : <Plus size={18} />}{showForm ? '关闭' : '添加 Provider'}</button>} />
 
         {/* AEX-P1-017：loading / error 显式呈现。error 时提供重试入口（ApiError 承载可重试语义）。 */}
         {loadState === 'error' && (

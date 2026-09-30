@@ -1,6 +1,6 @@
 ﻿import { useEffect, useState, useRef } from 'react';
 import { motion } from 'framer-motion';
-import { PageHeader } from '../components/ui';
+import { PageHeader } from '../components/PageHeader';
 import { api } from '../api/client';
 import { FileText, Presentation, Plus, Trash2, Download, Edit3, Eye, X } from 'lucide-react';
 import { confirm as confirmDialog } from '../components/ui/confirm-dialog';
@@ -82,7 +82,7 @@ export function Documents() {
     <>
     <div className="min-h-screen" style={{ background: 'var(--bg-base)', backgroundImage: 'var(--bg-gradient)' }}>
     <div style={{ maxWidth: 'var(--content-standard)', margin: '0 auto', padding: '0 24px' }}>
-      <PageHeader title="Document Lab" description="AI 生成 PPT 和文档" icon={<FileText size={22} />}
+      <PageHeader title="Document Lab" description="AI 生成 PPT 和文档" icon={<FileText size={22} />} color="var(--color-success)"
         action={<button className="btn btn-primary" onClick={() => setShowForm(!showForm)}><Plus size={18} /> 新建文档</button>}
       />
 

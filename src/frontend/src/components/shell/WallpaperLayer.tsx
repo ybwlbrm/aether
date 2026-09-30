@@ -188,9 +188,7 @@ export function WallpaperLayer() {
   }, [hasActive]);
 
   // ============================================================
-  // 自适应对比（spec §54）：采样亮度 → scrim
-  // T20：glass 亮度统一由 AppShell 写 --glass-brightness 单 token，
-  //      本层不再写 --glass-vibrancy-opacity（亮度采样只服务于 scrim）。
+  // 自适应对比（spec §54）：采样亮度 → scrim + glass 透明度
   // ============================================================
   useEffect(() => {
     const root = document.documentElement;
@@ -207,7 +205,9 @@ export function WallpaperLayer() {
     const overlay = clamp((wallpaper.overlay / 100) * base + adaptive, 0.05, 0.82);
     const scrimColor = colorScheme === 'light' ? '255, 255, 255' : '8, 9, 13';
     root.style.setProperty('--wallpaper-scrim', `rgba(${scrimColor}, ${overlay.toFixed(3)})`);
-  }, [hasActive, activeUrl, wallpaper.overlay, colorScheme]);
+    // Glass 动态透明度（用户手动覆盖优先）
+    root.style.setProperty('--glass-vibrancy-opacity', String(clamp(0.05 + lum * 0.05, 0.04, 0.14)));
+  }, [hasActive, activeUrl, wallpaper.overlay, wallpaper.brightness, colorScheme]);
 
   // ============================================================
   // 渲染
