@@ -1,72 +1,215 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useEffect, useState, useCallback, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Outlet, useLocation, useNavigate } from 'react-router-dom';
-import { Sidebar } from './shell/Sidebar';
-import { ContextBar } from './shell/ContextBar';
-import { WorkspaceFrame } from './shell/WorkspaceFrame';
-import { WallpaperLayer } from './shell/WallpaperLayer';
+import { Sidebar } from './Sidebar';
 import { CommandPalette } from './CommandPalette';
 import { LiquidGlassFilter } from './LiquidGlassFilter';
 import { api, authHeaders } from '../api/client';
-import { requestNotificationPermission } from '../lib/notification-center';
+import { requestNotificationPermission } from '../lib/notifications';
 import { useAppStore } from '../store/app';
-import { useAppearanceStore, persistAppearance } from '../store/appearance';
-import { useWorkspaceStore, persistWorkspace } from '../store/workspace';
-import { Trash2 } from 'lucide-react';
+import { Maximize2, Minimize2, Trash2, MessageSquare } from 'lucide-react';
 import { confirm as confirmDialog } from './ui/confirm-dialog';
+
+/** 采样 img 亮度，动态设置 --glass-vibrancy-opacity */
+function sampleLuminance(img: HTMLImageElement): number {
+  const canvas = document.createElement('canvas');
+  canvas.width = 64;
+  canvas.height = 64;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return 0.5;
+  ctx.drawImage(img, 0, 0, 64, 64);
+  const data = ctx.getImageData(0, 0, 64, 64).data;
+  let total = 0;
+  for (let i = 0; i < data.length; i += 4) {
+    total += (0.2126 * data[i] + 0.7152 * data[i + 1] + 0.0722 * data[i + 2]) / 255;
+  }
+  return total / (data.length / 4);
+}
+
+function vibrancyOpacity(lum: number): number {
+  // 苹果 iOS26 标准：亮背景 6%~15%，暗背景 20%~35%
+  // 但用户反馈需要更通透，再降 50%
+  return lum > 0.5
+    ? Math.max(0.04, Math.min(0.08, 0.04 + (1 - lum) * 0.08))
+    : Math.max(0.06, Math.min(0.12, 0.06 + (0.5 - lum) * 0.12));
+}
 
 export function Layout() {
   const location = useLocation();
+  const isCommandCenter = location.pathname === '/command-center' || location.pathname === '/';
+  const [isFullscreen, setIsFullscreen] = useState(false);
+  const [customBg, setCustomBg] = useState<string | null>(null);
+  // 背景轮播
+  const [slideImages, setSlideImages] = useState<string[]>([]);
+  const [slideIndex, setSlideIndex] = useState(0);
+  const [slideInterval, setSlideInterval] = useState(10);
+  const [slideEnabled, setSlideEnabled] = useState(false);
+  const slideTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const bgImgRef = useRef<HTMLImageElement>(null);
+  const vibrancyFrame = useRef<number>(0);
+
+  // 首次访问应用时请求通知权限（用户拒绝后不再询问）
+  useEffect(() => { requestNotificationPermission(); }, []);
+
+  // 监听背景轮播事件
+  useEffect(() => {
+    // 页面加载时从后端恢复轮播设置
+    (async () => {
+      try {
+        const { api } = await import('../api/client.js');
+        const res = await api.getBackgrounds();
+        if (res?.images?.length > 0) {
+          setSlideImages(res.images);
+          setSlideInterval(res.interval || 10);
+          // 从上次轮播位置恢复（取模防止图片列表变化导致越界；JS 负数取模需二次修正）
+          const saved = parseInt(localStorage.getItem('bgSlideshowIndex') || '0', 10);
+          const len = res.images.length;
+          setSlideIndex(Number.isFinite(saved) ? ((saved % len) + len) % len : 0);
+          setSlideEnabled(true);
+          setCustomBg(null);
+        }
+      } catch (_e: unknown) { console.warn("[SilentCatch]", _e); }
+    })();
+
+    const startHandler = (e: Event) => {
+      const ce = e as CustomEvent;
+      const { images, interval } = ce.detail || {};
+      if (images?.length > 0) {
+        setSlideImages(images);
+        setSlideInterval(interval || 10);
+        setSlideIndex(0);
+        setSlideEnabled(true);
+        setCustomBg(null);
+      } else {
+        // 空列表：停止轮播（避免旧图片继续显示，状态与模式不同步）
+        setSlideEnabled(false);
+        setSlideImages([]);
+        if (slideTimerRef.current) { clearInterval(slideTimerRef.current); slideTimerRef.current = null; }
+      }
+    };
+    const stopHandler = () => {
+      setSlideEnabled(false);
+      setSlideImages([]);
+      if (slideTimerRef.current) { clearInterval(slideTimerRef.current); slideTimerRef.current = null; }
+    };
+    const clearHandler = () => {
+      // 清除所有背景图片（同时停轮播）
+      setSlideEnabled(false);
+      setSlideImages([]);
+      if (slideTimerRef.current) { clearInterval(slideTimerRef.current); slideTimerRef.current = null; }
+    };
+    // 仅更新切换间隔：不重建轮播、不重置索引
+    const intervalHandler = (e: Event) => {
+      const ce = e as CustomEvent;
+      const v = parseInt(ce.detail?.interval, 10);
+      if (Number.isFinite(v) && v > 0) {
+        setSlideInterval(v);
+      }
+    };
+    window.addEventListener('bg-slideshow-start', startHandler);
+    window.addEventListener('bg-slideshow-stop', stopHandler);
+    window.addEventListener('bg-slideshow-clear', clearHandler);
+    window.addEventListener('bg-slideshow-interval', intervalHandler);
+    return () => {
+      window.removeEventListener('bg-slideshow-start', startHandler);
+      window.removeEventListener('bg-slideshow-stop', stopHandler);
+      window.removeEventListener('bg-slideshow-clear', clearHandler);
+      window.removeEventListener('bg-slideshow-interval', intervalHandler);
+      if (slideTimerRef.current) clearInterval(slideTimerRef.current);
+    };
+  }, []);
+
+  // 轮播定时器
+  useEffect(() => {
+    // 背景切换修复：原 length<=1 导致单张图时定时器永不启动（看起来"背景不切换"）。
+    // 单张图也应启动定时器（无实际切换但状态一致）；仅空列表不启动。
+    if (!slideEnabled || slideImages.length === 0) return;
+    if (slideTimerRef.current) clearInterval(slideTimerRef.current);
+    slideTimerRef.current = setInterval(() => {
+      setSlideIndex(prev => (prev + 1) % slideImages.length);
+    }, slideInterval * 1000);
+    return () => {
+      // Functional cleanup: read current ref at cleanup time to avoid stale capture
+      const timer = slideTimerRef.current;
+      if (timer) clearInterval(timer);
+    };
+  }, [slideEnabled, slideImages.join('|'), slideInterval]);
+
+  // 持久化当前轮播位置：刷新后从上次位置继续
+  useEffect(() => {
+    if (slideEnabled) {
+      localStorage.setItem('bgSlideshowIndex', String(slideIndex));
+    }
+  }, [slideIndex, slideEnabled]);
+
+  // ============================================================
+  // 远程命令实时监听：手机端发指令时自动跳转到聊天页
+  // 通过轮询后端 /api/sync/latest-command 实现，无需前端直连 Supabase
+  // ============================================================
   const navigate = useNavigate();
   const setUiMode = useAppStore((s) => s.setUiMode);
 
-  const appearance = useAppearanceStore();
-  const workspace = useWorkspaceStore();
-  const sidebarMode = useWorkspaceStore((s) => s.sidebarMode);
+  // ============================================================
+  // 对话记录面板：全局状态，在 Layout 级别管理
+  // ============================================================
+  const [sidebarConvOpen, setSidebarConvOpen] = useState(false);
+  const [conversations, setConversations] = useState<any[]>([]);
 
-  // 首次访问请求通知权限
-  useEffect(() => {
-    requestNotificationPermission();
+  // 加载对话列表
+  const loadConversations = useCallback(async () => {
+    try {
+      const convs = await api.getConversations();
+      setConversations(convs || []);
+    } catch { /* ignore */ }
   }, []);
 
-  // ============================================================
-  // Appearance 应用：colorScheme / uiTheme / material / glass 参数 → DOM
-  // ============================================================
+  useEffect(() => { loadConversations(); }, [loadConversations]);
+
+  // 监听对话变更事件：CodingHome 创建/删除对话后通知刷新
   useEffect(() => {
-    const root = document.documentElement;
-    // shadcn 兼容：始终加 .dark class（修复白框历史问题）
-    root.classList.add('dark');
-    // data-theme：uiTheme 映射（liquid-glass 为默认 dark）
-    if (appearance.colorScheme === 'light') {
-      root.setAttribute('data-theme', 'light');
-    } else if (appearance.uiTheme !== 'liquid-glass') {
-      root.setAttribute('data-theme', appearance.uiTheme);
+    const handler = () => loadConversations();
+    window.addEventListener('conversations-changed', handler);
+    return () => window.removeEventListener('conversations-changed', handler);
+  }, [loadConversations]);
+
+  // 选择对话：跳转到 AI 对话页并加载该对话
+  const handleSelectConv = useCallback(async (id: string) => {
+    setSidebarConvOpen(false);
+    const path = window.location.pathname;
+    if (path === '/command-center' || path === '/') {
+      // 已在 AI 对话页，直接派发事件
+      window.dispatchEvent(new CustomEvent('select-conversation', { detail: { conversationId: id } }));
     } else {
-      root.removeAttribute('data-theme');
+      // 不在 AI 对话页，导航过去
+      navigate(`/command-center?selectConv=${id}`);
     }
-    // 材质开关
-    root.setAttribute('data-material', appearance.material.mode);
-    // Glass 参数（克制默认由 themes.css 保证，滑块可覆盖）
-    root.style.setProperty('--glass-blur-radius', `${appearance.material.blur}px`);
-    root.style.setProperty('--glass-saturate', `${appearance.material.saturation}%`);
-    root.style.setProperty('--glass-brightness', String(appearance.material.brightness));
-    persistAppearance(appearance);
-  }, [appearance]);
+  }, [navigate]);
+
+  // 删除对话
+  const handleDeleteConv = useCallback(async (id: string) => {
+    if (!(await confirmDialog('确定删除此对话？'))) return;
+    try {
+      await api.deleteConversation(id);
+      // 同步删除 Supabase 记录
+      await fetch('/api/sync/delete-conversation', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest', ...authHeaders() },
+        body: JSON.stringify({ conversationId: id }),
+      }).catch(() => {});
+      loadConversations();
+    } catch (e: unknown) { alert('删除失败: ' + (e instanceof Error ? e.message : String(e))); }
+  }, [loadConversations]);
 
   // ============================================================
-  // Workspace 应用：sidebar 宽度 / 持久化
+  // 监听 toggle-conv-panel 事件：从任意页面打开对话记录面板（无需跳转）
   // ============================================================
   useEffect(() => {
-    const root = document.documentElement;
-    const width =
-      sidebarMode === 'expanded' ? '224px' : sidebarMode === 'compact' ? '52px' : '0px';
-    root.style.setProperty('--sidebar-width', width);
-    persistWorkspace(workspace);
-  }, [sidebarMode, workspace]);
-
-  // ============================================================
-  // 远程命令实时监听：手机端发指令 → 自动跳转 coding 对话
-  // ============================================================
+    const handler = () => {
+      setSidebarConvOpen(prev => !prev);
+    };
+    window.addEventListener('toggle-conv-panel', handler);
+    return () => window.removeEventListener('toggle-conv-panel', handler);
+  }, []);
   useEffect(() => {
     const abortController = new AbortController();
     let cancelled = false;
@@ -79,17 +222,22 @@ export function Layout() {
           headers: { 'X-Requested-With': 'XMLHttpRequest' },
           signal: abortController.signal,
         });
-        if (cancelled) return;
+        if (cancelled) return; // Check after await
         if (!res.ok) return;
         const data = await res.json();
-        if (cancelled) return;
+        if (cancelled) return; // Check after await
         if (data.hasNew && data.command) {
           const cmd = data.command;
+          // Q1/Q4 修复：仅在命令仍处于「待处理/处理中」时跳转。
+          // /api/sync/latest-command 已过滤仅返回 pending/processing，
+          // 双保险：此处再校验状态，已完成/失败命令绝不触发 UI 跳转
           if ((cmd.status === 'pending' || cmd.status === 'processing') && cmd.id !== lastId) {
             lastId = cmd.id;
+            console.log('[Layout] 检测到远程命令:', cmd.content?.slice(0, 50));
             window.dispatchEvent(new CustomEvent('remote-command', {
               detail: { content: cmd.content, id: cmd.id, conversationId: cmd.conversationId },
             }));
+            // 存待处理的远程命令（conversationId 可能还没生成，CodingHome 会轮询补齐）
             try {
               sessionStorage.setItem('aether_pending_remote', JSON.stringify({
                 content: cmd.content,
@@ -98,17 +246,22 @@ export function Layout() {
                 receivedAt: Date.now(),
               }));
             } catch { /* ignore */ }
+            // 切换到 coding 模式并跳转到 coding 对话界面（CodingHome）
+            // 用变化的 query 参数触发 CodingHome 重新检查 aether_pending_remote
+            // （避免 window.location.href 全刷新丢失状态，也避免同路由 navigate 不重挂载）
             setUiMode('coding');
             navigate(`/command-center?remote=${Date.now()}`);
           }
         }
       } catch {
-        // 后端未启动或未配置同步，静默忽略
+        // 后端未启动或未配置同步，静默忽略（含 AbortError）
       }
     };
 
+    // 立即执行一次，然后每 1.5 秒轮询（Q4 优化：原 3s 轮询使手机发指令后 UI 滞后最多 3s）
     poll();
     const interval = setInterval(poll, 1500);
+
     return () => {
       cancelled = true;
       abortController.abort();
@@ -116,107 +269,226 @@ export function Layout() {
     };
   }, [navigate, setUiMode]);
 
-  // ============================================================
-  // 对话记录面板：全局状态（保留原功能）
-  // ============================================================
-  const [sidebarConvOpen, setSidebarConvOpen] = useState(false);
-  const [conversations, setConversations] = useState<Array<{ id: string; title: string; updatedAt: string }>>([]);
-
-  const loadConversations = useCallback(async () => {
-    try {
-      const convs = await api.getConversations();
-      setConversations(convs || []);
-    } catch { /* ignore */ }
-  }, []);
-
+  // 轮播时让页面透明，显示轮播图（覆盖 --bg-base 变量，所有页面自动生效）
   useEffect(() => {
-    loadConversations();
-  }, [loadConversations]);
-
-  useEffect(() => {
-    const handler = () => loadConversations();
-    window.addEventListener('conversations-changed', handler);
-    return () => window.removeEventListener('conversations-changed', handler);
-  }, [loadConversations]);
-
-  const handleSelectConv = useCallback(async (id: string) => {
-    setSidebarConvOpen(false);
-    const path = window.location.pathname;
-    if (path === '/command-center' || path === '/') {
-      window.dispatchEvent(new CustomEvent('select-conversation', { detail: { conversationId: id } }));
+    const root = document.documentElement;
+    if (slideEnabled) {
+      root.style.setProperty('--bg-base', 'transparent');
+      root.style.setProperty('--bg-gradient', 'none');
     } else {
-      navigate(`/command-center?selectConv=${id}`);
+      root.style.removeProperty('--bg-base');
+      root.style.removeProperty('--bg-gradient');
     }
-  }, [navigate]);
+  }, [slideEnabled]);
 
-  const handleDeleteConv = useCallback(async (id: string) => {
-    if (!(await confirmDialog('确定删除此对话？'))) return;
-    try {
-      await api.deleteConversation(id);
-      await fetch('/api/sync/delete-conversation', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest', ...authHeaders() },
-        body: JSON.stringify({ conversationId: id }),
-      }).catch(() => {});
-      loadConversations();
-    } catch (e: unknown) {
-      alert('删除失败: ' + (e instanceof Error ? e.message : String(e)));
-    }
-  }, [loadConversations]);
-
+  // 加载保存的 UI 主题
   useEffect(() => {
-    const handler = () => setSidebarConvOpen((prev) => !prev);
-    window.addEventListener('toggle-conv-panel', handler);
-    return () => window.removeEventListener('toggle-conv-panel', handler);
+    const savedTheme = localStorage.getItem('uiTheme') || 'liquid-glass';
+    // 白框修复：shadcn/ui 组件（含 Streamdown）依赖 .dark class 选择器匹配深色变量。
+    // 项目一直只设置了 data-theme 属性，从未设置 .dark class，
+    // 导致 shadcn 的 --background 变量取的是 :root（白色）而非 .dark（深色），
+    // 所有 Streamdown 渲染的卡片/代码块/内联代码背景均为白色。
+    document.documentElement.classList.add('dark');
+    if (savedTheme !== 'liquid-glass') {
+      document.documentElement.setAttribute('data-theme', savedTheme);
+    }
+    // 强制重绘玻璃卡片（刷新 backdrop-filter GPU 缓存）
+    const repaintEls = () => document.querySelectorAll<HTMLElement>('.glass-card, .sidebar-glass, .input, .select, .btn');
+    const doRepaint = () => {
+      const els = repaintEls();
+      els.forEach(el => {
+        el.style.transform = 'translateZ(0.001px)';
+        el.style.backdropFilter = 'none';
+      });
+      setTimeout(() => {
+        els.forEach(el => {
+          el.style.transform = '';
+          el.style.backdropFilter = '';
+        });
+      }, 50);
+    };
+    doRepaint();
   }, []);
 
-  const glassOn = appearance.material.mode === 'glass';
+  useEffect(() => {
+    // 背景切换修复：轮播模式下不读取 customBg，避免导航时把 localStorage 旧单图
+    // 覆盖掉轮播事件设置的 setCustomBg(null)，造成单图/轮播状态互相污染。
+    if (slideEnabled) return;
+    // 每次挂载/导航都从 localStorage 读取背景，确保背景显示
+    const savedBg = localStorage.getItem('customBg');
+    // 即使 localStorage 为空也要清空 state，否则删掉后图片残留
+    setCustomBg(savedBg || null);
+
+// 监听 Settings 页面保存背景后实时更新
+          const handler = (e: Event) => {
+            const ce = e as CustomEvent;
+            if (ce.detail) {
+              setCustomBg(ce.detail);
+            } else {
+              setCustomBg(null);
+            }
+          };
+          window.addEventListener('custombg-change', handler);
+
+          // 加载已保存的玻璃效果参数（三个滑块值）
+          try {
+            const saved = localStorage.getItem('glassEffect');
+            if (saved) {
+              const g = JSON.parse(saved);
+              if (g.blurRadius != null) document.documentElement.style.setProperty('--glass-blur-radius', `${g.blurRadius}px`);
+              if (g.saturate != null) document.documentElement.style.setProperty('--glass-saturate', `${g.saturate}%`);
+              if (g.vibrancyOpacity != null) document.documentElement.style.setProperty('--glass-vibrancy-opacity', String(g.vibrancyOpacity));
+            }
+          } catch (_e: unknown) { /* ignore - intentional */ }
+
+          // 强制重绘玻璃卡片（刷新 backdrop-filter GPU 缓存）
+          const repaintEls2 = document.querySelectorAll<HTMLElement>('.glass-card, .sidebar-glass, .input, .select, .btn');
+          repaintEls2.forEach(el => {
+            el.style.transform = 'translateZ(0.001px)';
+            el.style.backdropFilter = 'none';
+          });
+          setTimeout(() => {
+            repaintEls2.forEach(el => {
+              el.style.transform = '';
+              el.style.backdropFilter = '';
+            });
+          }, 50);
+
+          return () => window.removeEventListener('custombg-change', handler);
+  }, [location.pathname, slideEnabled]); // 每次导航重新读取 localStorage（轮播模式跳过）
+
+  // 全局动态透明度：采样背景亮度，实时调整 --glass-vibrancy-opacity
+  // 苹果 iOS26 标准：亮背景 6%~15%，暗背景 20%~35%
+  // 但当前 UI 需要更通透，故整体下调 40%
+  // 若用户已在设置中手动调过透明度滑块，则尊重手动值，不再自动覆盖
+  useEffect(() => {
+    const update = () => {
+      // 检查用户是否手动设置过透明度滑块
+      let manualOpacity: number | null = null;
+      try {
+        const saved = localStorage.getItem('glassEffect');
+        if (saved) {
+          const g = JSON.parse(saved);
+          if (typeof g.vibrancyOpacity === 'number') manualOpacity = g.vibrancyOpacity;
+        }
+      } catch (_e: unknown) { /* ignore - intentional */ }
+
+      if (manualOpacity != null) {
+        // 用户手动调过透明度，尊重该值
+        document.documentElement.style.setProperty('--glass-vibrancy-opacity', String(manualOpacity));
+        return;
+      }
+
+      if (customBg && bgImgRef.current && bgImgRef.current.complete && bgImgRef.current.naturalWidth > 0) {
+        const lum = sampleLuminance(bgImgRef.current);
+        const opacity = vibrancyOpacity(lum);
+        document.documentElement.style.setProperty('--glass-vibrancy-opacity', String(opacity));
+      } else {
+        // 无自定义背景：深色 0.06，浅色 0.05（极致通透）
+        const theme = document.documentElement.getAttribute('data-theme');
+        const opacity = theme === 'light' ? 0.05 : 0.06;
+        document.documentElement.style.setProperty('--glass-vibrancy-opacity', String(opacity));
+      }
+    };
+
+    const schedule = () => {
+      if (vibrancyFrame.current !== 0) window.cancelAnimationFrame(vibrancyFrame.current);
+      vibrancyFrame.current = window.requestAnimationFrame(() => {
+        vibrancyFrame.current = 0;
+        update();
+      });
+    };
+
+    update(); // 初始
+    window.addEventListener('scroll', schedule, { passive: true });
+    window.addEventListener('resize', schedule);
+
+    return () => {
+      window.removeEventListener('scroll', schedule);
+      window.removeEventListener('resize', schedule);
+      if (vibrancyFrame.current !== 0) window.cancelAnimationFrame(vibrancyFrame.current);
+    };
+  }, [customBg, location.pathname]);
+
+  const toggleFullscreen = useCallback(() => {
+    if (!document.fullscreenElement) {
+      document.documentElement.requestFullscreen().then(() => setIsFullscreen(true)).catch(() => {});
+    } else {
+      document.exitFullscreen().then(() => setIsFullscreen(false)).catch(() => {});
+    }
+  }, []);
+
+  useEffect(() => {
+    const handler = () => setIsFullscreen(!!document.fullscreenElement);
+    document.addEventListener('fullscreenchange', handler);
+    return () => document.removeEventListener('fullscreenchange', handler);
+  }, []);
+
+  // 整改计划第 8 章（P1/P2）：背景激活状态 —— data-bg-active 与 data-glass-enabled 分离。
+  // data-bg-active=true 表示当前有背景（单图或轮播）；玻璃开关由 data-glass-enabled 单独控制，
+  // 保证 8 主题 × 2 状态（有/无背景）对比度一致。
+  const bgActive = !!(customBg || (slideEnabled && slideImages.length > 0));
+  useEffect(() => {
+    const root = document.documentElement;
+    if (bgActive) root.setAttribute('data-bg-active', 'true');
+    else root.removeAttribute('data-bg-active');
+    // 从 localStorage 恢复玻璃开关（data-glass-enabled 语义）
+    const glassEnabled = localStorage.getItem('glassEnabled') !== 'false';
+    if (glassEnabled) root.setAttribute('data-glass-enabled', 'true');
+    else root.removeAttribute('data-glass-enabled');
+  }, [bgActive]);
 
   return (
     <div
-      className="aether-app min-h-screen"
-      style={{ background: 'var(--bg-base)', backgroundImage: 'var(--bg-gradient)' }}
+      className="min-h-screen"
+      data-custom-bg={customBg ? 'true' : undefined}
+      data-bg-active={bgActive ? 'true' : undefined}
+      style={{
+        background: !slideEnabled ? 'var(--bg-base)' : undefined,
+        backgroundImage: !slideEnabled ? 'var(--bg-gradient)' : undefined,
+      }}
     >
-      {/* Level 0 — Environment */}
-      <WallpaperLayer />
-
-      {/* Liquid Glass SVG 滤镜（Glass ON 时才挂载） */}
-      {glassOn && <LiquidGlassFilter />}
-
-      {/* Level 4 — Overlay */}
+      {/* 隐藏的 img 用于 JS 采样背景亮度 */}
+      {customBg && (
+        <img
+          ref={bgImgRef}
+          src={customBg}
+          alt=""
+          aria-hidden="true"
+          style={{ position: 'absolute', width: 0, height: 0, opacity: 0, pointerEvents: 'none' }}
+        />
+      )}
+      {/* 背景轮播 — 渐入切换 */}
+      {slideEnabled && slideImages.length > 0 && (
+        <div key={`bg-${slideIndex}`} style={{
+          position: 'fixed', inset: 0, zIndex: -1,
+          backgroundImage: `url(${slideImages[slideIndex]})`,
+          backgroundSize: 'cover', backgroundPosition: 'center', backgroundRepeat: 'no-repeat',
+          opacity: 0.6, pointerEvents: 'none',
+          transition: 'opacity 1s ease-in-out',
+        }} />
+      )}
+      {/* 背景图层 — 在所有内容之下 */}
+      {!slideEnabled && customBg && (
+        <div
+          style={{
+            position: 'fixed',
+            inset: 0,
+            zIndex: -1,
+            backgroundImage: `url(${customBg})`,
+            backgroundSize: 'cover',
+            backgroundPosition: 'center',
+            backgroundRepeat: 'no-repeat',
+            opacity: 0.6,
+            pointerEvents: 'none',
+          }}
+        />
+      )}
+      <LiquidGlassFilter />
       <CommandPalette />
+      <Sidebar />
 
-      {/* Level 1 — Shell: Sidebar */}
-      {sidebarMode !== 'hidden' && <Sidebar />}
-
-      {/* Level 1 — Shell: 内容区（ContextBar + Workspace） */}
-      <div
-        className="aether-main-col"
-        style={{
-          marginLeft: 'var(--sidebar-width)',
-          minHeight: '100vh',
-          display: 'flex',
-          flexDirection: 'column',
-          position: 'relative',
-          zIndex: 1,
-          transition: 'margin-left 0.2s var(--anim-ease)',
-        }}
-      >
-        <ContextBar />
-        <WorkspaceFrame>
-          <motion.div
-            key={location.pathname}
-            style={{ maxWidth: 'none', margin: '0 auto', flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 }}
-            initial={{ opacity: 0, y: 4 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ duration: 0.2, ease: [0.25, 0.1, 0.25, 1] }}
-          >
-            <Outlet />
-          </motion.div>
-        </WorkspaceFrame>
-      </div>
-
-      {/* 对话记录面板 — 全局可用（保留） */}
+      {/* 对话记录面板 — 全局可用，无需跳转 */}
       <AnimatePresence>
         {sidebarConvOpen && (
           <motion.div
@@ -224,112 +496,57 @@ export function Layout() {
             animate={{ x: 0, opacity: 1 }}
             exit={{ x: -300, opacity: 0 }}
             transition={{ duration: 0.2 }}
-            style={{
-              position: 'fixed',
-              left: 'var(--sidebar-width)',
-              top: 36,
-              bottom: 0,
-              width: 260,
-              zIndex: 40,
-              display: 'flex',
-              flexDirection: 'column',
-              background: 'var(--bg-elevated)',
-              borderRight: '1px solid var(--border-primary)',
-              borderRadius: 0,
-            }}
+            style={{ position: 'fixed', left: 'var(--sidebar-width)', top: 0, bottom: 0, width: 260, zIndex: 40, overflow: 'hidden', padding: 0, WebkitClipPath: 'none', clipPath: 'none', borderRadius: 0 }}
+            className="glass-card"
           >
-            <div
-              style={{
-                padding: '10px 14px',
-                borderBottom: '1px solid var(--border-primary)',
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'space-between',
-              }}
-            >
-              <span style={{ fontSize: 12, fontWeight: 600 }}>Chat History</span>
-              <button
-                onClick={() => setSidebarConvOpen(false)}
-                aria-label="Close"
-                style={{
-                  background: 'none',
-                  border: 'none',
-                  cursor: 'pointer',
-                  color: 'var(--text-tertiary)',
-                  padding: 6,
-                  borderRadius: 6,
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  minWidth: 28,
-                  minHeight: 28,
-                  fontSize: 16,
-                  lineHeight: 1,
-                }}
-              >
-                ✕
-              </button>
+            <div style={{ padding: '12px 16px', borderBottom: '1px solid var(--border-primary)', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+              <span style={{ fontSize: 13, fontWeight: 600 }}>Chat History</span>
+              <button onClick={() => setSidebarConvOpen(false)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-tertiary)', padding: 8, borderRadius: 6, display: 'flex', alignItems: 'center', justifyContent: 'center', minWidth: 36, minHeight: 36, fontSize: 18, lineHeight: 1 }} title="关闭">✕</button>
             </div>
-            <div
-              style={{
-                overflowY: 'auto',
-                flex: 1,
-                display: 'flex',
-                flexDirection: 'column',
-                gap: 2,
-                padding: 8,
-              }}
-            >
-              {conversations.map((conv) => (
-                <div
-                  key={conv.id}
+            <div style={{ overflowY: 'auto', maxHeight: 'calc(100vh - 50px)', display: 'flex', flexDirection: 'column', gap: 4, padding: 8 }}>
+              {conversations.map((conv: any) => (
+                <div key={conv.id}
                   onClick={() => handleSelectConv(conv.id)}
-                  role="button"
-                  tabIndex={0}
-                  onKeyDown={(e) => { if (e.key === 'Enter') handleSelectConv(conv.id); }}
-                  style={{
-                    padding: '8px 10px',
-                    borderRadius: 6,
-                    cursor: 'pointer',
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: 8,
-                    justifyContent: 'space-between',
-                  }}
-                >
+                  style={{ padding: '10px 12px', borderRadius: 8, cursor: 'pointer', background: 'transparent', display: 'flex', alignItems: 'center', gap: 8, justifyContent: 'space-between' }}>
                   <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{ fontSize: 13, fontWeight: 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                      {conv.title}
-                    </div>
-                    <div style={{ fontSize: 11, color: 'var(--text-tertiary)' }}>
-                      {new Date(conv.updatedAt).toLocaleString()}
-                    </div>
+                    <div style={{ fontSize: 13, fontWeight: 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{conv.title}</div>
+                    <div style={{ fontSize: 11, color: 'var(--text-tertiary)' }}>{new Date(conv.updatedAt).toLocaleString()}</div>
                   </div>
-                  <button
-                    onClick={(e) => { e.stopPropagation(); handleDeleteConv(conv.id); }}
-                    aria-label="Delete conversation"
-                    style={{
-                      background: 'none',
-                      border: 'none',
-                      cursor: 'pointer',
-                      color: 'var(--text-tertiary)',
-                      flexShrink: 0,
-                      padding: 4,
-                    }}
-                  >
+                  <button onClick={(e) => { e.stopPropagation(); handleDeleteConv(conv.id); }} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-tertiary)', flexShrink: 0 }}>
                     <Trash2 size={13} />
                   </button>
                 </div>
               ))}
               {conversations.length === 0 && (
-                <div style={{ textAlign: 'center', padding: 32, color: 'var(--text-tertiary)', fontSize: 12 }}>
-                  No conversations yet
-                </div>
+                <div style={{ textAlign: 'center', padding: 32, color: 'var(--text-tertiary)', fontSize: 13 }}>No conversations yet</div>
               )}
             </div>
           </motion.div>
         )}
       </AnimatePresence>
+
+<main
+        style={{
+          marginLeft: 'var(--sidebar-width)',
+          minHeight: '100vh',
+          position: 'relative',
+          zIndex: 1,
+        }}
+      >
+        <motion.div
+          key={location.pathname}
+          style={{
+            padding: '0',
+            maxWidth: isCommandCenter ? 'none' : 'var(--max-content-width)',
+            margin: isCommandCenter ? '0' : '0 auto',
+          }}
+          initial={{ opacity: 0, y: 6 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.25, ease: [0.25, 0.1, 0.25, 1] }}
+        >
+          <Outlet />
+        </motion.div>
+      </main>
     </div>
   );
 }

@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { PageHeader } from '../components/PageHeader';
-import { api } from '../api/client';
+import { api, authHeaders } from '../api/client';
 import { Server, Plus, Trash2, Play, Power, PowerOff, ExternalLink, Terminal, Download, BookOpen, CheckCircle2, XCircle, Eye } from 'lucide-react';
 import { confirm as confirmDialog } from '../components/ui/confirm-dialog';
 import { useAutosaveDraft } from '../hooks/useAutosaveDraft';
@@ -133,23 +133,19 @@ export function McpSettings() {
   const handleImport = async () => {
     setImporting(true);
     setImportResult(null);
-    // AEX-P1-017：经 api.result 统一契约（原先裸 fetch 绕过鉴权/超时，且把非 2xx 当成功）
-    const res = await api.result.importMcpServers();
-    if (res.ok) {
-      const msg = `✅ 导入成功: ${res.data.imported?.join(', ') || '无'}`
-        + (res.data.errors?.length ? `\n❌ 错误: ${res.data.errors.join(', ')}` : '');
+    try {
+      const res = await (await fetch('/api/mcp/import', { method: 'POST', headers: { 'X-Requested-With': 'XMLHttpRequest', ...authHeaders() } })).json();
+      const msg = `✅ 导入成功: ${res.imported?.join(', ') || '无'}` + (res.errors?.length ? `\n❌ 错误: ${res.errors.join(', ')}` : '');
       setImportResult(msg);
       load();
-    } else {
-      setImportResult(`❌ 导入失败: ${res.error.message}`);
-    }
+    } catch (e: unknown) { setImportResult(`❌ 导入失败: ${(e instanceof Error ? e.message : String(e))}`); }
     setImporting(false);
     safeTimeout(() => setImportResult(null), 8000);
   };
 
   return (
     <div className="min-h-screen" style={{ background: 'var(--bg-base)', backgroundImage: 'var(--bg-gradient)' }}>
-      <div style={{ maxWidth: 'var(--content-standard)', margin: '0 auto', padding: '0 24px' }}>
+      <div style={{ maxWidth: '1100px', margin: '0 auto', padding: '0 24px' }}>
         <PageHeader title="MCP & Skill 管理中心" description="管理 MCP 服务器与 Skill 技能" icon={<Server size={22} />} color="#8b5cf6"
           action={<div className="flex gap-2">
             <button className="btn btn-ghost" onClick={handleImport} disabled={importing}>

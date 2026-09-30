@@ -1,7 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import {
   getMessages,
-  getMessagesSince,
   sendCommand,
   cancelCommand,
   subscribeMessages,
@@ -9,11 +8,10 @@ import {
   createClientCommandId,
   getSyncState,
   onSyncStateChange,
-  reconnectRebuilder,
   type SendResult,
   type LocalMessageState,
 } from '../api/supabase';
-import { advanceMessageCursor, mergeMessages, replaceOptimistic, resolveChatCompletion, type ChatMessage } from '../lib/message-store'
+import { mergeMessages, replaceOptimistic, resolveChatCompletion, type ChatMessage } from '../lib/message-store'
 import { getRemainingCommandTimeoutMs, matchesRemoteCommandReference, type RemoteCommandSnapshot } from '../lib/remote-command'
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -236,10 +234,6 @@ export default function MessageView({ conversationId, conversationTitle, onBack 
   const [newWhileAway, setNewWhileAway] = useState(false);
   // 发送中用户消息 id（§8：离线入队不删除，用于重发定位）
   const sendingUserMsgRef = useRef<string | null>(null);
-  // 增量拉取游标（AEX-P1-077：重连/降级按游标增量合并，不全量 reload）
-  const messageCursorRef = useRef<string | null>(null)
-  // 并发闸：初次加载 / 重连重建 / 降级轮询可能同时触发，合并为一次请求
-  const syncInFlightRef = useRef(false)
 
   const phaseIsActive = ['sending', 'queued', 'waiting', 'processing', 'streaming', 'timeout', 'cancelling', 'cancel_timeout'].includes(phase)
 
@@ -419,34 +413,11 @@ export default function MessageView({ conversationId, conversationTitle, onBack 
       const data = (res.data ?? []) as ViewMessage[];
       setMessages((prev) => mergeServerMessages(prev, data));
       setHasMoreOlder(data.length >= 100);
-      messageCursorRef.current = advanceMessageCursor(messageCursorRef.current, data);
       setLoadError(null);
     } catch (e) {
       setLoadError(e instanceof Error ? e.message : String(e));
     } finally {
       setLoading(false);
-    }
-  }, [conversationId, mergeServerMessages]);
-
-  /**
-   * 按游标增量补齐消息（AEX-P1-077）。
-   * 无游标（首次进入）退化为一次全量，之后一律走 created_at 之后的增量。
-   */
-  const syncMessagesIncrementally = useCallback(async () => {
-    if (syncInFlightRef.current) return;
-    syncInFlightRef.current = true;
-    const since = messageCursorRef.current;
-    try {
-      const res = since
-        ? await getMessagesSince(conversationId, since)
-        : await getMessages(conversationId, { limit: 100 });
-      if (res.error) return;
-      const data = (res.data ?? []) as ViewMessage[];
-      if (data.length === 0) return;
-      setMessages((prev) => mergeServerMessages(prev, data));
-      messageCursorRef.current = advanceMessageCursor(since, data);
-    } finally {
-      syncInFlightRef.current = false;
     }
   }, [conversationId, mergeServerMessages]);
 
@@ -466,7 +437,6 @@ export default function MessageView({ conversationId, conversationTitle, onBack 
     // §11 Realtime + Fetch 竞态：先建立 Realtime 再获取历史，merge 由 mergeMessages 统一处理
     const unsub = subscribeMessages(conversationId, (newMsg: ChatMessage) => {
       setMessages((prev) => mergeServerMessages(prev, [newMsg as ViewMessage]));
-      messageCursorRef.current = advanceMessageCursor(messageCursorRef.current, [newMsg]);
       // 从 tool_results 提取 reasoning 更新思考横条
       if (newMsg.tool_results) {
         try {
@@ -493,33 +463,29 @@ export default function MessageView({ conversationId, conversationTitle, onBack 
     const reference = activeCommandId === activeClientCommandId
       ? { serverId: null, clientCommandId: activeClientCommandId }
       : { serverId: activeCommandId, clientCommandId: activeClientCommandId }
-    // 双通道：Realtime+轮询兜底（在线） + 重连回源（断线期间事件丢失后）
-    const releaseStatus = subscribeRemoteCommandStatus(reference, settleRemoteCommand)
-    const releaseRebuild = reconnectRebuilder.registerCommand(reference, settleRemoteCommand)
-    return () => {
-      releaseStatus()
-      releaseRebuild()
-    }
+    return subscribeRemoteCommandStatus(reference, settleRemoteCommand)
   }, [activeClientCommandId, activeCommandId, settleRemoteCommand])
-
-  // AEX-P1-077：重连后按游标增量补齐断线期间的消息（不是全量 reload）
-  useEffect(() => {
-    return reconnectRebuilder.registerConversation(conversationId, syncMessagesIncrementally)
-  }, [conversationId, syncMessagesIncrementally])
 
   useEffect(() => {
     if (!conversationId) return
     if (syncStatus === 'connected') return
     let cancelled = false
+    let requestInFlight = false
     const pollMessages = async () => {
-      if (cancelled) return
+      if (cancelled || requestInFlight) return
+      requestInFlight = true
       try {
-        await syncMessagesIncrementally()
-      } catch { /* 忽略网络错误 */ }
+        const res = await getMessages(conversationId, { limit: 100 })
+        if (cancelled || res.error) return
+        const data = (res.data ?? []) as ViewMessage[]
+        setMessages((prev) => mergeServerMessages(prev, data))
+      } catch { /* 忽略网络错误 */ } finally {
+        requestInFlight = false
+      }
     }
     const interval = setInterval(() => { void pollMessages() }, 2000)
     return () => { cancelled = true; clearInterval(interval) }
-  }, [conversationId, syncMessagesIncrementally, syncStatus])
+  }, [conversationId, mergeServerMessages, syncStatus])
 
   // §8.4 条件跟随滚动
   const onScroll = () => {

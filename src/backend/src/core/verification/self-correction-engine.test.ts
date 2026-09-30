@@ -15,6 +15,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  SelfCorrectionEngine,
   createSelfCorrectionEngine,
   evaluateCompletionPolicy,
   type SelfCorrectionEngineOptions,
@@ -85,6 +86,7 @@ function buildOptions(overrides: {
     }),
   };
   const diagnose: DiagnoserExecutor = {
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
     diagnose: async (_input: SelfCorrectionInput, failure: string) => ({ diagnosis: `修复: ${failure}` }),
   };
   const finalJudge: FinalJudgeExecutor | undefined = overrides.judgeApproved !== undefined

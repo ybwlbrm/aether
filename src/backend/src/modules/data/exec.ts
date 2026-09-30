@@ -5,25 +5,6 @@ import { executeCommand } from '../../lib/command.js';
 import { isPathAllowed } from './utils.js';
 import { resolve, sep } from 'node:path';
 import { existsSync } from 'node:fs';
-import { logger } from '../../lib/logger.js';
-
-/** Windows 下强制终止进程树（P0-25：取消/超时必须真正停止 python 子进程） */
-function killProcessTree(pid: number): void {
-  try {
-    // taskkill /T（树）/F（强制）/PID —— 杀掉整个子进程树
-    require('child_process').execFileSync('taskkill', ['/PID', String(pid), '/T', '/F'], {
-      stdio: 'ignore',
-      windowsHide: true,
-      timeout: 5000,
-    });
-  } catch {
-    try {
-      process.kill(pid);
-    } catch {
-      // 目标进程已退出时 kill 抛 ESRCH，正是期望结果，无需处理。
-    }
-  }
-}
 
 /** 项目执行相关路由 */
 export function registerExecRoutes(app: FastifyInstance, config: BackendConfig): void {
@@ -109,34 +90,16 @@ export function registerExecRoutes(app: FastifyInstance, config: BackendConfig):
 
     // py 类型：spawn + shell:false 防命令注入（不再用 exec 拼字符串）
     if (body.type === 'py') {
-      return new Promise((resolvePromise) => {
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 30000);
-        if (typeof timeoutId.unref === 'function') timeoutId.unref();
-        const child = spawn('python', [targetPath], {
-          windowsHide: true,
-          shell: false,
-          signal: controller.signal,
-        });
-        let settled = false;
-        const settle = (value: unknown) => {
-          if (settled) return;
-          settled = true;
-          clearTimeout(timeoutId);
-          resolvePromise(value);
-        };
-        // P0-25：取消/超时 → AbortSignal → 真正终止 python 子进程树（不只是 race 拒绝）
-        controller.signal.addEventListener('abort', () => {
-          if (child.pid !== undefined) killProcessTree(child.pid);
-        }, { once: true });
+      return new Promise((resolve) => {
+        const child = spawn('python', [targetPath], { windowsHide: true, timeout: 30000, shell: false });
         let stdout = '', stderr = '';
         child.stdout?.on('data', (d: Buffer) => { stdout += d.toString(); });
         child.stderr?.on('data', (d: Buffer) => { stderr += d.toString(); });
         child.on('close', (code) => {
-          settle({ success: code === 0, stdout: stdout.trim(), stderr: stderr.trim(), exitCode: code ?? 0 });
+          resolve({ success: code === 0, stdout: stdout.trim(), stderr: stderr.trim(), exitCode: code ?? 0 });
         });
         child.on('error', (err) => {
-          settle({ success: false, stdout: '', stderr: err.message, exitCode: 1 });
+          resolve({ success: false, stdout: '', stderr: err.message, exitCode: 1 });
         });
       });
     }
@@ -152,13 +115,7 @@ export function registerExecRoutes(app: FastifyInstance, config: BackendConfig):
             return { error: '脚本含危险操作模式，拒绝执行', code: 'BAT_DANGEROUS_CONTENT' };
           }
         }
-      } catch (e: unknown) {
-        // AEX-P2-004 分类：bug（已修复）—— 此前读不到 bat 内容时静默「继续执行」，
-        // 等于让 P0-5 危险内容扫描 fail-open：被占用/编码异常的脚本可绕过检查直接执行。
-        // 改为 fail-closed：扫描是执行的前置条件，读不到内容就不执行。
-        logger.error({ event: 'data.bat_scan_unreadable', err: e, path: targetPath }, '无法读取 bat 脚本内容，拒绝执行（安全扫描无法完成）');
-        return { error: '无法读取脚本内容，安全检查未通过，已拒绝执行', code: 'BAT_SCAN_FAILED' };
-      }
+      } catch { /* 读取失败，继续执行（文件可能被锁） */ }
       // P0-5: 使用 executeCommand 执行 bat 文件
       const settings = await getSettings();
       const permLevel = settings.permissionLevel ?? 2;

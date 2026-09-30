@@ -1,8 +1,7 @@
 import { useState, useRef } from 'react';
 import { Download, Upload } from 'lucide-react';
 import { confirm as confirmDialog } from '../../components/ui/confirm-dialog';
-import { api } from '../../api/client';
-import { errorMessage } from '../../api/contract';
+import { api, authHeaders } from '../../api/client';
 
 // P2-3: 从 Settings.tsx 拆分出的数据管理组件
 export function DataManage() {
@@ -54,7 +53,7 @@ export function DataManage() {
       URL.revokeObjectURL(url);
       setMsg('✅ 导出成功');
     } catch (e: unknown) {
-      setMsg('❌ 导出失败: ' + errorMessage(e));
+      setMsg('❌ 导出失败: ' + (e instanceof Error ? e.message : String(e)));
     }
     setExporting(false);
   };
@@ -90,16 +89,24 @@ export function DataManage() {
           const { supabaseKey: _sk, ...safeConfig } = f.syncConfig;
           localStorage.setItem('syncConfig', JSON.stringify({ ...safeConfig, connected: !!f.syncConfig.connected }));
         }
-        // 导入后端数据（AEX-P1-017：经 api.result 统一契约，不再裸 fetch 绕过鉴权/超时）
-        const res = await api.result.importAll(data.backend || {});
-        if (!res.ok) throw new Error(res.error.message);
+        // 导入后端数据
+        const res = await fetch('/api/import/all', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest', ...authHeaders() },
+          body: JSON.stringify(data.backend || {}),
+        });
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({}));
+          throw new Error(err.error?.message || `导入失败: ${res.status}`);
+        }
+        const result = await res.json();
         // 通知其他页面刷新数据
         localStorage.setItem('sync_data_updated', Date.now().toString());
         window.dispatchEvent(new CustomEvent('sync-data-changed', { detail: { time: Date.now() } }));
-        const counts = res.data.importedCounts || {};
+        const counts = result.importedCounts || {};
         setMsg(`✅ 导入成功（providers: ${counts.providers ?? 0}, projects: ${counts.projects ?? 0}, conversations: ${counts.conversations ?? 0}, media: ${counts.media ?? 0}, documents: ${counts.documents ?? 0}）`);
       } catch (e: unknown) {
-        setMsg('❌ 导入失败: ' + errorMessage(e));
+        setMsg('❌ 导入失败: ' + (e instanceof Error ? e.message : String(e)));
       }
       setImporting(false);
       e.target.value = '';

@@ -64,8 +64,8 @@ export function AIAgentInput({ onSend, isProcessing }: AIAgentInputProps) {
       <input ref={fileInputRef} type="file" multiple className="hidden" onChange={handleFileChange} />
       <input ref={imageInputRef} type="file" accept="image/*" multiple className="hidden" onChange={handleFileChange} />
 
-      {/* Input: 140px, 12px radius, 24px padding, centered — AEX-P0-047: 宽度收敛到语义 token */}
-      <div className="mx-auto" style={{ maxWidth: 'var(--content-readable)', marginTop: 'var(--space-8)', marginBottom: 'var(--space-8)' }}>
+      {/* Input: 140px, 12px radius, 24px padding, centered */}
+      <div className="mx-auto" style={{ maxWidth: '900px', marginTop: '32px', marginBottom: '32px' }}>
         <div className="glass-card" style={{ borderRadius: '12px', border: '1px solid var(--input-border)', overflow: 'hidden', minHeight: '140px' }}>
           <textarea
             ref={inputRef}

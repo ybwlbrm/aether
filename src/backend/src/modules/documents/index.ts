@@ -11,10 +11,6 @@ import { fileURLToPath } from 'node:url';
 import { getFirstAvailableProvider } from '../../lib/provider.js';
 import { getSettings } from '../../lib/dal.js';
 import { buildModelRuntime, type ModelRequest } from '../../core/models/index.js';
-import { logger } from '../../lib/logger.js';
-// AEX-P0-29: 统一 path-guard —— resolvePhysicalPath 用 realpath 解析物理路径，
-// 防 allowedDirs 内 junction/symlink 指向外部目录的逃逸（替代自建 resolve+startsWith）
-import { resolvePhysicalPath } from '../../lib/path-guard.js';
 
 // 懒加载 pptxgenjs 和 docx
 let _pptxgen: typeof import('pptxgenjs')['default'] | null = null;
@@ -37,23 +33,6 @@ const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{
 /** Oracle-1: 纵深防御 — 下载/预览/删除路径必须在 allowedDirs 内 */
 interface SlideItem { title: string; content: string; }
 interface SectionItem { heading: string; body: string; }
-
-/**
- * AEX-P0-29: 文档路径统一安全校验 —— 物理路径解析（realpath）后必须落在 docDir 内。
- * 替代自建 `resolve + startsWith` 校验：后者无法识破 docDir 内 junction/symlink
- * 指向外部目录的逃逸。路径不存在（即将创建）时 resolvePhysicalPath 回退父目录解析。
- */
-function isDocPathSafe(candidate: string, baseDir: string): boolean {
-  const physical = resolvePhysicalPath(candidate);
-  const basePhysical = resolvePhysicalPath(baseDir);
-  const prefix = basePhysical.endsWith(sep) ? basePhysical : basePhysical + sep;
-  return physical.startsWith(prefix) || physical === basePhysical;
-}
-
-/** 下载/删除重建路径的 docDir 内校验（含 symlink 逃逸防护） */
-function assertDocPathInDir(filePath: string, baseDir: string): boolean {
-  return isDocPathSafe(filePath, baseDir);
-}
 
 export function registerDocumentRoutes(app: FastifyInstance, config: BackendConfig): void {
   const db = getDb();
@@ -183,8 +162,9 @@ export function registerDocumentRoutes(app: FastifyInstance, config: BackendConf
     // 根据文档类型确定预期扩展名
     const expectedExt = doc.type === 'ppt' ? '.pptx' : '.docx';
     const filePath = resolve(docDir, `${id}${expectedExt}`);
-    // SEC-004: 校验重建路径在 docDir 内（AEX-P0-29: 统一 path-guard —— realpath 防 junction/symlink 逃逸）
-    if (!assertDocPathInDir(filePath, docDir)) {
+    // SEC-004: 校验重建路径在 docDir 内
+    const docDirResolved = resolve(docDir);
+    if (!filePath.startsWith(docDirResolved + sep)) {
       return reply.code(403).send({ error: '路径不在允许目录内' });
     }
     // 兼容旧数据：若重建路径不存在，尝试另一种扩展名（迁移场景）
@@ -192,7 +172,7 @@ export function registerDocumentRoutes(app: FastifyInstance, config: BackendConf
     if (!existsSync(finalPath)) {
       const altExt = doc.type === 'ppt' ? '.docx' : '.pptx';
       const altPath = resolve(docDir, `${id}${altExt}`);
-      if (existsSync(altPath) && assertDocPathInDir(altPath, docDir)) {
+      if (existsSync(altPath) && altPath.startsWith(docDirResolved + sep)) {
         finalPath = altPath;
       }
     }
@@ -205,9 +185,7 @@ export function registerDocumentRoutes(app: FastifyInstance, config: BackendConf
       reply.header('Content-Length', buffer.length);
       return reply.send(buffer);
     } catch (e: unknown) {
-      // AEX-P2-004 分类：recoverable —— 已定位文档行但文件不可读（丢失/损坏/被占用），
-      // 对外统一 404，不暴露磁盘细节。
-      logger.warn({ event: 'documents.download_failed', err: e, documentId: id }, '文档文件不可读，返回 404');
+      console.error('下载文档失败:', (e instanceof Error ? e.message : String(e)));
       return reply.code(404).send({ error: '文件不存在或已损坏' });
     }
   });
@@ -229,11 +207,7 @@ export function registerDocumentRoutes(app: FastifyInstance, config: BackendConf
     if (existsSync(previewPath)) {
       try {
         return JSON.parse(readFileSync(previewPath, 'utf-8'));
-      } catch {
-        // AEX-P2-004 分类：intentional fallback —— preview.json 损坏时降级为「无预览数据」响应，
-        // 由下方 empty:true 分支告知前端重新生成。
-        logger.warn({ event: 'documents.preview_unreadable', documentId: id }, '预览数据损坏，降级为无预览响应');
-      }
+      } catch { /* fall through */ }
     }
     // 没有预览数据 — 返回文档基本信息 + 提示
     return { id, type: doc.type, name: doc.name, slides: [], sections: [], empty: true, message: '该文档暂无预览数据（请重新生成）' };
@@ -246,29 +220,20 @@ export function registerDocumentRoutes(app: FastifyInstance, config: BackendConf
     const { id } = request.params as { id: string };
     // P1-9: 非 UUID 格式直接 404，防止路径穿越
     if (!UUID_PATTERN.test(id)) return reply.code(404).send({ error: '文档不存在' });
-    const body = (request.body ?? {}) as Record<string, unknown>;
+    const body = request.body as any;
     try {
-      const name = typeof body.name === 'string' ? body.name : '';
-      db.update(documents).set({ name, updatedAt: new Date().toISOString() }).where(eq(documents.id, id)).run();
+      db.update(documents).set({ name: body.name, updatedAt: new Date().toISOString() }).where(eq(documents.id, id)).run();
       // 同步更新 preview.json 中的名称，避免预览弹窗标题不一致
       const previewPath = resolve(docDir, `${id}.preview.json`);
       if (existsSync(previewPath)) {
         try {
-          const preview = JSON.parse(readFileSync(previewPath, 'utf-8')) as Record<string, unknown>;
-          preview.name = name;
+          const preview = JSON.parse(readFileSync(previewPath, 'utf-8'));
+          preview.name = body.name;
           writeFileSync(previewPath, JSON.stringify(preview, null, 2));
-        } catch {
-          // AEX-P2-004 分类：intentional fallback —— preview.json 损坏时保留原文件；
-          // DB 重命名已成功，不因旁路预览缓存回滚。
-          logger.warn({ event: 'documents.preview_rename_skipped', documentId: id }, '预览数据损坏，跳过名称同步');
-        }
+        } catch { /* preview 文件损坏时忽略 */ }
       }
       return { success: true };
-    } catch (e: unknown) {
-      // AEX-P2-004 分类：recoverable —— 已转换为显式错误响应，由统一错误处理兜底 500。
-      logger.error({ event: 'documents.rename_failed', err: e, documentId: id }, '重命名文档失败');
-      return { error: '操作失败，请重试' };
-    }
+    } catch (e: unknown) { console.error('[Documents] 操作失败:', (e instanceof Error ? e.message : String(e)) || e); return { error: '操作失败，请重试' }; }
   });
 
   // 删除文档
@@ -289,51 +254,32 @@ export function registerDocumentRoutes(app: FastifyInstance, config: BackendConf
       // 清理预览文件
       const previewPath = resolve(docDir, `${id}.preview.json`);
       if (existsSync(previewPath)) {
-        try {
-          unlinkSync(previewPath);
-        } catch {
-          // AEX-P2-004 分类：ignored —— 预览缓存删除失败（文件被占用/已消失），
-          // DB 行已删除，残留缓存由下次重生成覆盖。
-          logger.debug({ event: 'documents.preview_cleanup_ignored', documentId: id }, '预览缓存删除失败，已忽略');
-        }
+        try { unlinkSync(previewPath); } catch (_e: unknown) { /* ignore - intentional */ }
       }
-      // SEC-004: 运行时从 id 重建文件路径，不信任 DB 中的 row.path（AEX-P0-29: 统一 path-guard）
+      // SEC-004: 运行时从 id 重建文件路径，不信任 DB 中的 row.path
       if (row) {
         const expectedExt = row.type === 'ppt' ? '.pptx' : '.docx';
         const filePath = resolve(docDir, `${id}${expectedExt}`);
-        if (assertDocPathInDir(filePath, docDir) && existsSync(filePath)) {
-          try {
-            unlinkSync(filePath);
-          } catch {
-            // AEX-P2-004 分类：ignored —— 文档主体文件删除失败不影响「DB 行已删除」的结果。
-            logger.debug({ event: 'documents.file_cleanup_ignored', documentId: id, path: filePath }, '文档文件删除失败，已忽略');
-          }
+        const docDirResolved = resolve(docDir);
+        if (filePath.startsWith(docDirResolved + sep) && existsSync(filePath)) {
+          try { unlinkSync(filePath); } catch (_e: unknown) { /* ignore - intentional */ }
         } else {
           // 兼容旧数据：尝试另一种扩展名
           const altExt = row.type === 'ppt' ? '.docx' : '.pptx';
           const altPath = resolve(docDir, `${id}${altExt}`);
-          if (assertDocPathInDir(altPath, docDir) && existsSync(altPath)) {
-            try {
-              unlinkSync(altPath);
-            } catch {
-              // AEX-P2-004 分类：ignored —— 同上，兼容分支的文件清理失败不阻断删除。
-              logger.debug({ event: 'documents.file_cleanup_ignored', documentId: id, path: altPath }, '旧扩展名文档文件删除失败，已忽略');
-            }
+          if (altPath.startsWith(docDirResolved + sep) && existsSync(altPath)) {
+            try { unlinkSync(altPath); } catch (_e: unknown) { /* ignore - intentional */ }
           }
         }
       }
       return { success: true };
-    } catch (e: unknown) {
-      // AEX-P2-004 分类：recoverable —— 转换为显式错误响应，不向上抛。
-      logger.error({ event: 'documents.delete_failed', err: e, documentId: id }, '删除文档失败');
-      return { error: '删除失败，请重试' };
-    }
+    } catch (e: unknown) { console.error('删除文档失败:', (e instanceof Error ? e.message : String(e)) || e); return { error: '删除失败，请重试' }; }
   });
 
   // ---------- 辅助函数 ----------
 
   /** 保存预览数据（供网页内查看 DOC/PPT 内容） */
-  async function writePreviewData(config: BackendConfig, id: string, type: string, name: string, items: (SlideItem | SectionItem)[]) {
+  async function writePreviewData(config: BackendConfig, id: string, type: string, name: string, items: any[]) {
     const previewDir = resolve(config.dataDir, 'documents');
     if (!existsSync(previewDir)) mkdirSync(previewDir, { recursive: true });
     const previewPath = resolve(previewDir, `${id}.preview.json`);
@@ -346,8 +292,8 @@ export function registerDocumentRoutes(app: FastifyInstance, config: BackendConf
 
 // ---------- AI 自动生成 ----------
 
-/** 从 AI 返回文本中提取 JSON 对象（兼容 markdown 代码块包裹）——返回 unknown，调用方负责字段验证 */
-export function extractJson(text: string): unknown {
+/** 从 AI 返回文本中提取 JSON 对象（兼容 markdown 代码块包裹） */
+export function extractJson(text: string): any {
   if (!text) return null;
   const cleaned = text.replace(/```(?:json)?/gi, '').trim();
   const start = cleaned.indexOf('{');
@@ -355,19 +301,14 @@ export function extractJson(text: string): unknown {
   if (start >= 0 && end > start) {
     try {
       return JSON.parse(cleaned.slice(start, end + 1));
-    } catch {
-      // AEX-P2-004 分类：intentional fallback —— 对象解析失败时继续尝试数组形态的 JSON。
-    }
+    } catch { /* 继续尝试下面的方式 */ }
   }
   const arrStart = cleaned.indexOf('[');
   const arrEnd = cleaned.lastIndexOf(']');
   if (arrStart >= 0 && arrEnd > arrStart) {
     try {
       return JSON.parse(cleaned.slice(arrStart, arrEnd + 1));
-    } catch {
-      // AEX-P2-004 分类：intentional fallback —— 数组形态也解析失败即视为「模型未返回 JSON」，
-      // 返回 null 交由调用方走 fallbackSlides/fallbackSections。
-    }
+    } catch { /* 忽略 */ }
   }
   return null;
 }
@@ -406,17 +347,15 @@ async function generateSlidesWithAI(title: string, encryptionKey: string): Promi
       const response = await runtime.complete(request);
       const raw = response.content.trim();
       const parsed = extractJson(raw);
-      const parsedObj = parsed && typeof parsed === 'object' ? parsed as Record<string, unknown> : null;
-      if (parsedObj && Array.isArray(parsedObj.slides)) {
-        const slides = parsedObj.slides
-          .filter((s): s is Record<string, unknown> => !!s && typeof s === 'object' && typeof (s as Record<string, unknown>).title === 'string' && String((s as Record<string, unknown>).title).trim().length > 0)
-          .map((s) => ({ title: String((s as Record<string, unknown>).title).trim(), content: typeof (s as Record<string, unknown>).content === 'string' ? (s as Record<string, unknown>).content as string : '' }));
+      if (parsed && Array.isArray(parsed.slides)) {
+        const slides = parsed.slides
+          .filter((s: any) => s && typeof s.title === 'string' && s.title.trim())
+          .map((s: any) => ({ title: s.title.trim(), content: typeof s.content === 'string' ? s.content : '' }));
         if (slides.length > 0) return slides;
       }
     }
   } catch (e: unknown) {
-    // AEX-P2-004 分类：recoverable —— AI 生成失败降级为内置大纲，生成流程不中断。
-    logger.warn({ event: 'documents.ai_slides_failed', err: e, title }, 'AI 生成 PPT 内容失败，使用默认大纲');
+    console.error('AI 生成 PPT 内容失败，使用默认内容:', (e instanceof Error ? e.message : String(e)));
   }
   return fallbackSlides(title);
 }
@@ -456,17 +395,15 @@ async function generateSectionsWithAI(title: string, description: string, encryp
       const response = await runtime.complete(request);
       const raw = response.content.trim();
       const parsed = extractJson(raw);
-      const parsedObj = parsed && typeof parsed === 'object' ? parsed as Record<string, unknown> : null;
-      if (parsedObj && Array.isArray(parsedObj.sections)) {
-        const sections = parsedObj.sections
-          .filter((s): s is Record<string, unknown> => !!s && typeof s === 'object' && typeof (s as Record<string, unknown>).heading === 'string' && String((s as Record<string, unknown>).heading).trim().length > 0)
-          .map((s) => ({ heading: String((s as Record<string, unknown>).heading).trim(), body: typeof (s as Record<string, unknown>).body === 'string' ? (s as Record<string, unknown>).body as string : '' }));
+      if (parsed && Array.isArray(parsed.sections)) {
+        const sections = parsed.sections
+          .filter((s: any) => s && typeof s.heading === 'string' && s.heading.trim())
+          .map((s: any) => ({ heading: s.heading.trim(), body: typeof s.body === 'string' ? s.body : '' }));
         if (sections.length > 0) return sections;
       }
     }
   } catch (e: unknown) {
-    // AEX-P2-004 分类：recoverable —— AI 生成失败降级为内置大纲，生成流程不中断。
-    logger.warn({ event: 'documents.ai_sections_failed', err: e, title }, 'AI 生成 DOC 内容失败，使用默认大纲');
+    console.error('AI 生成 DOC 内容失败，使用默认内容:', (e instanceof Error ? e.message : String(e)));
   }
   return fallbackSections(title, description);
 }

@@ -157,10 +157,7 @@ export async function executeBuiltinCommand(
           try {
             const stat = statSync(fullPath);
             if (stat.isFile()) results.push(fullPath);
-          } catch {
-            // AEX-P2-004 分类：ignored —— existsSync 与 statSync 之间的 TOCTOU 竞态
-            // （文件被并发删除）。属补全路径的正常抖动，串内不加日志以免刷屏。
-          }
+          } catch { /* ignore */ }
         }
       }
       return results.join('\n') || `未找到: ${args[0]}`;

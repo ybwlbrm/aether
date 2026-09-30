@@ -2,8 +2,6 @@
 import { parseToolArgsSafe, buildChatRequestBody } from '../../lib/stream-translate.js';
 import { drainDirectives } from '../../lib/inbox.js';
 import { buildModelRuntime, type ModelRequest } from '../../core/models/index.js';
-// P0-35: ProviderRuntimeRegistry —— 按真实 providerId 复用 provider 级 circuitBreaker/retryPolicy
-import { getOrCreateProviderRuntime } from '../../lib/model-runtime-bridge.js';
 // P0-01 收口：统一生产工具执行器（Agent → ToolRuntime → PolicyEngine → Approval → ToolExecutor）
 import { createProductionToolExecutor, type ProductionToolExecutor } from '../../lib/production-tool-executor.js';
 // §30/§31 收口：预算统一来源 —— AgentDefinition limits → budgetFromAgentLimits（禁止 30/50/128000 散落硬编码）
@@ -23,8 +21,6 @@ export interface ToolLoopConfig {
   baseUrl: string;
   apiKey: string;
   activeModel: string;
-  /** P0-35: 真实 provider id —— 使熔断器按 providerId 跨请求累积，而非每请求新建 */
-  providerId: string;
   activeTools: Array<{ type: 'function'; function: { name: string; description?: string; parameters?: unknown } }>;
   maxTurns: number;
   clientAbortSignal: AbortSignal;
@@ -79,10 +75,6 @@ export interface ToolLoopResult {
   turnsUsed: number;
   /** 已用时长 ms（前端循环 UI 显示） */
   elapsedMs: number;
-  /** P0-008: 最新执行检查点（崩溃恢复时判断"已重试 N 次"，随终态持久化到 runs.metadata） */
-  checkpoint?: import('../../core/runtime/execution-checkpoint.js').ExecutionCheckpoint;
-  /** P0-008: 任务级自动重试次数（崩溃恢复时可观测） */
-  retryCount: number;
 }
 
 /** 整改计划第 5 章（P1）：循环预算对象 —— 超过任一预算即停止并写 budget_exceeded */
@@ -160,7 +152,6 @@ export async function executeToolLoop(
     db,
     body,
     budget: budgetOverride,
-    providerId,
   } = config;
 
   // 整改计划第 5 章（P1）：循环预算 —— 超过轮数/时长/token/工具调用/费用任一预算即停止
@@ -192,13 +183,10 @@ export async function executeToolLoop(
     },
   });
 
-  // P0-35: 构建 ModelRuntime（统一经 ModelRuntime → ProviderAdapter → RetryPolicy）。
-  // 关键修复：经 ProviderRuntimeRegistry 按真实 providerId 获取 provider 级实例，
-  // 复用同一 circuitBreaker/retryPolicy —— 熔断状态跨请求累积（CIRCUIT_OPEN 生效）。
-  // 此前每请求 buildModelRuntime 新建熔断器，consecutiveFailures 永远到不了阈值。
+  // 构建 ModelRuntime（统一经 ModelRuntime → ProviderAdapter → RetryPolicy）
   const providerConfig = {
-    id: providerId || 'conversation',
-    name: providerId || 'conversation',
+    id: 'conversation',
+    name: 'conversation',
     type: 'openai',
     apiKey,
     baseUrl,
@@ -206,7 +194,7 @@ export async function executeToolLoop(
     models: [activeModel],
     capabilities: ['text', 'tool_calling'],
   };
-  const runtime = getOrCreateProviderRuntime(providerConfig).runtime;
+  const runtime = buildModelRuntime(providerConfig);
 
   // ExecutionLoopDeps：唯一循环控制器的依赖注入（第四部分收口）
   const deps: ExecutionLoopDeps = {
@@ -330,8 +318,8 @@ export async function executeToolLoop(
         default: break;
       }
     },
-    // 完成判定（AEX-P0-001）：不注入 isTaskComplete —— Loop 模式由
-    // evaluateTaskCompletion 依证据判定，"有文本"不等于任务完成
+    // 完成判定：缺省有文本即完成（与 Normal 一致）；上层可通过 isTaskComplete 覆盖 Loop 语义
+    isTaskComplete: (resp) => resp.content.trim() !== '',
   };
 
   // inbox 指令（steer/followup）：运行中用户补充的指令 → 注入为初始消息尾部（Loop 启动前读取一次）
@@ -385,7 +373,5 @@ export async function executeToolLoop(
     budgetExceeded,
     turnsUsed: result.turnsUsed,
     elapsedMs: Date.now() - loopStartedAt,
-    checkpoint: result.checkpoint,
-    retryCount: result.retryCount,
   };
 }

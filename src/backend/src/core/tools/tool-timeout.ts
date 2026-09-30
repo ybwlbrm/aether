@@ -12,12 +12,8 @@ import { CancellationError, isCancellationError } from '../runtime/index.js';
  * Options for executeWithTimeout.
  */
 export interface ExecuteWithTimeoutOptions<T> {
-  /**
-   * Function to execute. Receives the combined abort signal so the tool body
-   * can cancel its own underlying work (P0-25): a timeout/cancel must abort
-   * the tool itself, not just reject the awaiting race.
-   */
-  fn: (signal: AbortSignal) => Promise<T>;
+  /** Function to execute */
+  fn: () => Promise<T>;
   /** Timeout in milliseconds (overrides default) */
   timeoutMs?: number;
   /** Optional external abort signal */
@@ -74,7 +70,7 @@ export class ToolTimeoutManager {
     const combinedSignal = this.#combineSignals([timeoutController.signal, signal]);
 
     try {
-      // Pass the combined signal into the tool body so it can abort its own work.
+      // Wrap the function to respect the combined signal
       const result = await this.#runWithSignal(fn, combinedSignal, toolName);
       return result;
     } finally {
@@ -134,7 +130,7 @@ export class ToolTimeoutManager {
    * Runs a function with abort signal support.
    */
   async #runWithSignal<T>(
-    fn: (signal: AbortSignal) => Promise<T>,
+    fn: () => Promise<T>,
     signal: AbortSignal,
     toolName: string
   ): Promise<T> {
@@ -157,9 +153,7 @@ export class ToolTimeoutManager {
     });
 
     try {
-      // Give the tool the combined signal so it can abort its own underlying
-      // work (P0-25): on timeout/cancel, both the race AND the tool body see it.
-      return await Promise.race([fn(signal), abortPromise]);
+      return await Promise.race([fn(), abortPromise]);
     } catch (error) {
       // Re-throw typed errors as-is (ToolError / CancellationError)
       if (error instanceof ToolError || isCancellationError(error)) {

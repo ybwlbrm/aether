@@ -6,8 +6,6 @@ import * as schema from '../../db/schema/index.js';
 import type { AgentDef } from './agent-definitions.js';
 import type { AgentLimitsLike } from '../../core/runtime/execution-loop.js';
 import { buildModelRuntime, type ModelRequest } from '../../core/models/index.js';
-// P0-35: ProviderRuntimeRegistry —— agent 子循环同样按真实 providerId 复用熔断器
-import { getOrCreateProviderRuntime } from '../../lib/model-runtime-bridge.js';
 import { buildChatRequestBody, parseToolArgsSafe } from '../../lib/stream-translate.js';
 import { buildToolPayload } from '@pacc/shared';
 import { filterToolsByWebSearch } from '../../lib/tool-registry.js';
@@ -62,8 +60,6 @@ type Db = SQLJsDatabase<typeof schema>
 export interface ToolLoopContext {
   agent: AgentWithLimits;
   ep: { baseUrl: string; apiKey: string; model: string };
-  /** P0-35: 真实 provider id —— 使熔断器按 providerId 跨请求累积（agent 子循环同样收口） */
-  providerId?: string;
   agentMessages: Array<Record<string, unknown>>;
   toolListForThisAgent: FunctionTool[];
   allTools: FunctionTool[];
@@ -99,10 +95,6 @@ export interface ToolLoopResult {
   toolCallCount: number;
   /** 流中断/失败标记（§16：断流不得伪装成功 —— 上层据此标记 agent.error 而非 agent.completed） */
   interrupted?: boolean;
-  /** P0-008: 最新执行检查点（崩溃恢复时判断"已重试 N 次"，随终态持久化到 runs.metadata） */
-  checkpoint?: import('../../core/runtime/execution-checkpoint.js').ExecutionCheckpoint;
-  /** P0-008: 任务级自动重试次数 */
-  retryCount: number;
 }
 
 const FORCE_SUMMARY_PROMPT = '请基于上面所有工具执行的结果，给出完整的总结与最终答复。如果任务还没完成，请继续说明还需要做什么。'
@@ -164,13 +156,10 @@ export async function runAgentToolLoop(ctx: ToolLoopContext): Promise<ToolLoopRe
     },
   });
 
-  // P0-35: Build ModelRuntime from endpoint config (outside loop for reuse in force summary).
-  // 关键修复：经 ProviderRuntimeRegistry 按真实 providerId 复用 provider 级
-  // circuitBreaker/retryPolicy —— 熔断状态跨请求累积；此前用伪 id 'ep' 每请求
-  // 新建熔断器，consecutiveFailures 永远到不了阈值（CIRCUIT_OPEN 死代码）。
+  // Build ModelRuntime from endpoint config (outside loop for reuse in force summary)
   const providerConfig = {
-    id: ctx.providerId || 'ep',
-    name: ctx.providerId || 'endpoint',
+    id: 'ep',
+    name: 'endpoint',
     type: 'openai',
     apiKey: ctx.ep.apiKey,
     baseUrl: ctx.ep.baseUrl,
@@ -178,7 +167,7 @@ export async function runAgentToolLoop(ctx: ToolLoopContext): Promise<ToolLoopRe
     models: [ctx.ep.model],
     capabilities: ['text', 'tool_calling'],
   };
-  const runtime = getOrCreateProviderRuntime(providerConfig).runtime;
+  const runtime = buildModelRuntime(providerConfig);
 
   // ExecutionLoopDeps：唯一循环控制器的依赖注入（第四部分收口）
   const deps: ExecutionLoopDeps = {
@@ -320,8 +309,8 @@ export async function runAgentToolLoop(ctx: ToolLoopContext): Promise<ToolLoopRe
         default: break;
       }
     },
-    // 完成判定（AEX-P0-001）：不注入 isTaskComplete —— Loop 模式由
-    // evaluateTaskCompletion 依证据判定，"有文本"不等于任务完成
+    // 完成判定：缺省有文本即完成（与 Normal 一致）
+    isTaskComplete: (resp) => resp.content.trim() !== '',
   };
 
   // inbox 指令（steer/followup）：运行中用户补充的指令 → 注入为初始消息尾部（Loop 启动前读取一次）
@@ -363,7 +352,7 @@ export async function runAgentToolLoop(ctx: ToolLoopContext): Promise<ToolLoopRe
            ? 'AI 执行失败'
            : '⚠️ 响应流中断（未收到完整结束标记）'
      }
-     return { agentReply, agentTokens, lastToolResult, toolCallCount, interrupted: true, checkpoint: result.checkpoint, retryCount: result.retryCount }
+     return { agentReply, agentTokens, lastToolResult, toolCallCount, interrupted: true }
    }
 
    // 去重：若 AI 回复原样复述了工具执行结果，替换为简短提示（避免白字+绿框重复显示）
@@ -419,5 +408,5 @@ export async function runAgentToolLoop(ctx: ToolLoopContext): Promise<ToolLoopRe
     ? lastToolResult.slice(0, 2000)
     : '';
 
-  return { agentReply, agentTokens, lastToolResult: toolSummary, toolCallCount, checkpoint: result.checkpoint, retryCount: result.retryCount };
+  return { agentReply, agentTokens, lastToolResult: toolSummary, toolCallCount };
 }

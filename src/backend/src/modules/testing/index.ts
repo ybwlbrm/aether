@@ -4,24 +4,21 @@ import { randomUUID } from 'node:crypto';
 import { writeFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { resolve, basename } from 'node:path';
 import { URL } from 'node:url';
-import { logger } from '../../lib/logger.js';
-// AEX-P0-26: 与全站出站请求统一 —— 经 safe-fetch 的 DNS 解析级校验（防 DNS rebinding，
-// 不能只查 URL 字符串），替代原 testing 模块自建的字符串级 isSafeTestUrl
-import { assertPublicResolve } from '../../lib/safe-fetch.js';
-import type { Browser, ConsoleMessage, Page } from 'playwright';
 
-/**
- * AEX-P0-26: 校验测试 URL 为可公网访问的 http(s) 地址。
- * 委托 safe-fetch 的 assertPublicResolve —— 真实 DNS 解析 + 私网/回环/链路本地/元数据
- * IP 全拒 + 重定向跳转逐跳校验。原自建 isSafeTestUrl 只做字符串匹配，无法防 DNS rebinding。
- */
-async function assertSafeTestUrl(raw: string): Promise<{ ok: true } | { ok: false; reason: string }> {
-  try {
-    await assertPublicResolve(raw);
-    return { ok: true };
-  } catch (e: unknown) {
-    return { ok: false, reason: e instanceof Error ? e.message : String(e) };
+/** P0-1: SSRF 防护 — 禁止本地/内网/file 协议 URL */
+function isSafeTestUrl(raw: string): { ok: boolean; reason?: string } {
+  let u: URL;
+  try { u = new URL(raw); } catch { return { ok: false, reason: '非法 URL 格式' }; }
+  if (u.protocol !== 'http:' && u.protocol !== 'https:') {
+    return { ok: false, reason: `禁止协议: ${u.protocol}（仅允许 http/https）` };
   }
+  const host = u.hostname.toLowerCase();
+  const BLOCKED = ['127.0.0.1', 'localhost', '0.0.0.0', '::1', '169.254.169.254', 'metadata.google.internal'];
+  if (BLOCKED.includes(host)) return { ok: false, reason: '禁止访问本地/元数据地址' };
+  if (/^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(host)) {
+    return { ok: false, reason: '禁止访问私网地址' };
+  }
+  return { ok: true };
 }
 
 // SEC-025 修复：测试运行会拉起 Chromium（重资源、有外网访问面），必须限流。
@@ -69,8 +66,8 @@ export function registerTestingRoutes(app: FastifyInstance, config: BackendConfi
       return reply.code(429).send({ error: '已有测试正在运行，请等待其完成' });
     }
 
-    // AEX-P0-26: SSRF 校验 —— DNS 解析级（防 rebinding），替代原字符串级 isSafeTestUrl
-    const urlCheck = await assertSafeTestUrl(body.url);
+    // P0-1: SSRF 校验
+    const urlCheck = isSafeTestUrl(body.url);
     if (!urlCheck.ok) {
       return reply.code(400).send({ error: urlCheck.reason });
     }
@@ -81,13 +78,13 @@ export function registerTestingRoutes(app: FastifyInstance, config: BackendConfi
     const testId = randomUUID();
     const logs: string[] = [];
     const errors: string[] = [];
-    const results: Array<Record<string, unknown>> = [];
+    const results: any[] = [];
 
     // P2-3: browser 声明提前，finally 保证关闭防 Chromium 泄漏
-    let browser: Browser | null = null;
+    let browser: any = null;
     try {
       // P1 修复：playwright 缺失（如精简部署环境）时给出明确安装指引，不再抛出晦涩的 MODULE_NOT_FOUND
-      let chromium: { launch: (opts?: Record<string, unknown>) => Promise<Browser> } | null = null;
+      let chromium: any = null;
       try {
         ({ chromium } = await import('playwright'));
       } catch (_importErr: unknown) {
@@ -99,13 +96,13 @@ export function registerTestingRoutes(app: FastifyInstance, config: BackendConfi
       const context = await browser.newContext({
         viewport: { width: body.width || 1280, height: body.height || 720 },
       });
-      const page: Page = await context.newPage();
+      const page = await context.newPage();
 
       // 监听控制台消息
-      page.on('console', (msg: ConsoleMessage) => {
+      page.on('console', (msg: any) => {
         logs.push(`[${msg.type()}] ${msg.text()}`);
       });
-      page.on('pageerror', (err: Error) => {
+      page.on('pageerror', (err: any) => {
         errors.push(err.message);
       });
 
@@ -121,20 +118,21 @@ export function registerTestingRoutes(app: FastifyInstance, config: BackendConfi
       // 获取页面标题
       const title = await page.title();
 
-      // 用字符串形式执行 evaluate 获取真实数据（返回 unknown，字段逐一定型）
-      const realInfo: unknown = await page.evaluate(`({
+      // 获取页面信息
+      const pageInfo: any = await page.evaluate(() => ({
+        links: 0, images: 0, scripts: 0, textContent: 0,
+      }));
+      // 用字符串形式执行 evaluate 获取真实数据
+      const realInfo = await page.evaluate(`({
         links: document.querySelectorAll('a').length,
         images: document.querySelectorAll('img').length,
         scripts: document.querySelectorAll('script').length,
         textContent: document.body?.innerText?.length || 0,
       })`);
-      const info = realInfo as Record<string, unknown>;
-      const pageInfo = {
-        links: typeof info.links === 'number' ? info.links : 0,
-        images: typeof info.images === 'number' ? info.images : 0,
-        scripts: typeof info.scripts === 'number' ? info.scripts : 0,
-        textContent: typeof info.textContent === 'number' ? info.textContent : 0,
-      };
+      pageInfo.links = (realInfo as any).links;
+      pageInfo.images = (realInfo as any).images;
+      pageInfo.scripts = (realInfo as any).scripts;
+      pageInfo.textContent = (realInfo as any).textContent;
 
       // 如果有自定义操作，执行它们
       if (body.actions && body.actions.length > 0) {
@@ -184,21 +182,11 @@ export function registerTestingRoutes(app: FastifyInstance, config: BackendConfi
         screenshot: screenshotBase64 ? `data:image/png;base64,${screenshotBase64}` : null,
       };
     } catch (e: unknown) {
-      // AEX-P2-004 分类：recoverable —— 已转换为显式失败响应（带 testId 供前端轮询），
-      // 不向上抛以免 500 丢失上下文。
-      logger.error({ event: 'testing.run_failed', err: e, testId, url: body.url }, '网站测试运行失败');
+      console.error('[Testing] 运行失败:', (e instanceof Error ? e.message : String(e)) || e);
       return { testId, success: false, error: '测试运行失败，请检查 URL 和网络', url: body.url };
     } finally {
       // P2-3: 无论成功失败都关闭 browser 防 Chromium 进程泄漏
-      if (browser) {
-        try {
-          await browser.close();
-        } catch {
-          // AEX-P2-004 分类：ignored —— 浏览器已崩溃/进程已退出时 close 会抛；
-          // 此处只做资源回收尝试，失败不影响已返回的测试结果。
-          logger.debug({ event: 'testing.browser_close_ignored', testId }, 'Chromium 关闭失败，已忽略');
-        }
-      }
+      if (browser) { try { await browser.close(); } catch (_e: unknown) { /* ignore - intentional */ } }
       // SEC-025：释放并发位（覆盖成功/失败/异常所有路径，防 activeTests 泄漏）
       activeTests--;
     }

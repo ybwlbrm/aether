@@ -23,7 +23,6 @@ import { registerDevice } from './sync-config.js';
 import { resolve } from 'node:path';
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { buildRuntimeForProvider } from '../../lib/model-runtime-bridge.js';
-import { logger } from '../../lib/logger.js';
 // P0-04 收口：Remote Command 也进入统一 Run 架构（runs 表 + RunLifecycleManager 状态机）
 import { RunLifecycleManager } from '../../core/runtime/index.js';
 // §30/§31 收口：预算统一来源 —— AgentDefinition limits → budgetFromAgentLimits（Remote 命令不再散落 30 硬编码）
@@ -74,10 +73,7 @@ function parseRemoteToolArguments(value: string): RemoteToolArguments {
     const parsed: unknown = JSON.parse(value || '{}')
     return isRecord(parsed) ? parsed : {}
   } catch (error: unknown) {
-    logger.warn(
-      { event: 'sync.tool_arguments_parse_failed', error: error instanceof Error ? error.message : String(error) },
-      '[Sync] 工具参数解析失败，按空参数继续:',
-    )
+    console.warn('[Sync] 工具参数解析失败，按空参数继续:', error instanceof Error ? error.message : error)
     return {}
   }
 }
@@ -126,10 +122,7 @@ export async function processRemoteCommand(
     try {
       await registerDevice(sb, cfg);
     } catch (e: unknown) {
-      logger.warn(
-        { event: 'sync.device_register_preflight_failed', error: e instanceof Error ? e.message : String(e) },
-        '[Sync] 处理前设备注册失败（继续尝试）:',
-      );
+      console.warn('[Sync] 处理前设备注册失败（继续尝试）:', e instanceof Error ? e.message : e);
     }
 
     // 标记为 processing
@@ -141,38 +134,25 @@ export async function processRemoteCommand(
     const clientCommandId = command.client_command_id;
     if (clientCommandId) {
       try {
-        // AEX-P0-095: select 补齐 result_summary/error/run_id ——
-        // 此前只查 id/status/conversation_id，重复投递行被标记为 completed 但结果为空，
-        // 手机端显示「完成但无内容」。幂等去重必须完整复制上游结果字段。
         const { data: dup } = await sb.from('remote_commands')
-          .select('id, status, conversation_id, result_summary, error, run_id')
+          .select('id, status, conversation_id')
           .eq('client_command_id', clientCommandId)
           .neq('id', commandId)
           .in('status', ['processing', 'completed'])
           .limit(1);
         if (dup && dup.length > 0) {
-          logger.info(
-            { event: 'sync.duplicate_delivery_skipped', commandId, clientCommandId },
-            `[Sync] 命令 ${commandId} 为重复投递（client_command_id=${clientCommandId}），跳过处理并复制上游结果`,
-          );
+          console.log(`[Sync] 命令 ${commandId} 为重复投递（client_command_id=${clientCommandId}），跳过处理并复制上游结果`);
           try {
             await sb.from('remote_commands').update({
               status: dup[0].status,
               conversation_id: dup[0].conversation_id,
               processed_at: new Date().toISOString(),
-              // AEX-P0-095: 复制完整结果（此前缺失导致重复行 completed 但 result_summary 为 NULL）
-              ...(dup[0].result_summary != null ? { result_summary: dup[0].result_summary } : {}),
-              ...(dup[0].error != null ? { error: dup[0].error } : {}),
-              ...(dup[0].run_id != null ? { run_id: dup[0].run_id } : {}),
             }).eq('id', commandId);
           } catch { /* 重复行结果复制失败不阻塞 */ }
           return;
         }
       } catch (e: unknown) {
-        logger.warn(
-          { event: 'sync.dedup_query_failed', commandId, clientCommandId, error: e instanceof Error ? e.message : String(e) },
-          '[Sync] 幂等键去重查询失败（继续处理）:',
-        );
+        console.warn('[Sync] 幂等键去重查询失败（继续处理）:', e instanceof Error ? e.message : e);
       }
     }
 
@@ -240,15 +220,9 @@ export async function processRemoteCommand(
           writeFileSync(fullPath, Buffer.from(base64Data, 'base64'));
           // 替换 content 中的 data URL 为本地路径
           storedContent = storedContent.replace(fileMatch[0], `[上传文件: ${fileName}](${fullPath})`);
-          logger.info(
-            { event: 'sync.mobile_file_saved', fullPath },
-            `[Sync] 已保存手机端上传的文件: ${fullPath}`,
-          );
+          console.log(`[Sync] 已保存手机端上传的文件: ${fullPath}`);
         } catch (e: unknown) {
-          logger.warn(
-            { event: 'sync.mobile_file_save_failed', fileName, error: e instanceof Error ? e.message : String(e) },
-            '[Sync] 保存手机端上传文件失败:',
-          );
+          console.warn('[Sync] 保存手机端上传文件失败:', e instanceof Error ? e.message : String(e));
         }
       }
     }
@@ -265,10 +239,7 @@ export async function processRemoteCommand(
         writeFileSync(fullPath, Buffer.from(imgMatch[4], 'base64'));
         storedContent = storedContent.replace(imgMatch[1], `/data/chat-images/${imgName}`);
       } catch (e: unknown) {
-        logger.warn(
-          { event: 'sync.mobile_image_save_failed', error: e instanceof Error ? e.message : String(e) },
-          '[Sync] 保存手机端上传图片失败:',
-        );
+        console.warn('[Sync] 保存手机端上传图片失败:', e instanceof Error ? e.message : String(e));
       }
     }
 
@@ -316,10 +287,7 @@ export async function processRemoteCommand(
             .single();
           if (cmdCheck?.conversation_id) {
              effectiveConvId = cmdCheck.conversation_id;
-             logger.info(
-               { event: 'sync.conversation_id_reused', attempt, conversationId: effectiveConvId },
-               `[Sync] 重试第 ${attempt} 次：复用已有 conversation_id=${effectiveConvId}`,
-             );
+             console.log(`[Sync] 重试第 ${attempt} 次：复用已有 conversation_id=${effectiveConvId}`);
           }
         }
 
@@ -348,10 +316,7 @@ export async function processRemoteCommand(
         }, { onConflict: 'id' });
         if (msgErr) {
           // 补偿：消息写入失败，删除刚创建的对话，避免孤儿记录
-          logger.warn(
-            { event: 'sync.user_message_upsert_failed', commandId, conversationId: effectiveConvId, error: msgErr.message },
-            '[Sync] 用户消息 upsert 失败，执行补偿删除对话:',
-          );
+          console.warn('[Sync] 用户消息 upsert 失败，执行补偿删除对话:', msgErr.message);
           try {
             await sb.from('conversations_sync').delete().eq('id', effectiveConvId);
           } catch { /* 补偿删除失败不阻塞抛出原错误 */ }
@@ -382,10 +347,7 @@ export async function processRemoteCommand(
             try {
               await sb.from('messages_sync').upsert(batch, { onConflict: 'id' });
             } catch { /* 批次失败不阻塞，但记录便于排查 */
-              logger.warn(
-                { event: 'sync.history_batch_upsert_failed', commandId, conversationId: effectiveConvId, batchIndex: i / BATCH, batchSize: batch.length },
-                '[Sync] 历史消息批量同步失败，尝试逐条兜底',
-              );
+              console.warn(`[Sync] 历史消息批量同步失败（批次 ${i / BATCH}，${batch.length} 条），尝试逐条兜底`);
               // 兜底：逐条重试，避免个别脏数据拖垮整批
               await Promise.all(batch.map(async hm => {
                 try {
@@ -405,17 +367,7 @@ export async function processRemoteCommand(
         userMsgId = effectiveUserMsgId;
       } catch (e: unknown) {
         lastSyncError = e;
-        logger.error(
-          {
-            event: 'sync.user_message_upsert_retry_failed',
-            commandId,
-            conversationId: convId,
-            attempt,
-            maxAttempts: MAX_SYNC_RETRIES,
-            error: e instanceof Error ? e.message : String(e),
-          },
-          '[Sync] 同步用户消息到 Supabase 失败',
-        );
+        console.error(`[Sync] 同步用户消息到 Supabase 失败 (尝试 ${attempt}/${MAX_SYNC_RETRIES}):`, e instanceof Error ? e.message : e);
         if (attempt < MAX_SYNC_RETRIES) {
           // 指数退避：1s, 2s, 4s...
           const delay = 1000 * Math.pow(2, attempt - 1);
@@ -425,15 +377,7 @@ export async function processRemoteCommand(
     }
 
     if (!syncSuccess) {
-      logger.error(
-        {
-          event: 'sync.user_message_upsert_exhausted',
-          commandId,
-          maxAttempts: MAX_SYNC_RETRIES,
-          error: lastSyncError instanceof Error ? lastSyncError.message : String(lastSyncError),
-        },
-        '[Sync] 同步用户消息彻底失败，已达最大重试次数:',
-      );
+      console.error('[Sync] 同步用户消息彻底失败，已达最大重试次数:', lastSyncError instanceof Error ? lastSyncError.message : lastSyncError);
       // 不抛出，让后续流程继续（AI 调用仍会尝试，错误最终会通过 syncAssistantError 同步）
     }
 
@@ -566,10 +510,8 @@ export async function processRemoteCommand(
     try {
       runCancellationRegistry.register(runTaskId, convId, controller)
     } catch (e: unknown) {
-      logger.warn(
-        { event: 'sync.cancellation_register_failed', runId: runTaskId, error: e instanceof Error ? e.message : String(e) },
-        '[Sync] 取消注册失败（不影响执行）:',
-      );
+      console.warn('[Sync] 取消注册失败（不影响执行）:',
+        e instanceof Error ? e.message : String(e));
     }
     // P0-04 收口：Remote Command 进入统一 Run 架构 —— runs 行 + created→running 状态机
     try {
@@ -586,14 +528,7 @@ export async function processRemoteCommand(
       const errorMessage = `Run 创建失败: ${createError}`
       runLifecycle = null
       try { runCancellationRegistry.unregister(runTaskId) } catch (unregisterError: unknown) {
-        logger.warn(
-          {
-            event: 'sync.cancellation_unregister_after_create_failed',
-            runId: runTaskId,
-            error: unregisterError instanceof Error ? unregisterError.message : String(unregisterError),
-          },
-          '[Sync] Run 创建失败后清理取消注册失败:',
-        )
+        console.warn('[Sync] Run 创建失败后清理取消注册失败:', unregisterError instanceof Error ? unregisterError.message : unregisterError)
       }
       throw new Error(errorMessage)
     }
@@ -604,16 +539,10 @@ export async function processRemoteCommand(
     }).eq('id', commandId).then(
       ({ error }) => {
         if (error) {
-          logger.warn(
-            { event: 'sync.run_id_backfill_failed', commandId, runId: runTaskId, error: error.message },
-            '[Sync] run_id 回填失败（不阻塞）:',
-          )
+          console.warn('[Sync] run_id 回填失败（不阻塞）:', error.message)
         }
       },
-      (e: unknown) => logger.warn(
-        { event: 'sync.run_id_backfill_failed', commandId, runId: runTaskId, error: e instanceof Error ? e.message : String(e) },
-        '[Sync] run_id 回填失败（不阻塞）:',
-      ),
+      (e: unknown) => console.warn('[Sync] run_id 回填失败（不阻塞）:', e instanceof Error ? e.message : e),
     )
     eventBus.emit(convId, 'task.started', {
       taskId: runTaskId, agentId: 'main', agentType: 'conversation',
@@ -639,10 +568,7 @@ export async function processRemoteCommand(
         try {
           db.update(messages).set({ content: c, toolResults: r ? JSON.stringify({ reasoning: r }) : null }).where(eq(messages.id, streamMsgId)).run();
         } catch (writeErr: unknown) {
-          logger.warn(
-            { event: 'sync.stream_message_persist_failed', messageId: streamMsgId, error: writeErr instanceof Error ? writeErr.message : String(writeErr) },
-            '[Sync] 流式消息本地落库失败（不阻塞但需关注）:',
-          );
+          console.warn('[Sync] 流式消息本地落库失败（不阻塞但需关注）:', writeErr instanceof Error ? writeErr.message : String(writeErr));
         }
         if (c !== '' || r !== '') {
           try {
@@ -708,10 +634,7 @@ export async function processRemoteCommand(
                created_at: new Date().toISOString(),
              }, { onConflict: 'id' })
            } catch (syncError: unknown) {
-              logger.warn(
-                { event: 'sync.assistant_tool_calls_upsert_failed', commandId, messageId: assistantMsgId, error: syncError instanceof Error ? syncError.message : String(syncError) },
-                '[Sync] assistant.tool_calls 同步失败:',
-              )
+             console.warn('[Sync] assistant.tool_calls 同步失败:', syncError instanceof Error ? syncError.message : String(syncError))
            }
          }).catch(() => undefined)
        },
@@ -856,8 +779,8 @@ export async function processRemoteCommand(
           default: break;
         }
       },
-      // 完成判定（AEX-P0-001）：不注入 isTaskComplete —— Loop 模式由
-      // evaluateTaskCompletion 依证据判定，"有文本"不等于任务完成
+      // 完成判定：缺省有文本即完成（与 Normal 一致）
+      isTaskComplete: (resp) => resp.content.trim() !== '',
       onEvent: (type, payload) => {
         if (type === 'execution.failed' && typeof payload.error === 'string') {
           executionError = payload.error
@@ -909,10 +832,7 @@ export async function processRemoteCommand(
         })
         if (summaryResponse.content?.trim()) aiContentFinal = summaryResponse.content.trim()
       } catch (summaryError: unknown) {
-        logger.warn(
-          { event: 'sync.forced_summary_failed', commandId, runId: runTaskId, error: summaryError instanceof Error ? summaryError.message : String(summaryError) },
-          '[Sync] 强制总结失败:',
-        )
+        console.warn('[Sync] 强制总结失败:', summaryError instanceof Error ? summaryError.message : summaryError)
       }
     }
     if (runOutcome.kind === 'complete' && !aiContentFinal) {
@@ -944,10 +864,7 @@ export async function processRemoteCommand(
        }).where(eq(messages.id, finalMsgId)).run();
      } catch (updateErr: unknown) {
 
-      logger.warn(
-        { event: 'sync.final_message_persist_failed', messageId: finalMsgId, error: updateErr instanceof Error ? updateErr.message : String(updateErr) },
-        '[Sync] 最终消息本地更新失败（不阻塞但需关注）:',
-      );
+      console.warn('[Sync] 最终消息本地更新失败（不阻塞但需关注）:', updateErr instanceof Error ? updateErr.message : String(updateErr));
     }
 
     // 更新对话时间
@@ -1106,16 +1023,9 @@ export async function processRemoteCommand(
         transitionError = transitionFailure instanceof Error
           ? transitionFailure.message
           : String(transitionFailure)
-        logger.error(
-          {
-            event: 'sync.exception_path_terminal_transition_failed',
-            runId: runTaskId || null,
-            taskId: runTaskId || null,
-            commandId,
-            status: 'failed',
-            error: transitionError,
-          },
-          '[Sync] exception-path run terminal transition failed',
+        console.error(
+          `[Sync] exception-path run terminal transition failed (runId=${runTaskId || 'none'}, taskId=${runTaskId || 'none'}, commandId=${commandId}, status=failed):`,
+          transitionError,
         )
       }
     }
@@ -1125,10 +1035,7 @@ export async function processRemoteCommand(
     const terminalError = transitionError === null
       ? terminalStatus === 'completed' ? null : cancelled ? `aborted: ${errorMessage}` : errorMessage
       : `Run terminal transition failed: ${transitionError}; original error: ${errorMessage}`
-    logger.error(
-      { event: 'sync.remote_command_failed', commandId, runId: runTaskId || null, terminalStatus, error: errorMessage },
-      '[Sync] 远程命令处理失败',
-    )
+    console.error(`[Sync] 远程命令处理失败 (${terminalStatus}):`, errorMessage)
 
     await updateRemoteCommandTerminal({
       sb,
@@ -1221,9 +1128,6 @@ export async function syncAssistantError(
 
     saveDb(backendConfig);
   } catch (e: unknown) {
-    logger.error(
-      { event: 'sync.assistant_error_sync_failed', commandId, error: e instanceof Error ? e.message : String(e) },
-      '[Sync] 同步错误消息失败:',
-    );
+    console.error('[Sync] 同步错误消息失败:', e instanceof Error ? e.message : e);
   }
 }

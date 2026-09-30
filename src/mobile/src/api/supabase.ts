@@ -8,7 +8,6 @@ import {
   settlePending,
   handleChannelStatus,
   resetSyncState,
-  onSyncStateChange,
 } from './sync-state';
 import { OfflineQueueManager, type QueuedCommand } from '../lib/offline-queue';
 import {
@@ -21,11 +20,6 @@ import {
   type RemoteCommandSnapshot,
 } from '../lib/remote-command'
 import { type ChatMessage } from '../lib/message-store';
-import {
-  ReconnectStateRebuilder,
-  type ReconnectCommandReference,
-  type ReconnectRebuildReport,
-} from '../lib/reconnect';
 
 // 对外 re-export 同步状态 API（组件从 './api/supabase' 统一导入）
 export {
@@ -183,41 +177,6 @@ export async function getMessages(
 }
 
 /**
- * 按游标增量拉取消息（AEX-P1-077：重连/降级轮询不得全量 reload）。
- *
- * 用 created_at 作为游标（messages_sync 只有 created_at 索引，SDK 端无 seq 列）。
- * 边界用 gte 而非 gt：同一秒内的多条消息必须全部取回，重复的那一条由
- * mergeMessages 按 id 去重；用 gt 会静默漏掉同秒消息。
- * @param since 游标（已合并消息中最大的 created_at）
- */
-export async function getMessagesSince(
-  conversationId: string,
-  since: string,
-  opts?: { limit?: number },
-): Promise<ListResult<ChatMessage>> {
-  const sb = getClient();
-  if (!sb) return { data: null, error: { kind: 'network', message: 'Supabase 未配置' } };
-  try {
-    const { data, error } = await sb
-      .from('messages_sync')
-      .select('*')
-      .eq('conversation_id', conversationId)
-      .gte('created_at', since)
-      .order('created_at', { ascending: true })
-      .limit(opts?.limit ?? 200);
-    if (error) throw error;
-    autoFlushQueue();
-    const result = (data || []) as ChatMessage[];
-    if (result.length > 0) markSynced();
-    return { data: result, error: null };
-  } catch (e) {
-    const err = classifyError(e);
-    console.error(`[supabase] 增量获取消息失败 (${err.kind}):`, err.message);
-    return { data: null, error: { kind: err.kind, message: err.message } };
-  }
-}
-
-/**
  * 发送远程命令（§7 SendResult）。
  * @param conversationId 目标对话 id（可为空）
  * @param clientCommandId 幂等键；传入时复用（离线队列补传/UI 重试），缺省自动生成
@@ -238,25 +197,16 @@ export async function sendCommand(
   const commandKey = clientCommandId ?? generateUuid();
   try {
     // 幂等检查：同一 client_command_id 的原始命令已存在 → 视为已入队/已处理
-    // AEX-P0-095: select 补齐 result_summary/error/run_id —— 重复投递行必须能
-    // 取回上游完整结果（此前只查 id/status，重复命令显示"完成但空内容"）
     const { data: existing } = await sb
       .from('remote_commands')
-      .select('id, status, result_summary, error, run_id')
+      .select('id, status')
       .eq('client_command_id', commandKey)
       .eq('user_id', user.id)
       .in('status', ['pending', 'processing', 'completed'])
       .limit(1);
     if (existing && existing.length > 0) {
       console.log(`[supabase] 幂等跳过：命令已存在 (${existing[0].id}, ${existing[0].status})`);
-      return {
-        status: 'sent' as const,
-        commandId: existing[0].id,
-        clientCommandId: commandKey,
-        ...(existing[0].result_summary != null ? { result: existing[0].result_summary } : {}),
-        ...(existing[0].error != null ? { error: existing[0].error } : {}),
-        ...(existing[0].run_id != null ? { runId: existing[0].run_id } : {}),
-      }
+      return { status: 'sent', commandId: existing[0].id, clientCommandId: commandKey }
     }
 
     const { data: inserted, error } = await sb
@@ -555,7 +505,6 @@ export function subscribeMessages(
 
   const key = `messages-${conversationId}`;
   const existing = messagesChannelRegistry.get(key);
-  ensureSyncStatusBridge();
 
   if (existing) {
     if (existing.releaseTimer) {
@@ -653,7 +602,6 @@ function scheduleMessageChannelRelease(key: string, entry: MessageChannelEntry):
 export function subscribeConversations(callback: ConversationCallback): () => void {
   const sb = getClient();
   if (!sb) return () => {};
-  ensureSyncStatusBridge();
 
   if (conversationsChannelEntry) {
     const entry = conversationsChannelEntry;
@@ -742,55 +690,6 @@ function getCommandReferenceKey(reference: RemoteCommandReference): string | nul
   return reference.serverId ?? reference.clientCommandId
 }
 
-/**
- * 向 canonical 源（remote_commands）重新查询命令状态。
- * Realtime 只是通知不是日志 —— 断线期间的事件永久丢失，重连后必须回源取终态。
- */
-export async function queryRemoteCommandTerminal(
-  reference: RemoteCommandReference,
-): Promise<RemoteCommandSnapshot | null> {
-  const sb = getClient();
-  if (!sb) return null;
-  let query = sb
-    .from('remote_commands')
-    .select('id, client_command_id, status, result_summary, error, content, metadata')
-    .limit(1);
-  if (reference.serverId) {
-    query = query.eq('id', reference.serverId);
-  } else if (reference.clientCommandId) {
-    query = query
-      .eq('client_command_id', reference.clientCommandId)
-      .order('created_at', { ascending: true });
-  } else {
-    return null;
-  }
-  const { data, error } = await query.maybeSingle();
-  if (error) {
-    console.warn('[supabase] 查询命令终态失败:', error.message);
-    throw new Error(error.message);
-  }
-  return parseRemoteCommandSnapshot(data);
-}
-
-/**
- * 重连状态重建协调器（AEX-P1-077，单例）。
- *
- * 断线恢复的执行顺序：命令 canonical 终态结算 → 会话消息按游标增量合并。
- * 组件用 registerCommand / registerConversation 登记自己关心的恢复动作；
- * 本模块把同步状态桥接进来：非 connected → connected 时自动跑一轮。
- */
-export const reconnectRebuilder = new ReconnectStateRebuilder({
-  fetchTerminal: (reference: ReconnectCommandReference) => queryRemoteCommandTerminal(reference),
-});
-
-/** 同步状态 → 重连重建的桥（单例，通道建立时惰性挂载） */
-let syncStatusBridge: (() => void) | null = null;
-
-function ensureSyncStatusBridge(): void {
-  if (syncStatusBridge) return;
-  syncStatusBridge = onSyncStateChange((state) => reconnectRebuilder.noteSyncStatus(state.status));
-}
-
 function dispatchRemoteCommandStatus(snapshot: RemoteCommandSnapshot): void {
   if (snapshot.isCancellation === true) return
   const keys = new Set<string>()
@@ -846,10 +745,26 @@ export function subscribeRemoteCommandStatus(
   const queryRemoteCommandStatus = () => {
     if (!subscribed || queryInFlight || terminalReceived) return
     queryInFlight = true
-    void queryRemoteCommandTerminal(reference).then((snapshot) => {
+    let query = sb
+      .from('remote_commands')
+      .select('id, client_command_id, status, result_summary, error, content, metadata')
+      .limit(1)
+    if (reference.serverId) {
+      query = query.eq('id', reference.serverId)
+    } else if (reference.clientCommandId) {
+      query = query
+        .eq('client_command_id', reference.clientCommandId)
+        .order('created_at', { ascending: true })
+    }
+    void query.maybeSingle().then(({ data, error }) => {
       queryInFlight = false
-      if (!subscribed || !snapshot) return
-      emitSnapshot(snapshot)
+      if (!subscribed) return
+      if (error) {
+        console.warn('[supabase] 查询命令终态失败:', error.message)
+        return
+      }
+      const snapshot = parseRemoteCommandSnapshot(data)
+      if (snapshot) emitSnapshot(snapshot)
     }, (error: unknown) => {
       queryInFlight = false
       console.warn('[supabase] 查询命令终态失败:', error instanceof Error ? error.message : error)
@@ -879,7 +794,6 @@ export function subscribeRemoteCommandStatus(
  */
 function ensureCommandsChannel(sb: ReturnType<typeof getClient> & object): void {
   if (!sb || commandsChannelEntry) return;
-  ensureSyncStatusBridge();
   const channel = sb.channel('remote-commands-updates')
     .on('postgres_changes',
       {
@@ -922,12 +836,6 @@ function ensureCommandsChannel(sb: ReturnType<typeof getClient> & object): void 
 export function cleanup(): void {
   for (const release of commandStatusCleanupCallbacks) release()
   commandStatusCleanupCallbacks.clear()
-
-  if (syncStatusBridge) {
-    syncStatusBridge()
-    syncStatusBridge = null
-  }
-  reconnectRebuilder.reset()
 
   const sb = getClient();
   if (sb) {

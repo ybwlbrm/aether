@@ -1,33 +1,40 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useNavigate } from 'react-router-dom';
-import {
-  Search, ArrowRight, Home, Bot, FolderKanban, BookOpen, Settings,
-  Wrench, Globe, Terminal as TerminalIcon, Workflow, Cable, Activity,
-  Sparkles, Sun, Moon, Wallpaper, PlayCircle, Square, ShieldCheck,
-  type LucideIcon,
-} from 'lucide-react';
-import { useAppearanceStore } from '../store/appearance';
-import { useWorkspaceStore } from '../store/workspace';
-
-/**
- * Global Command Palette（spec §55-56）
- *
- * 快捷键 ⌘K / Ctrl+K。五类命令：
- *   Navigate（导航） / Object（对象） / Action（动作） / Agent（Agent） / Appearance（外观）
- * 按 Enter 执行；↑↓ 选择；Esc 关闭。外观命令直接驱动 Appearance Engine。
- */
+import { Search, ArrowRight, FileText, Palette, Bot, LayoutDashboard, FolderKanban, Settings, Wrench, BookOpen, Globe, KeyRound, Database, Brain, Cable, Github, Server } from 'lucide-react';
 
 interface Command {
   id: string;
   label: string;
   description: string;
-  icon: LucideIcon;
-  category: 'Navigate' | 'Object' | 'Action' | 'Agent' | 'Appearance';
-  path?: string;
-  action?: () => void;
-  keywords?: string;
+  icon: React.ReactNode;
+  path: string;
+  category: string;
 }
+
+const commands: Command[] = [
+  // 导航
+  { id: '1', label: '控制台', description: '返回首页', icon: <LayoutDashboard size={16} />, path: '/command-center', category: '导航' },
+  { id: '2', label: 'AI 对话', description: '与 AI 助手对话', icon: <Bot size={16} />, path: '/chat', category: '导航' },
+  { id: '3', label: 'Agent 工作室', description: '工作流编排与能力管理', icon: <Brain size={16} />, path: '/agent-settings', category: '导航' },
+  { id: '16', label: '可视化工作流', description: '拖拽式工作流编排与执行', icon: <Server size={16} />, path: '/workflows', category: '导航' },
+  // 工具
+  { id: '4', label: '工具箱', description: '格式转换、PDF、音频处理', icon: <Wrench size={16} />, path: '/toolbox', category: '工具' },
+  { id: '5', label: '搜索引擎', description: '无广告聚合多源搜索', icon: <Search size={16} />, path: '/search', category: '工具' },
+  { id: '6', label: '知识库', description: '收藏夹、笔记、Wiki', icon: <BookOpen size={16} />, path: '/knowledge', category: '工具' },
+  { id: '7', label: '密码库', description: '本地加密存储密码', icon: <KeyRound size={16} />, path: '/vault', category: '工具' },
+  { id: '8', label: '浏览器', description: '内置浏览器与网页搜索', icon: <Globe size={16} />, path: '/browser', category: '工具' },
+  // 创建
+  { id: '9', label: 'AI Studio', description: '图片与视频 AI 生成', icon: <Palette size={16} />, path: '/media', category: '创建' },
+  { id: '10', label: '文档生成', description: 'PPT 与 Word 文档', icon: <FileText size={16} />, path: '/documents', category: '创建' },
+  { id: '11', label: '项目管理', description: '查看和管理项目', icon: <FolderKanban size={16} />, path: '/projects', category: '管理' },
+  // 资源
+  { id: '12', label: '媒体库', description: '已生成的文件', icon: <Database size={16} />, path: '/library', category: '资源' },
+  { id: '13', label: 'AI Providers', description: '管理 AI 模型', icon: <Cable size={16} />, path: '/providers', category: '资源' },
+  // 系统
+  { id: '14', label: '设置', description: '系统配置', icon: <Settings size={16} />, path: '/settings', category: '系统' },
+  { id: '15', label: 'GitHub', description: '打开 GitHub', icon: <Github size={16} />, path: 'https://github.com/personal-ai-command-center', category: '系统' },
+];
 
 export function CommandPalette() {
   const [open, setOpen] = useState(false);
@@ -36,30 +43,16 @@ export function CommandPalette() {
   const inputRef = useRef<HTMLInputElement>(null);
   const navigate = useNavigate();
 
-  const colorScheme = useAppearanceStore((s) => s.colorScheme);
-  const setColorScheme = useAppearanceStore((s) => s.setColorScheme);
-  const material = useAppearanceStore((s) => s.material);
-  const setMaterialMode = useAppearanceStore((s) => s.setMaterialMode);
-  const toggleSlideshow = useAppearanceStore((s) => s.toggleSlideshow);
-  const openWorkbench = useWorkspaceStore((s) => s.openWorkbench);
-  const setWorkbenchTab = useWorkspaceStore((s) => s.setWorkbenchTab);
-
-  // 受控开关：⌘K + toggle-command-palette 事件
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
         e.preventDefault();
-        setOpen((prev) => !prev);
+        setOpen(prev => !prev);
       }
       if (e.key === 'Escape') setOpen(false);
     };
-    const toggleHandler = () => setOpen((prev) => !prev);
     window.addEventListener('keydown', handler);
-    window.addEventListener('toggle-command-palette', toggleHandler);
-    return () => {
-      window.removeEventListener('keydown', handler);
-      window.removeEventListener('toggle-command-palette', toggleHandler);
-    };
+    return () => window.removeEventListener('keydown', handler);
   }, []);
 
   useEffect(() => {
@@ -70,104 +63,42 @@ export function CommandPalette() {
     }
   }, [open]);
 
-  const commands = useMemo<Command[]>(() => {
-    const go = (path: string) => navigate(path);
-    return [
-      // ---- Navigate ----
-      { id: 'n-home', label: 'Open Home', description: 'Command center', icon: Home, category: 'Navigate', path: '/command-center' },
-      { id: 'n-chat', label: 'Open Chat', description: 'AI conversation', icon: Bot, category: 'Navigate', path: '/chat' },
-      { id: 'n-projects', label: 'Open Projects', description: 'Project workspaces', icon: FolderKanban, category: 'Navigate', path: '/projects' },
-      { id: 'n-knowledge', label: 'Open Knowledge', description: 'Sources, notes, wiki', icon: BookOpen, category: 'Navigate', path: '/knowledge' },
-      { id: 'n-settings', label: 'Open Settings', description: 'System configuration', icon: Settings, category: 'Navigate', path: '/settings' },
-      // ---- Object ----
-      { id: 'o-terminal', label: 'Open Terminal', description: 'Terminal workspace', icon: TerminalIcon, category: 'Object', path: '/terminal' },
-      { id: 'o-browser', label: 'Open Browser', description: 'Browse the web', icon: Globe, category: 'Object', path: '/browser' },
-      { id: 'o-toolbox', label: 'Open Toolbox', description: 'Format conversion tools', icon: Wrench, category: 'Object', path: '/toolbox' },
-      { id: 'o-workflows', label: 'Open Workflows', description: 'Visual workflow canvas', icon: Workflow, category: 'Object', path: '/workflows' },
-      { id: 'o-mcp', label: 'Open MCP', description: 'MCP developer workspace', icon: Cable, category: 'Object', path: '/mcp' },
-      { id: 'o-models', label: 'Open Models', description: 'Providers and models', icon: Sparkles, category: 'Object', path: '/providers' },
-      { id: 'o-monitoring', label: 'Open Monitoring', description: 'Runs overview', icon: Activity, category: 'Object', path: '/monitoring' },
-      // ---- Action ----
-      { id: 'a-wb-browser', label: 'Workbench · Browser', description: 'Open browser in right workbench', icon: Globe, category: 'Action', action: () => { setWorkbenchTab('browser'); openWorkbench('browser'); } },
-      { id: 'a-wb-code', label: 'Workbench · Code', description: 'Open code in right workbench', icon: Search, category: 'Action', action: () => { setWorkbenchTab('code'); openWorkbench('code'); } },
-      { id: 'a-wb-files', label: 'Workbench · Files', description: 'Open files in right workbench', icon: FolderKanban, category: 'Action', action: () => { setWorkbenchTab('files'); openWorkbench('files'); } },
-      { id: 'a-wb-terminal', label: 'Workbench · Terminal', description: 'Open terminal in right workbench', icon: TerminalIcon, category: 'Action', action: () => { setWorkbenchTab('terminal'); openWorkbench('terminal'); } },
-      { id: 'a-wb-preview', label: 'Workbench · Preview', description: 'Open preview in right workbench', icon: PlayCircle, category: 'Action', action: () => { setWorkbenchTab('preview'); openWorkbench('preview'); } },
-      // ---- Agent ----
-      { id: 'g-model', label: 'Change Model', description: 'Open model settings', icon: Sparkles, category: 'Agent', path: '/providers' },
-      { id: 'g-stop', label: 'Stop Run', description: 'Stop the current agent run', icon: Square, category: 'Agent', action: () => { window.dispatchEvent(new CustomEvent('aether-stop-run')); } },
-      { id: 'g-approval', label: 'Approval Center', description: 'Review pending permissions', icon: ShieldCheck, category: 'Agent', action: () => { window.dispatchEvent(new CustomEvent('aether-open-approvals')); } },
-      // ---- Appearance ----
-      {
-        id: 'app-glass', label: material.mode === 'glass' ? 'Liquid Glass · Off' : 'Liquid Glass · On',
-        description: material.mode === 'glass' ? 'Switch material to opaque' : 'Switch material to glass',
-        icon: material.mode === 'glass' ? Moon : Sun, category: 'Appearance',
-        action: () => setMaterialMode(material.mode === 'glass' ? 'opaque' : 'glass'),
-      },
-      {
-        id: 'app-theme', label: colorScheme === 'dark' ? 'Theme · Light' : 'Theme · Dark',
-        description: colorScheme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode',
-        icon: colorScheme === 'dark' ? Sun : Moon, category: 'Appearance',
-        action: () => setColorScheme(colorScheme === 'dark' ? 'light' : 'dark'),
-      },
-      { id: 'app-wallpaper', label: 'Change Wallpaper', description: 'Open appearance settings', icon: Wallpaper, category: 'Appearance', action: () => go('/settings') },
-      { id: 'app-slideshow', label: 'Toggle Slideshow', description: 'Toggle wallpaper slideshow', icon: PlayCircle, category: 'Appearance', action: toggleSlideshow },
-    ];
-  }, [navigate, colorScheme, setColorScheme, material.mode, setMaterialMode, toggleSlideshow, openWorkbench, setWorkbenchTab]);
-
-  const filtered = useMemo(() => {
-    if (!query.trim()) return commands;
-    const q = query.toLowerCase();
-    return commands.filter((c) =>
-      c.label.toLowerCase().includes(q) ||
-      c.description.toLowerCase().includes(q) ||
-      (c.keywords ?? '').toLowerCase().includes(q) ||
-      c.category.toLowerCase().includes(q),
-    );
-  }, [commands, query]);
+  const filtered = query
+    ? commands.filter(c =>
+        c.label.toLowerCase().includes(query.toLowerCase()) ||
+        c.description.toLowerCase().includes(query.toLowerCase())
+      )
+    : commands;
 
   const handleSelect = useCallback((command: Command) => {
     setOpen(false);
-    if (command.path) {
+    if (command.path.startsWith('http')) {
+      window.open(command.path, '_blank');
+    } else {
       navigate(command.path);
-    } else if (command.action) {
-      command.action();
     }
   }, [navigate]);
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'ArrowDown') {
       e.preventDefault();
-      setSelectedIndex((i) => Math.min(i + 1, filtered.length - 1));
+      setSelectedIndex(i => Math.min(i + 1, filtered.length - 1));
     }
     if (e.key === 'ArrowUp') {
       e.preventDefault();
-      setSelectedIndex((i) => Math.max(i - 1, 0));
+      setSelectedIndex(i => Math.max(i - 1, 0));
     }
-    if (e.key === 'Enter' && !(e.nativeEvent as KeyboardEvent).isComposing && filtered[selectedIndex]) {
+    if (e.key === 'Enter' && !(e.nativeEvent as any).isComposing && filtered[selectedIndex]) {
       handleSelect(filtered[selectedIndex]);
     }
   };
-
-  // 按类别分组展示
-  const grouped = useMemo(() => {
-    const order: Command['category'][] = ['Navigate', 'Object', 'Action', 'Agent', 'Appearance'];
-    return order
-      .map((cat) => ({ cat, items: filtered.filter((c) => c.category === cat) }))
-      .filter((g) => g.items.length > 0);
-  }, [filtered]);
 
   return (
     <AnimatePresence>
       {open && (
         <>
-          <motion.div
-            style={{
-              position: 'fixed',
-              inset: 0,
-              zIndex: 'var(--z-command-palette, 1400)',
-              background: 'var(--bg-overlay)',
-            }}
+<motion.div
+            style={{ position: 'fixed', inset: 0, zIndex: 'var(--z-command-palette, 1400)', background: 'var(--bg-overlay)', backdropFilter: 'blur(var(--glass-blur-radius))', WebkitBackdropFilter: 'blur(var(--glass-blur-radius))' }}
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
@@ -177,142 +108,74 @@ export function CommandPalette() {
           <motion.div
             role="dialog"
             aria-modal="true"
-            aria-label="Command palette"
-            style={{
-              position: 'fixed',
-              top: '12%',
-              left: '50%',
-              zIndex: 'calc(var(--z-command-palette, 1400) + 1)',
-              width: '100%',
-              maxWidth: 560,
-              transform: 'translateX(-50%)',
-            }}
-            initial={{ opacity: 0, y: -8 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: -8 }}
+            aria-label="命令面板"
+            style={{ position: 'fixed', top: '15%', left: '50%', zIndex: 'calc(var(--z-command-palette, 1400) + 1)', width: '100%', maxWidth: '580px', transform: 'translateX(-50%)' }}
+            initial={{ opacity: 0, scale: 0.96, y: -10 }}
+            animate={{ opacity: 1, scale: 1, y: 0 }}
+            exit={{ opacity: 0, scale: 0.96, y: -10 }}
             transition={{ duration: 0.15, ease: [0.25, 0.1, 0.25, 1] }}
           >
-            <div
-              style={{
-                background: 'var(--bg-elevated)',
-                border: '1px solid var(--border-primary)',
-                borderRadius: 'var(--radius-dialog)',
-                boxShadow: 'var(--shadow-lg)',
-                overflow: 'hidden',
-                backdropFilter: 'blur(var(--glass-blur-radius)) saturate(var(--glass-saturate))',
-                WebkitBackdropFilter: 'blur(var(--glass-blur-radius)) saturate(var(--glass-saturate))',
-              }}
-            >
-              {/* Search input */}
-              <div
-                style={{
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: 10,
-                  padding: '12px 16px',
-                  borderBottom: '1px solid var(--border-primary)',
-                }}
-              >
-                <Search size={16} style={{ color: 'var(--text-tertiary)' }} />
+            <div className="glass-card overflow-hidden p-0" style={{ borderRadius: 'var(--radius-lg)', boxShadow: 'var(--card-shadow)' }}>
+              {/* Search Input */}
+              <div className="flex items-center gap-3 px-5 py-3.5 border-b" style={{ borderColor: 'var(--border-primary)' }}>
+                <Search size={18} style={{ color: 'var(--text-tertiary)' }} />
                 <input
                   ref={inputRef}
                   type="text"
                   value={query}
-                  onChange={(e) => { setQuery(e.target.value); setSelectedIndex(0); }}
+                  onChange={e => { setQuery(e.target.value); setSelectedIndex(0); }}
                   onKeyDown={handleKeyDown}
-                  placeholder="Search or run an action…"
-                  aria-label="Search commands"
+                  placeholder="搜索命令..."
+                  className="flex-1 outline-none placeholder:text-[var(--text-tertiary)]"
                   style={{
-                    flex: 1,
-                    outline: 'none',
-                    border: 'none',
-                    background: 'transparent',
-                    fontSize: 14,
+                    fontSize: 'var(--font-base)',
                     color: 'var(--text-primary)',
                     fontFamily: 'inherit',
+                    background: 'var(--input-bg)',
+                    backdropFilter: 'blur(var(--glass-blur-radius)) saturate(var(--glass-saturate))',
+                    WebkitBackdropFilter: 'blur(var(--glass-blur-radius)) saturate(var(--glass-saturate))',
+                    border: '1px solid var(--input-border)',
+                    borderRadius: 'var(--input-radius)',
+                    padding: '11px 16px',
+                    transition: 'all 0.2s var(--anim-ease)',
                   }}
                 />
-                <kbd style={{ fontSize: 11, color: 'var(--text-tertiary)' }}>ESC</kbd>
+                <kbd style={{ fontSize: '11px', height: '24px', minWidth: '28px', padding: '0 6px', borderRadius: '6px', fontFamily: 'var(--font-sans)', fontWeight: 500, color: 'var(--text-tertiary)', background: 'var(--bg-surface)' }}>ESC</kbd>
               </div>
 
               {/* Results */}
-              <div
-                style={{ maxHeight: 380, overflowY: 'auto', padding: 8 }}
-                role="listbox"
-                aria-label="Commands"
-              >
-                {grouped.length === 0 && (
-                  <div style={{ textAlign: 'center', padding: 24, fontSize: 13, color: 'var(--text-tertiary)' }}>
-                    No matching commands
+              <div className="max-h-[360px] overflow-y-auto p-3" role="listbox" aria-label="命令列表">
+                {filtered.length === 0 && (
+                  <div className="text-center py-8" style={{ fontSize: 'var(--font-sm)', color: 'var(--text-tertiary)' }}>
+                    未找到匹配的命令，试试：控制台、AI 对话、设置
                   </div>
                 )}
-                {grouped.map(({ cat, items }) => (
-                  <div key={cat}>
-                    <div
-                      style={{
-                        padding: '6px 10px 2px',
-                        fontSize: 10,
-                        fontWeight: 600,
-                        letterSpacing: '0.08em',
-                        textTransform: 'uppercase',
-                        color: 'var(--text-tertiary)',
-                      }}
-                    >
-                      {cat}
+                {filtered.map((cmd, i) => (
+                  <button
+                    key={cmd.id}
+                    role="option"
+                    aria-selected={i === selectedIndex}
+                    aria-label={`${cmd.label}：${cmd.description}`}
+                    className="w-full flex items-center gap-5 px-5 py-4 rounded-xl transition-all duration-150 mb-2"
+                    style={{
+                      background: i === selectedIndex ? 'var(--color-accent-subtle)' : 'transparent',
+                      color: 'var(--text-primary)',
+                      fontSize: 'var(--font-base)',
+                      outline: i === selectedIndex ? '2px solid var(--color-accent)' : 'none',
+                    }}
+                    onClick={() => handleSelect(cmd)}
+                    onMouseEnter={() => setSelectedIndex(i)}
+                  >
+                    <div className="p-2.5 rounded-lg" style={{ background: 'var(--bg-surface)', color: 'var(--text-secondary)' }}>
+                      {cmd.icon}
                     </div>
-                    {items.map((cmd) => {
-                      const idx = filtered.indexOf(cmd);
-                      const active = idx === selectedIndex;
-                      const Icon = cmd.icon;
-                      return (
-                        <button
-                          key={cmd.id}
-                          role="option"
-                          aria-selected={active}
-                          aria-label={`${cmd.label}：${cmd.description}`}
-                          style={{
-                            display: 'flex',
-                            alignItems: 'center',
-                            gap: 10,
-                            width: '100%',
-                            padding: '8px 10px',
-                            borderRadius: 'var(--radius-surface)',
-                            border: 'none',
-                            background: active ? 'var(--sidebar-item-active)' : 'transparent',
-                            color: 'var(--text-primary)',
-                            fontSize: 13,
-                            cursor: 'pointer',
-                            textAlign: 'left',
-                          }}
-                          onClick={() => handleSelect(cmd)}
-                          onMouseEnter={() => setSelectedIndex(idx)}
-                        >
-                          <span
-                            style={{
-                              display: 'inline-flex',
-                              alignItems: 'center',
-                              justifyContent: 'center',
-                              width: 28,
-                              height: 28,
-                              borderRadius: 6,
-                              background: 'var(--bg-surface)',
-                              color: 'var(--text-secondary)',
-                              flexShrink: 0,
-                            }}
-                          >
-                            <Icon size={15} />
-                          </span>
-                          <span style={{ flex: 1, minWidth: 0 }}>
-                            <span style={{ display: 'block', fontWeight: 500 }}>{cmd.label}</span>
-                            <span style={{ display: 'block', fontSize: 11, color: 'var(--text-tertiary)' }}>
-                              {cmd.description}
-                            </span>
-                          </span>
-                          <ArrowRight size={14} style={{ color: 'var(--text-tertiary)', opacity: active ? 1 : 0 }} />
-                        </button>
-                      );
-                    })}
-                  </div>
+                    <div className="flex-1 text-left">
+                      <div className="font-medium" style={{ fontSize: '15px' }}>{cmd.label}</div>
+                      <div style={{ fontSize: '13px', color: 'var(--text-tertiary)', marginTop: 3 }}>{cmd.description}</div>
+                    </div>
+                    <span className="px-3 py-1.5 rounded-md" style={{ fontSize: '12px', color: 'var(--text-tertiary)', background: 'var(--bg-surface)' }}>{cmd.category}</span>
+                    <ArrowRight size={18} style={{ color: 'var(--text-tertiary)', opacity: i === selectedIndex ? 1 : 0 }} />
+                  </button>
                 ))}
               </div>
             </div>

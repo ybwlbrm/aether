@@ -137,17 +137,8 @@ export interface AgentEventEnvelope {
   eventId: string;
   /** 会话归属（conversation.id） */
   sessionId: string;
-  /**
-   * 本次运行/任务 ID（AgentEventRun.id；单轮消息场景 = eventId）。
-   * v1 协议以 taskId 承载 runId（legacy-adapter.ts:150 语义）。
-   */
+  /** 本次运行/任务 ID（AgentEventRun.id；单轮消息场景 = eventId） */
   taskId: string;
-  /**
-   * AEX-P0-012: 显式 Run ID（v2 扩展字段，可选）。
-   * v1 协议不产生此字段；v2 EventStore 投影/legacy-adapter.toV2 写入时填充。
-   * 前端 activityStore 据此推导 runKey：优先 runId，回退 sessionId:taskId。
-   */
-  runId?: string;
   /** 归属 Agent：'main'（普通对话）| 'sisyphus' | 'hephaestus' | ... */
   agentId: string;
   /** Agent 类型分类：'conversation' | 'planner' | 'coder' | 'researcher' | ... */

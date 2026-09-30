@@ -7,8 +7,6 @@ import { eq } from 'drizzle-orm';
 import type { AgentEventEnvelope, AgentEventType } from '@pacc/shared';
 import { flushPacks, setWritePackedRow, unpackRow } from './chunk-packer.js';
 import { rowToEnvelope, nextSeq, getNextSeq, pendingPacks, isPackable, queuePack, shouldFlushPack, PACKABLE_EVENT_TYPES, PACK_MAX_CHUNKS, PACK_MAX_BYTES, PackedChunk, EventEmitOptions, ActivityEventRow, createEventBusState, type EventBusState } from './types.js';
-// AEX-P0-21: 删除会话后禁止写入（后台 run 的迟到事件不得复活已删除的 conversation）
-import { isConversationDeleted } from './deleted-conversation-guard.js';
 
 /**
  * 初始化序号：从 DB 现有最大 seq 继续（进程重启后不重复）
@@ -49,12 +47,6 @@ export function createWriteRow(db: SQLJsDatabase<any>, saveDbCb?: () => void) {
     critical?: boolean;
   }): void => {
     const isCritical = row.critical === true;
-    // AEX-P0-21: 会话已删除 → 丢弃写入（后台 run 的迟到事件不得复活已删除的 conversation）。
-    // 删除路由在 cascade delete 前登记；此处命中即 best-effort 丢弃（不抛错，避免 FK 失败打断发射链）。
-    if (isConversationDeleted(row.conversationId)) {
-      console.warn(`[EventBus] 会话 ${row.conversationId} 已删除，丢弃事件 ${row.eventType} seq=${row.seq}`);
-      return;
-    }
     try {
       (db as any).insert(activityEvents).values({
         id: row.id,

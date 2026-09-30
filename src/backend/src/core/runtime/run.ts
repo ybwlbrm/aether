@@ -6,14 +6,24 @@
  * Pure TypeScript only.
  */
 
-import { RUN_STATUSES, RUN_TERMINAL_STATUSES, type RunStatus } from '@pacc/shared'
 import { RuntimeError } from '../errors/index.js'
 
-/**
- * Run 状态集合 / 类型（AEX-P0-002）。
- * 权威定义在 @pacc/shared，此处仅 re-export 保持既有 import 路径兼容。
- */
-export { RUN_STATUSES, type RunStatus }
+/** Run 状态的完整集合 */
+export const RUN_STATUSES = [
+  'created',
+  'running',
+  'waiting',
+  'retry_waiting',
+  'retrying',
+  'verifying',
+  'completed',
+  'failed',
+  'cancelled',
+  'interrupted',
+  'budget_exceeded',
+] as const
+
+export type RunStatus = (typeof RUN_STATUSES)[number]
 
 /**
  * Run mode enum matching the runs table.
@@ -98,7 +108,13 @@ export function isValidRunTransition(from: RunStatus, to: RunStatus): boolean {
 }
 
 /** Terminal run states are absorbing. */
-export const TERMINAL_RUN_STATUSES = RUN_TERMINAL_STATUSES
+export const TERMINAL_RUN_STATUSES = [
+  'completed',
+  'failed',
+  'cancelled',
+  'interrupted',
+  'budget_exceeded',
+] as const satisfies readonly RunStatus[]
 
 export function isTerminalRunStatus(status: RunStatus): boolean {
   return TERMINAL_RUN_STATUSES.some((terminalStatus) => terminalStatus === status)

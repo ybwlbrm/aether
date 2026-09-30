@@ -123,22 +123,20 @@ function AgentOutputRow({ agentId, text }: { agentId: string; text: string }) {
   const [expanded, setExpanded] = React.useState(false);
   const summary = text.split('\n')[0] || text;
   const truncated = summary.length > 90 ? summary.slice(0, 90) + '…' : summary;
-  const panelId = React.useId();
   return (
     <div data-variant="agent-output" style={{ borderTop: '1px solid var(--border-primary)', paddingTop: 6, marginTop: 2 }}>
-      <button
-        type="button"
+      <div
+        role="button"
         aria-expanded={expanded}
-        aria-controls={panelId}
         onClick={() => setExpanded((e) => !e)}
-        style={{ cursor: 'pointer', userSelect: 'none', display: 'flex', alignItems: 'center', gap: 6, color: 'var(--text-secondary)', background: 'transparent', border: 'none', padding: 0, font: 'inherit', textAlign: 'left', width: '100%' }}
+        style={{ cursor: 'pointer', userSelect: 'none', display: 'flex', alignItems: 'center', gap: 6, color: 'var(--text-secondary)' }}
       >
         <span style={{ flexShrink: 0, fontSize: 12 }}>{expanded ? '▾' : '▸'}</span>
         <span style={{ fontWeight: 500 }}>{agentId}</span>
         <span style={{ flex: '1 1 auto', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: 'var(--text-tertiary)', fontSize: 12 }}>{truncated}</span>
-      </button>
+      </div>
       {expanded && (
-        <div id={panelId} style={{ padding: '4px 0 4px 20px', color: 'var(--text-secondary)', whiteSpace: 'pre-wrap', fontSize: 12, lineHeight: 1.5, maxHeight: 240, overflowY: 'auto' }}>
+        <div style={{ padding: '4px 0 4px 20px', color: 'var(--text-secondary)', whiteSpace: 'pre-wrap', fontSize: 12, lineHeight: 1.5, maxHeight: 240, overflowY: 'auto' }}>
           {text}
         </div>
       )}

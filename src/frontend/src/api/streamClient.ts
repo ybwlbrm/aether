@@ -77,9 +77,6 @@ function parseSSEStream(
   const decoder = new TextDecoder();
   let buffer = '';
   let sawTerminal = false; // task.completed / task.failed / agent.output.completed
-  // AEX-P0-011: 基于 eventId 的 seen-set —— 同一 envelope 重复到达（SSE 重连重放 /
-  // polling 与 SSE 并跑 / 服务端双发）只 emit 一次，防止 UI 侧文本重复拼接。
-  const seenEventIds = new Set<string>();
 
   const emit = (ev: StreamEvent) => {
     // 兼容层：旧回调从联合事件派生（单点双发，保持一个版本）
@@ -103,9 +100,6 @@ function parseSSEStream(
     // 统一协议 envelope（事件名 = eventType）
     if (isEnvelopePayload(payload)) {
       const ev = payload as AgentEventEnvelope;
-      // AEX-P0-011: eventId 去重 —— 同一事件只消费一次（防重连重放/polling 并跑双发）
-      if (ev.eventId && seenEventIds.has(ev.eventId)) return;
-      if (ev.eventId) seenEventIds.add(ev.eventId);
       if (ev.eventType === 'task.completed' || ev.eventType === 'task.failed' || ev.eventType === 'agent.output.completed') {
         sawTerminal = true;
       }

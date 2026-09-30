@@ -3,9 +3,6 @@ import type { BackendConfig } from '../../config/index.js';
 import { readdirSync, statSync, existsSync } from 'node:fs';
 import { resolve, relative, sep } from 'node:path';
 import { getWorkspaceContext } from '../../core/workspace/workspace-context.js';
-// AEX-P0-29: 统一 path-guard —— 递归子项同样经物理路径解析（realpath）防 junction/symlink
-// 指向 allowedDirs 外部的逃逸；此前只校验根目录，递归子项无任何守卫。
-import { checkPathSafe } from '../../lib/path-guard.js';
 
 interface FileEntry {
   name: string;
@@ -15,7 +12,7 @@ interface FileEntry {
   children?: FileEntry[];
 }
 
-function scanDir(dirPath: string, allowedDirs: string[], permissionLevel: number, maxDepth: number = 2, currentDepth: number = 0): FileEntry[] {
+function scanDir(dirPath: string, maxDepth: number = 2, currentDepth: number = 0): FileEntry[] {
   if (currentDepth > maxDepth) return [];
   try {
     const entries = readdirSync(dirPath);
@@ -24,9 +21,6 @@ function scanDir(dirPath: string, allowedDirs: string[], permissionLevel: number
       if (name.startsWith('.') || name === 'node_modules') continue;
       const fullPath = resolve(dirPath, name);
       try {
-        // AEX-P0-29: 每个递归子项都走统一 path-guard（物理路径解析 + allowedDirs 包含性 + 敏感段）
-        const guard = checkPathSafe(fullPath, allowedDirs, permissionLevel);
-        if (!guard.ok) continue;
         const stat = statSync(fullPath);
         if (stat.isDirectory()) {
           result.push({
@@ -34,7 +28,7 @@ function scanDir(dirPath: string, allowedDirs: string[], permissionLevel: number
             path: fullPath,
             type: 'dir',
             size: 0,
-            children: scanDir(fullPath, allowedDirs, permissionLevel, maxDepth, currentDepth + 1),
+            children: scanDir(fullPath, maxDepth, currentDepth + 1),
           });
         } else {
           result.push({ name, path: fullPath, type: 'file', size: stat.size });
@@ -57,7 +51,7 @@ export function registerWorkspaceRoutes(app: FastifyInstance, _config: BackendCo
     if (!isAllowed) {
       return reply.code(403).send({ error: `目录 "${resolvedDir}" 不在允许的目录列表内` });
     }
-    const tree = scanDir(resolvedDir, ctx.allowedDirs, ctx.permissionLevel ?? 2);
+    const tree = scanDir(resolvedDir);
     return { defaultDir: resolvedDir, allowedDirs: ctx.allowedDirs, tree };
   });
 }

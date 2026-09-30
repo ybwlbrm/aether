@@ -31,11 +31,6 @@ export function hashToolArgs(args: Record<string, unknown>): string {
  * - issuer: 发起审批的来源（如 'local' 本地用户 / 'remote:mobile' 远程批准方）
  * - expiresAt: 过期时间戳（ms），超过后不可消费
  * - consumedAt: 消费时间戳（ms），null 表示尚未消费
- *
- * AEX-P0-20：显式状态机（不再靠 consumedAt/decision 隐式推导）：
- * - pending（创建）→ approved | rejected | expired | cancelled
- * - approvedBy: 决议者（issuer 在消费时写入）
- * - resolvedAt: 决议时间戳（ms）
  */
 export interface ApprovalGrant {
   grantId: string;
@@ -47,12 +42,6 @@ export interface ApprovalGrant {
   expiresAt: number;
   consumedAt: number | null;
   decision?: 'approved' | 'rejected';
-  /** AEX-P0-20: 显式状态机 */
-  status: 'pending' | 'approved' | 'rejected' | 'expired' | 'cancelled';
-  /** AEX-P0-20: 决议者（消费/取消时写入 issuer） */
-  approvedBy?: string;
-  /** AEX-P0-20: 决议时间戳（消费/取消时写入） */
-  resolvedAt?: number;
 }
 
 /** Pending approval 记录，包含绑定上下文（run/task/agent/toolCall + argsHash + grant 元数据） */
@@ -117,7 +106,6 @@ export function createPendingApproval(opts: {
     issuer: opts.issuer ?? DEFAULT_ISSUER,
     expiresAt: now + timeoutMs,
     consumedAt: null,
-    status: 'pending',
   };
 
   pending.set(id, {
@@ -167,12 +155,8 @@ export function consumeApproval(id: string, decision: 'approved' | 'rejected', i
   if (!p) return { ok: false, code: 'NOT_FOUND' };
   if (p.grant.consumedAt !== null) return { ok: false, code: 'ALREADY_CONSUMED' };
   if (Date.now() > p.grant.expiresAt) {
-    // AEX-P0-020: 显式 expired 终态
     p.grant.consumedAt = Date.now();
     p.grant.decision = 'rejected';
-    p.grant.status = 'expired';
-    p.grant.approvedBy = issuer;
-    p.grant.resolvedAt = Date.now();
     p.settle('rejected');
     consumed.set(id, { ...p.grant });
     p.dispose();
@@ -181,9 +165,6 @@ export function consumeApproval(id: string, decision: 'approved' | 'rejected', i
   p.grant.consumedAt = Date.now();
   p.grant.decision = decision;
   p.grant.issuer = issuer;
-  p.grant.status = decision === 'approved' ? 'approved' : 'rejected';
-  p.grant.approvedBy = issuer;
-  p.grant.resolvedAt = Date.now();
   consumed.set(id, { ...p.grant });
   p.settle(decision);
   // 立即从 pending 移除（存档保留用于重放检测）
@@ -233,12 +214,10 @@ export function listPendingApprovals(): Array<{
   }));
 }
 
-/** 查询单个 grant 快照（不存在返回 null；优先 pending，消费/取消后回退 consumed 存档） */
+/** 查询单个 grant 快照（不存在返回 null） */
 export function getApprovalGrant(id: string): ApprovalGrant | null {
   const p = pending.get(id);
-  if (p) return { ...p.grant };
-  const archived = consumed.get(id);
-  return archived ? { ...archived } : null;
+  return p ? { ...p.grant } : null;
 }
 
 /** 测试辅助：强制将 grant 标记为过期（模拟超时后未清理的竞态窗口） */
@@ -247,82 +226,6 @@ export function __setGrantExpiresAtForTest(id: string, expiresAt: number): boole
   if (!p) return false;
   p.grant.expiresAt = expiresAt;
   return true;
-}
-
-/**
- * AEX-P0-020: 取消一个 pending approval（Run 取消 / 会话删除 / 用户主动撤销）。
- * pending → cancelled，决议 rejected 结束等待（调用方据此判定不可执行）。
- * 已消费 / 不存在 → 失败（返回 ok:false）。
- */
-export function cancelApproval(id: string, issuer: string = DEFAULT_ISSUER): { ok: true; grant: ApprovalGrant } | { ok: false; code: 'NOT_FOUND' | 'ALREADY_CONSUMED' } {
-  const archived = consumed.get(id);
-  if (archived) return { ok: false, code: 'ALREADY_CONSUMED' };
-  const p = pending.get(id);
-  if (!p) return { ok: false, code: 'NOT_FOUND' };
-  if (p.grant.consumedAt !== null) return { ok: false, code: 'ALREADY_CONSUMED' };
-  const now = Date.now();
-  p.grant.consumedAt = now;
-  p.grant.decision = 'rejected';
-  p.grant.status = 'cancelled';
-  p.grant.approvedBy = issuer;
-  p.grant.resolvedAt = now;
-  const grant = { ...p.grant };
-  consumed.set(id, grant);
-  p.settle('rejected');
-  p.dispose();
-  return { ok: true, grant };
-}
-
-/**
- * AEX-P0-020: 序列化审批状态快照（pending + consumed 存档）。
- * 崩溃恢复 / 会话重载时持久化，恢复后可判断审批历史与终态。
- */
-export function serializeApprovalState(): {
-  pending: ApprovalGrant[];
-  consumed: ApprovalGrant[];
-} {
-  const pendingSnap: ApprovalGrant[] = [];
-  for (const p of pending.values()) {
-    pendingSnap.push({ ...p.grant });
-  }
-  return {
-    pending: pendingSnap,
-    consumed: Array.from(consumed.values()).map((g) => ({ ...g })),
-  };
-}
-
-/**
- * AEX-P0-020: 从序列化快照恢复审批状态（pending 重新入表；consumed 存档重放防护）。
- * settle/dispose 为运行时机制，序列化仅保留 grant 数据 —— 恢复后 pending grant
- * 失去 settle 句柄（原等待 Promise 已随进程消亡），因此恢复的 pending 仅用于
- * 审计/列表展示；真正的执行等待由新请求重新创建。
- */
-export function deserializeApprovalState(snapshot: { pending: ApprovalGrant[]; consumed: ApprovalGrant[] }): void {
-  for (const g of snapshot.consumed ?? []) {
-    if (g && typeof g.grantId === 'string') consumed.set(g.grantId, { ...g });
-  }
-  for (const g of snapshot.pending ?? []) {
-    if (g && typeof g.grantId === 'string' && !consumed.has(g.grantId) && !pending.has(g.grantId)) {
-      // 恢复的 pending：仅登记 grant 数据（无 settle 句柄 —— 原等待 Promise 已随崩溃消亡）
-      pending.set(g.grantId, {
-        request: {
-          id: g.grantId,
-          toolName: g.toolName,
-          argsSummary: g.toolName,
-          createdAt: g.expiresAt - 60_000,
-          timeoutMs: 60_000,
-          onDecision: () => {},
-          cleanup: () => {},
-          runId: g.runId,
-          taskId: g.taskId,
-          argsHash: g.argsHash,
-        },
-        grant: { ...g },
-        settle: () => {},
-        dispose: () => { pending.delete(g.grantId); },
-      });
-    }
-  }
 }
 
 /** 测试辅助：清空 pending 与 consumed 存档 */

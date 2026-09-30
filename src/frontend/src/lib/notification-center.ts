@@ -29,8 +29,6 @@ export interface AppNotification {
   type: NotificationTerminalType;
   title: string;
   body?: string;
-  /** 通知图标（data:/blob:/https: URL）—— 仅浏览器通知生效，Electron 系统通知用应用自身图标 */
-  icon?: string;
 
   conversationId?: string;
   runId?: string;
@@ -150,7 +148,7 @@ export class NotificationCenter {
     if (typeof NCtor === 'undefined' || typeof NCtor !== 'function') return false;
     if (NCtor.permission !== 'granted') return false;
     try {
-      const n = new NCtor(notification.title, { body: notification.body ?? '', icon: notification.icon });
+      const n = new NCtor(notification.title, { body: notification.body ?? '', icon: undefined });
       n.onclick = () => { if (typeof window !== 'undefined') window.focus(); n.close(); };
       setTimeout(() => n.close(), 10000);
       return true;
@@ -203,10 +201,7 @@ export const notificationCenter = new NotificationCenter();
 
 // ============================================================
 // 兼容导出：旧 sendNotification / requestNotificationPermission 委托到统一中心。
-// 迁移自已废弃的 lib/notifications.ts（P2-011 通知收敛）——旧模块的唯一消费者
-// Layout.tsx 已改为直接引用本文件，旧模块标注 @deprecated 后待删除。
-// 业务代码应改用 notificationCenter.notifyOnce()（终态事件 + dedupeKey），
-// 下面两个函数仅作兼容过渡，签名与旧模块保持一致（icon 已补齐，不再丢图标）。
+// 业务代码应逐步迁移到 notificationCenter.notifyOnce()，这两个函数仅作兼容过渡。
 // ============================================================
 export interface LegacyNotificationOptions {
   body?: string;
@@ -220,13 +215,12 @@ export interface LegacyNotificationOptions {
 }
 
 export function sendNotification(title: string, options: LegacyNotificationOptions = {}): void {
-  const { body = '', icon, always = false, dedupeKey, type = 'completed' } = options;
+  const { body = '', always = false, dedupeKey, type = 'completed' } = options;
   const notification: AppNotification = {
     id: `legacy-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
     type,
     title,
     body,
-    icon,
     createdAt: new Date().toISOString(),
     dedupeKey: dedupeKey ?? `legacy:${title}:${Date.now()}`,
     always,

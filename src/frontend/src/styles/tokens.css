@@ -6,62 +6,18 @@
    ============================================ */
 
 :root {
-  /* ============================================
-     Aether UI Refactor — 新语义 Design Token 层
-     spec §61 / §62 / §66 / §67
-     ============================================ */
-
-  /* ---- Functional accent（交互/链接/选中态）---- */
+  /* ---- Brand and semantic colors ---- */
   --color-accent: #5e9eff;
   --color-accent-hover: color-mix(in oklab, var(--color-accent) 86%, white);
   --color-accent-subtle: color-mix(in oklab, var(--color-accent) 14%, transparent);
   --color-accent-glow: color-mix(in oklab, var(--color-accent) 30%, transparent);
   --on-accent: #ffffff;
 
-  /* ---- Brand accent（Aether 青铜金，极少量使用）----
-     仅用于 app icon / sidebar brand mark / empty state / rare completion */
-  --accent-brand: #c9a36a;
-  --accent-brand-subtle: color-mix(in oklab, var(--accent-brand) 12%, transparent);
-  --accent-brand-strong: color-mix(in oklab, var(--accent-brand) 80%, white);
-
-  /* ---- Status ---- */
   --color-success: #34d399;
   --color-warning: #fbbf24;
   --color-danger: #f87171;
   --color-info: #60a5fa;
   --color-neutral: #94a3b8;
-
-  /* ---- 新语义 token（spec §61）----
-     主题文件（themes.css）为各 theme 覆写；此处给默认暗色值 */
-  --bg-app: var(--bg-base);
-  --bg-environment: transparent;
-  --surface-shell: color-mix(in oklab, var(--bg-base) 86%, white 2%);
-  --surface-content: transparent;
-  --surface-elevated: var(--bg-elevated);
-  --surface-overlay: var(--bg-overlay);
-
-  --text-primary-new: var(--text-primary);
-  --text-secondary-new: var(--text-secondary);
-  --text-muted: var(--text-tertiary);
-
-  --border-subtle: var(--border-secondary);
-  --border-strong: color-mix(in oklab, var(--border-primary) 70%, white 8%);
-
-  --accent-interactive: var(--color-accent);
-
-  /* ---- 新 Radius 体系（spec §62）---- */
-  --radius-subtle: 4px;
-  --radius-control: 6px;
-  --radius-surface: 8px;
-  --radius-overlay: 10px;
-  --radius-dialog: 12px;
-
-  /* ---- Motion tokens（spec §61）---- */
-  --motion-fast: var(--anim-duration-fast);
-  --motion-base: var(--anim-duration);
-  --motion-slow: var(--anim-duration-slow);
-  --motion-enter: var(--anim-ease);
-  --motion-exit: cubic-bezier(0.4, 0, 1, 1);
 
   --color-success-subtle: color-mix(in oklab, var(--color-success) 14%, transparent);
   --color-warning-subtle: color-mix(in oklab, var(--color-warning) 14%, transparent);
@@ -135,16 +91,16 @@
   --font-heading: var(--font-family-heading);
   --font-mono: var(--font-family-mono);
 
-  --font-size-display: 30px;
-  --font-size-title: 22px;
-  --font-size-subtitle: 16px;
+  --font-size-display: 36px;
+  --font-size-title: 24px;
+  --font-size-subtitle: 18px;
   --font-size-body: 15px;
   --font-size-body-sm: 14px;
   --font-size-caption: 13px;
   --font-size-label: 11px;
 
-  --font-page-title: var(--font-size-title);
-  --font-module-title: var(--font-size-subtitle);
+  --font-page-title: var(--font-size-display);
+  --font-module-title: var(--font-size-title);
   --font-card-title: var(--font-size-subtitle);
   --font-base: var(--font-size-body);
   --font-sm: var(--font-size-caption);
@@ -186,12 +142,12 @@
   --input-toolbar-gap: var(--space-5);
   --toolbar-card-gap: var(--space-8);
 
-  /* ---- Radius scale（spec §62：收敛 4/6/8/10/12）---- */
-  --radius-xs: 4px;
-  --radius-sm: 6px;
-  --radius-md: 8px;
-  --radius-lg: 12px;
-  --radius-xl: 16px;
+  /* ---- Radius scale ---- */
+  --radius-xs: 6px;
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --radius-lg: 16px;
+  --radius-xl: 20px;
   --radius-pill: 9999px;
 
   /* Legacy aliases retained while callers migrate to the named scale. */
@@ -210,24 +166,16 @@
   --radius-source-xl: var(--radius-xl);
   --radius-source-pill: var(--radius-pill);
 
-  /* ---- Control and layout dimensions（spec §64/§65：紧凑化）---- */
-  --btn-height: 36px;
-  --btn-padding-x: var(--space-5);
-  --input-height: 40px;
+  /* ---- Control and layout dimensions ---- */
+  --btn-height: 44px;
+  --btn-padding-x: var(--space-6);
+  --input-height: 48px;
   --input-padding-x: var(--space-4);
-  --list-row-height: 44px;
-  --list-padding-x: var(--space-4);
+  --list-row-height: 56px;
+  --list-padding-x: var(--space-5);
   --card-height: 120px;
-  --page-header-min-height: 56px;
-  /* ---- 语义内容宽度（AEX-P1-062）----
-   * 页面不应硬编码 840/1100/1200/1280 等任意数值，统一使用以下语义档位：
-   *   readable: 阅读型（长文/代码）  standard: 常规管理页  wide: 宽屏仪表/编辑  full: 全宽
-   */
-  --content-readable: min(100%, 820px);
-  --content-standard: min(100%, 1120px);
-  --content-wide: min(100%, 1260px);
-  --content-full: 100%;
-  --page-content-max-width: var(--content-standard);
+  --page-header-min-height: 64px;
+  --page-content-max-width: 1100px;
 
   /* ---- Motion ---- */
   --anim-duration-fast: 150ms;
@@ -244,8 +192,8 @@
   --icon-settings: 20px;
   --icon-list: 18px;
 
-  /* ---- Layout（spec §11.1：sidebar 216-232px）---- */
-  --sidebar-width: 224px;
+  /* ---- Layout ---- */
+  --sidebar-width: 260px;
   --max-content-width: var(--page-content-max-width);
 
   /* ---- Focus and elevation ---- */

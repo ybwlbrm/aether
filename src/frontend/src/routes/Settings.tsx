@@ -1,8 +1,8 @@
-﻿import { useEffect, useState, useRef } from 'react';
+import { useEffect, useState, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Settings as SettingsIcon, Palette, Save, Image, Trash2, Plus, FolderOpen, FileText, Star, Cloud, Upload, Download, RefreshCw, Link2, Unlink, Wrench, Search, BookOpen, Workflow, FolderKanban, Database, KeyRound, Globe, Activity, Shield, Compass, GlassWater } from 'lucide-react';
+import { Settings as SettingsIcon, Palette, Save, Image, Trash2, Plus, FolderOpen, FileText, Star, Check, Cloud, Upload, Download, RefreshCw, Link2, Unlink, Wrench, Search, BookOpen, Workflow, FolderKanban, Database, KeyRound, Globe, Activity, Shield, Compass } from 'lucide-react';
 import { useSafeTimeout } from '../hooks/useSafeTimeout';
-import { api } from '../api/client';
+import { api, authHeaders } from '../api/client';
 import { PageHeader } from '../components/PageHeader';
 import { confirm as confirmDialog } from '../components/ui/confirm-dialog';
 import { Tabs, TabList, TabTrigger } from '../components/ui/tabs';
@@ -10,7 +10,6 @@ import { Input } from '../components/ui/input';
 import { useAppStore } from '../store/app';
 // P2-3: 拆分子组件到独立文件
 import { DataManage } from './settings/DataManage';
-import { AppearanceSettings } from './settings/AppearanceSettings';
 
 const tabs = [
   { id: 'general', label: 'General', icon: <SettingsIcon size={20} /> },
@@ -151,46 +150,22 @@ function SyncSettings() {
     return channel;
   };
 
-  // AEX-P1-017：原先这段"回退本地恢复"逻辑在 .then 与 .catch 两个分支里各抄了一份
-  // （14 行完全重复），抽成单一来源；后端不可用与"后端无配置"共用它。
-  const restoreSyncFromLocal = () => {
-    try {
-      const saved = localStorage.getItem('syncConnection');
-      if (!saved) return;
-      const c = JSON.parse(saved);
-      setSupabaseUrl(c.supabaseUrl || '');
-      const localKey = resolveSupabaseKey();
-      if (c.connected && localKey) {
-        setSupabaseKey(localKey);
-        setKeyResolved(true);
-        setConnected(true);
-      } else if (c.connected && !localKey) {
-        // 本地标记为 connected 但 Key 缺失
-        setKeyResolved(false);
-        setConnected(false);
-        setSyncMsg('⚠️ 本地配置缺少 Key，请重新输入');
-      }
-    } catch (_e: unknown) { /* ignore - intentional */ }
-  };
-
   useEffect(() => {
     // 优先从后端恢复已保存的同步配置（重启后 Key 不丢失的核心修复）
-    // AEX-P1-017：经 api.result.syncConfig() 统一契约 —— 原先裸 fetch + .then 链把
-    // 非 2xx 响应也当成功 JSON 解析，且加载失败与"未配置"呈现完全相同的界面。
-    void (async () => {
-      const res = await api.result.syncConfig();
+    fetch('/api/sync/config', {
+      headers: { 'X-Requested-With': 'XMLHttpRequest', ...authHeaders() },
+    }).then(r => r.json()).then((res: any) => {
       // P0-8 修复：后端不再回传明文 supabaseKey（凭证），只返回 hasKey。
       // URL 从后端恢复，Key 从本地 sessionStorage/localStorage 兜底。
       // FE-11 修复：仅在 URL 和 Key 均成功解析后才置 connected=true
-      if (res.ok && res.data.configured && res.data.supabaseUrl && res.data.hasKey) {
-        const { supabaseUrl: url } = res.data;
-        setSupabaseUrl(url);
+      if (res?.configured && res?.supabaseUrl && res?.hasKey) {
+        setSupabaseUrl(res.supabaseUrl);
         const localKey = resolveSupabaseKey();
         if (localKey) {
           setSupabaseKey(localKey);
           setKeyResolved(true);
           // 同时写入 localStorage，保证 Layout 轮询监听可用
-          try { localStorage.setItem('syncConnection', JSON.stringify({ supabaseUrl: url, connected: true })); } catch { /* ignore */ }
+          try { localStorage.setItem('syncConnection', JSON.stringify({ supabaseUrl: res.supabaseUrl, connected: true })); } catch { /* ignore */ }
           setConnected(true);
           setSyncMsg('✅ 已恢复同步配置');
         } else {
@@ -201,9 +176,45 @@ function SyncSettings() {
         }
         return;
       }
-      if (!res.ok) setSyncMsg('⚠️ 同步配置加载失败，已回退本地配置：' + res.error.message);
-      restoreSyncFromLocal();
-    })();
+      // 后端没有配置时，回退到本地恢复
+      try {
+        const saved = localStorage.getItem('syncConnection');
+        if (saved) {
+          const c = JSON.parse(saved);
+          setSupabaseUrl(c.supabaseUrl || '');
+          const localKey = resolveSupabaseKey();
+          if (c.connected && localKey) {
+            setSupabaseKey(localKey);
+            setKeyResolved(true);
+            setConnected(true);
+          } else if (c.connected && !localKey) {
+            // 本地标记为 connected 但 Key 缺失
+            setKeyResolved(false);
+            setConnected(false);
+            setSyncMsg('⚠️ 本地配置缺少 Key，请重新输入');
+          }
+        }
+      } catch (_e: unknown) { /* ignore - intentional */ }
+    }).catch(() => {
+      // 后端不可用，回退本地恢复
+      try {
+        const saved = localStorage.getItem('syncConnection');
+        if (saved) {
+          const c = JSON.parse(saved);
+          setSupabaseUrl(c.supabaseUrl || '');
+          const localKey = resolveSupabaseKey();
+          if (c.connected && localKey) {
+            setSupabaseKey(localKey);
+            setKeyResolved(true);
+            setConnected(true);
+          } else if (c.connected && !localKey) {
+            setKeyResolved(false);
+            setConnected(false);
+            setSyncMsg('⚠️ 本地配置缺少 Key，请重新输入');
+          }
+        }
+      } catch (_e: unknown) { /* ignore - intentional */ }
+    });
   }, []);
 
   // 获取有效的 Supabase key（state 优先，兜底 localStorage → sessionStorage）
@@ -251,9 +262,14 @@ function SyncSettings() {
 
   // 断开时也通知后端
   const handleDisconnect = async () => {
-    // AEX-P1-017：经 api.result.disconnectSync()（无响应体端点用 requestResultVoid）。
-    // 断开是本地优先操作，后端通知失败不阻断，但需如实告知用户云端仍处连接态。
-    const res = await api.result.disconnectSync();
+    // 通知后端断开
+    try {
+      await fetch('/api/sync/disconnect', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest', ...authHeaders() },
+        body: JSON.stringify({}),
+      });
+    } catch { /* ignore */ }
     // 取消 Realtime 订阅
     if (sbRef.current && realtimeChannelRef.current) {
       sbRef.current.removeChannel(realtimeChannelRef.current).catch(() => {});
@@ -265,7 +281,7 @@ function SyncSettings() {
     setKeyResolved(false); // FE-11: 断开时重置 Key 解析状态
     setSupabaseUrl('');
     setSupabaseKey('');
-    setSyncMsg(res.ok ? '已断开连接' : '⚠️ 本地已断开，但通知后端失败：' + res.error.message);
+    setSyncMsg('已断开连接');
     try { localStorage.removeItem('syncConnection'); } catch { /* ignore */ }
     try { localStorage.removeItem('aether_supabase_key'); } catch { /* ignore */ }
     try { sessionStorage.removeItem('aether_supabase_key'); } catch { /* ignore */ }
@@ -872,7 +888,7 @@ export function Settings() {
 
   return (
     <div className="min-h-screen" style={{ background: 'var(--bg-base)', backgroundImage: 'var(--bg-gradient)' }}>
-      <div style={{ maxWidth: 'var(--content-standard)', margin: '0 auto', padding: '0 16px' }}>
+      <div style={{ maxWidth: 'min(1100px, 100%)', margin: '0 auto', padding: '0 16px' }}>
         <PageHeader title="设置" description="应用设置与外观定制" icon={<SettingsIcon size={22} />} color="var(--color-accent)" />
         {/* Coding 模式：功能导航（未在侧边栏展示的功能） */}
         {uiMode === 'coding' && (
@@ -998,7 +1014,259 @@ export function Settings() {
             )}
             {activeTab === 'general' && <DataManage />}
             {activeTab === 'appearance' && (
-              <AppearanceSettings />
+              <div className="glass-card">
+                <h2 style={{ fontSize: 'var(--font-module-title)', fontWeight: 600, color: 'var(--text-primary)', marginBottom: 20 }}>Appearance</h2>
+                <div className="space-y-5">
+                  <div>
+                    <label className="block text-sm" style={{ color: 'var(--text-secondary)', marginBottom: 8 }}>Theme</label>
+                    <select className="input select" value={theme} onChange={e => setTheme(e.target.value)}>
+                      <option value="dark">Dark</option><option value="light">Light</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-sm" style={{ color: 'var(--text-secondary)', marginBottom: 8 }}>Custom Background</label>
+                    <input ref={fileInputRef} type="file" accept="image/*" className="hidden" onChange={handleImageUpload} />
+                    <div className="flex items-center gap-3">
+                      <button className="btn btn-primary" onClick={() => fileInputRef.current?.click()}>
+                        <Image size={18} /> Upload Image
+                      </button>
+                      {bgImage && (
+                        <button className="btn btn-ghost" onClick={handleRemoveBg}>
+                          <Trash2 size={18} /> Remove
+                        </button>
+                      )}
+                    </div>
+                    {bgImage && (
+                      <div className="mt-4 p-2 rounded-[14px]" style={{ background: 'var(--card-bg)', border: '1px solid var(--card-border)' }}>
+                        <img src={bgImage} alt="Background preview" style={{ maxWidth: '100%', maxHeight: '200px', borderRadius: '8px', objectFit: 'cover' }} />
+                      </div>
+                    )}
+                    <p className="text-xs mt-2" style={{ color: 'var(--text-tertiary)' }}>Upload an image to use as custom background. Apple Liquid Glass style will be applied automatically.</p>
+                  </div>
+
+                  {/* 背景轮播 */}
+                  <div style={{ borderTop: '1px solid var(--border-primary)', paddingTop: 24, marginTop: 24 }}>
+                    <div className="flex items-center justify-between mb-4">
+                      <h3 style={{ fontSize: 'var(--font-card-title)', fontWeight: 600, color: 'var(--text-primary)' }}>背景轮播</h3>
+                      <div className="flex items-center gap-2">
+                        <label style={{ fontSize: 12, color: 'var(--text-secondary)' }}>启用</label>
+                        <button onClick={() => { const next = !bgEnabled; setBgEnabled(next); if (next && bgImages.length > 0) window.dispatchEvent(new CustomEvent('bg-slideshow-start', { detail: { images: bgImages, interval: bgInterval } })); else window.dispatchEvent(new CustomEvent('bg-slideshow-stop', {})); }}
+                          role="switch" aria-checked={bgEnabled} aria-label="背景轮播开关"
+                          style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: 20, color: bgEnabled ? 'var(--color-accent)' : 'var(--text-tertiary)' }}>
+                          {bgEnabled ? '🔵' : '⚪'}
+                        </button>
+                      </div>
+                    </div>
+                    <div className="space-y-4">
+                      <div>
+                        <label className="block text-sm" style={{ color: 'var(--text-secondary)', marginBottom: 8 }}>选择文件夹上传（JPG/PNG）</label>
+                        <input type="file" className="hidden" onChange={handleBgFolderSelect} multiple accept="image/jpeg,image/png" ref={(el) => { bgFolderInputRef.current = el; }} />
+                        <div className="flex items-center gap-3">
+                          <button className="btn btn-primary" onClick={() => bgFolderInputRef.current?.click()}
+                            style={bgMode === 'dir' ? { opacity: 0.4, pointerEvents: 'none' } : undefined}
+                            title={bgMode === 'dir' ? '目录模式下不可上传，请先切回上传模式' : undefined}>
+                            <FolderOpen size={18} /> 选择文件夹
+                          </button>
+                          {bgMode === 'dir' && <span className="text-xs" style={{ color: 'var(--color-warning)' }}>目录模式下不可上传，请先切回上传模式</span>}
+                          {bgFolder && <span className="text-sm" style={{ color: 'var(--text-secondary)' }}>{bgFolder}（{bgImages.length} 张）</span>}
+                        </div>
+                      </div>
+                      {/* 目录模式：直接读取本地文件夹 */}
+                      <div style={{ borderTop: '1px dashed var(--border-primary)', paddingTop: 16 }}>
+                        <div className="flex items-center justify-between mb-2">
+                          <label className="block text-sm" style={{ color: 'var(--text-secondary)' }}>目录模式（直接读取本地文件夹图片）</label>
+                          {bgMode === 'dir' && (
+                            <button className="btn btn-ghost btn-sm" onClick={handleSwitchToUpload} style={{ fontSize: 12 }}>
+                              切回上传模式
+                            </button>
+                          )}
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <input className="input flex-1" type="text" placeholder="输入图片文件夹路径，如 D:\壁纸"
+                            value={bgDirInput}
+                            onChange={e => setBgDirInput(e.target.value)}
+                            onKeyDown={e => { if (e.key === 'Enter' && !(e.nativeEvent as any).isComposing) handleEnableDirMode(); }} />
+                          <button className="btn btn-secondary flex-shrink-0" onClick={handleEnableDirMode} style={{ color: bgMode === 'dir' ? 'var(--color-accent)' : undefined }}>
+                            {bgMode === 'dir' ? '重新扫描' : '启用目录模式'}
+                          </button>
+                        </div>
+                        {bgDirInfo && <p className="text-xs mt-2" style={{ color: 'var(--color-accent)' }}>{bgDirInfo}</p>}
+                        {bgMode === 'dir' && (
+                          <div className="flex gap-2 overflow-x-auto" style={{ padding: '8px 0' }}>
+                            {bgImages.slice(0, 10).map((img, i) => (
+                              <img key={i} src={img} alt="" style={{ width: 60, height: 40, borderRadius: 4, objectFit: 'cover', border: '1px solid var(--card-border)' }} />
+                            ))}
+                            {bgImages.length === 0 && <span className="text-xs" style={{ color: 'var(--text-tertiary)', alignSelf: 'center' }}>该目录暂无图片（支持 png/jpg/jpeg/gif/webp/bmp/avif）</span>}
+                            {bgImages.length > 10 && <span className="text-xs" style={{ color: 'var(--text-tertiary)', alignSelf: 'center' }}>+{bgImages.length - 10}</span>}
+                          </div>
+                        )}
+                      </div>
+                      {/* 背景轮播：切换秒数 —— 编辑态自由输入，interval 事件只更新时间不重建轮播 */}
+                        <div>
+                          <label className="block text-sm" style={{ color: 'var(--text-secondary)', marginBottom: 8 }}>切换秒数</label>
+                          <input className="input" type="number" min="3" max="60" value={bgIntervalInput}
+                            onChange={e => {
+                              setBgIntervalInput(e.target.value);
+                              const raw = parseInt(e.target.value, 10);
+                              if (!Number.isFinite(raw)) return; // 空/非数字：保持编辑态，不回填
+                              const v = Math.min(60, Math.max(3, raw));
+                              setBgInterval(v);
+                              // 独立事件：只更新轮播间隔，不重建轮播/不重置索引
+                              window.dispatchEvent(new CustomEvent('bg-slideshow-interval', { detail: { interval: v } }));
+                            }}
+                            onBlur={() => {
+                              const raw = parseInt(bgIntervalInput, 10);
+                              // 回退到最后有效值，而非硬编码 10（空输入时 user 可能只是误操作）
+                              const v = Number.isFinite(raw) ? Math.min(60, Math.max(3, raw)) : bgInterval;
+                              setBgInterval(v);
+                              setBgIntervalInput(String(v));
+                              window.dispatchEvent(new CustomEvent('bg-slideshow-interval', { detail: { interval: v } }));
+                              api.setBackgroundInterval(v).catch(() => { console.warn('[Settings] 间隔持久化失败'); });
+                            }}
+                            onKeyDown={e => { if (e.key === 'Enter' && !(e.nativeEvent as any).isComposing) (e.target as HTMLInputElement).blur(); }} />
+                        </div>
+                      {bgMode !== 'dir' && bgImages.length > 0 && (
+                        <div className="flex gap-2 overflow-x-auto" style={{ padding: '8px 0' }}>
+                          {bgImages.slice(0, 10).map((img, i) => (
+                            <img key={i} src={img} alt="" style={{ width: 60, height: 40, borderRadius: 4, objectFit: 'cover', border: '1px solid var(--card-border)' }} />
+                          ))}
+                          {bgImages.length > 10 && <span className="text-xs" style={{ color: 'var(--text-tertiary)', alignSelf: 'center' }}>+{bgImages.length - 10}</span>}
+                        </div>
+                      )}
+                      {bgMode === 'upload' && bgImages.length > 0 && (
+                        <button className="btn btn-ghost btn-sm" onClick={async () => {
+                          // P0-4 修复：清除轮播图片前二次确认
+                          if (!(await confirmDialog('确定清除所有轮播图片？此操作不可撤销。'))) return;
+                          setBgImages([]); setBgFolder(''); setBgEnabled(false);
+                          try { await api.clearBackgrounds(); } catch (_e: unknown) { console.warn("[SilentCatch]", _e); }
+                          window.dispatchEvent(new CustomEvent('bg-slideshow-clear', {}));
+                        }}
+                          style={{ color: 'var(--color-danger)' }}>清除轮播图片</button>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* 玻璃效果滑块 */}
+                  <div style={{ borderTop: '1px solid var(--border-primary)', paddingTop: 24, marginTop: 24 }}>
+                    <div className="flex items-center justify-between mb-4">
+                      <div className="flex items-center gap-3">
+                        <h3 style={{ fontSize: 'var(--font-card-title)', fontWeight: 600, color: 'var(--text-primary)' }}>Liquid Glass 效果</h3>
+                        <button onClick={handleToggleGlass}
+                          role="switch" aria-checked={glassEnabled} aria-label="Liquid Glass 效果开关"
+                          style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: 18, color: glassEnabled ? 'var(--color-accent)' : 'var(--text-tertiary)' }}>
+                          {glassEnabled ? '🔵' : '⚪'}
+                        </button>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <button className="btn btn-ghost btn-sm" onClick={handleResetGlass} style={{ fontSize: 12 }}>重置默认</button>
+                      </div>
+                    </div>
+                    <div className="space-y-5">
+                      {/* 模糊半径 */}
+                      <div>
+                        <div className="flex items-center justify-between mb-2">
+                          <label style={{ fontSize: 13, color: 'var(--text-secondary)' }}>模糊半径</label>
+                          <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-primary)', fontFamily: 'var(--font-mono)', minWidth: 50, textAlign: 'right' }}>{glassBlur}px</span>
+                        </div>
+                        <input type="range" min="0" max="60" value={glassBlur} onChange={e => handleGlassBlur(parseInt(e.target.value))}
+                          style={{ width: '100%', height: 6, borderRadius: 3, appearance: 'none', WebkitAppearance: 'none', background: 'linear-gradient(to right, var(--color-accent) ' + (glassBlur / 60 * 100) + '%, rgba(255,255,255,0.1) ' + (glassBlur / 60 * 100) + '%)', outline: 'none', cursor: 'pointer' }} />
+                        <div className="flex justify-between text-xs" style={{ color: 'var(--text-tertiary)', marginTop: 4 }}><span>0px</span><span>60px</span></div>
+                      </div>
+
+                      {/* 饱和度 */}
+                      <div>
+                        <div className="flex items-center justify-between mb-2">
+                          <label style={{ fontSize: 13, color: 'var(--text-secondary)' }}>饱和度</label>
+                          <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-primary)', fontFamily: 'var(--font-mono)', minWidth: 50, textAlign: 'right' }}>{glassSaturate}%</span>
+                        </div>
+                        <input type="range" min="50" max="400" value={glassSaturate} onChange={e => handleGlassSaturate(parseInt(e.target.value))}
+                          style={{ width: '100%', height: 6, borderRadius: 3, appearance: 'none', WebkitAppearance: 'none', background: 'linear-gradient(to right, var(--color-accent) ' + ((glassSaturate - 50) / 350 * 100) + '%, rgba(255,255,255,0.1) ' + ((glassSaturate - 50) / 350 * 100) + '%)', outline: 'none', cursor: 'pointer' }} />
+                        <div className="flex justify-between text-xs" style={{ color: 'var(--text-tertiary)', marginTop: 4 }}><span>50%</span><span>400%</span></div>
+                      </div>
+
+                      {/* 透明度 */}
+                      <div>
+                        <div className="flex items-center justify-between mb-2">
+                          <label style={{ fontSize: 13, color: 'var(--text-secondary)' }}>透明度</label>
+                          <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-primary)', fontFamily: 'var(--font-mono)', minWidth: 50, textAlign: 'right' }}>{glassOpacity.toFixed(2)}</span>
+                        </div>
+                        <input type="range" min="0.02" max="0.30" step="0.01" value={glassOpacity} onChange={e => handleGlassOpacity(parseFloat(e.target.value))}
+                          style={{ width: '100%', height: 6, borderRadius: 3, appearance: 'none', WebkitAppearance: 'none', background: 'linear-gradient(to right, var(--color-accent) ' + ((glassOpacity - 0.02) / 0.28 * 100) + '%, rgba(255,255,255,0.1) ' + ((glassOpacity - 0.02) / 0.28 * 100) + '%)', outline: 'none', cursor: 'pointer' }} />
+                        <div className="flex justify-between text-xs" style={{ color: 'var(--text-tertiary)', marginTop: 4 }}><span>0.02</span><span>0.30</span></div>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* UI 主题选择 */}
+                  <div style={{ borderTop: '1px solid var(--border-primary)', paddingTop: 24, marginTop: 24 }}>
+                    <h3 style={{ fontSize: 'var(--font-card-title)', fontWeight: 600, color: 'var(--text-primary)', marginBottom: 16 }}>UI 主题</h3>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+                      {[
+                        { id: 'liquid-glass', label: 'Liquid Glass', desc: 'Apple 毛玻璃', colors: ['var(--color-accent)', '#a78bfa', '#0a0b10'] },
+                        { id: 'shadcn', label: 'shadcn/ui', desc: '简洁中性', colors: ['#3b82f6', '#09090b', '#18181b'] },
+                        { id: 'geist', label: 'Geist', desc: 'Vercel 极简', colors: ['#0070f3', '#000000', '#1a1a1a'] },
+                        { id: 'magic', label: 'Magic UI', desc: '渐变光效', colors: ['#a78bfa', '#0a0a0f', '#1a1a2e'] },
+                        { id: 'origin', label: 'Origin UI', desc: '圆润柔和', colors: ['#6366f1', '#0c0c10', '#1c1c24'] },
+                        { id: 'dark-minimal', label: '简约暗色', desc: '纯黑低对比', colors: ['#666666', '#000000', '#111111'] },
+                        { id: 'light', label: '简约亮色', desc: '纯白高对比', colors: ['#3b82f6', '#fafafa', '#ffffff'] },
+                      ].map(t => (
+                        <button
+                          key={t.id}
+                          onClick={() => {
+                            setActiveTheme(t.id);
+                            localStorage.setItem('uiTheme', t.id);
+                            document.documentElement.setAttribute('data-theme', t.id === 'liquid-glass' ? 'dark' : t.id);
+                            // 重置玻璃滑块到主题默认值（清除 inline 样式，让 CSS 变量生效）
+                            const root = document.documentElement;
+                            root.style.removeProperty('--glass-blur-radius');
+                            root.style.removeProperty('--glass-saturate');
+                            root.style.removeProperty('--glass-vibrancy-opacity');
+                            const cs = getComputedStyle(root);
+                            const newBlur = parseInt(cs.getPropertyValue('--glass-blur-radius').trim()) || 26;
+                            const newSat = parseInt(cs.getPropertyValue('--glass-saturate').trim()) || 200;
+                            const newOp = parseFloat(cs.getPropertyValue('--glass-vibrancy-opacity').trim()) || 0.06;
+                            setGlassBlur(newBlur);
+                            setGlassSaturate(newSat);
+                            setGlassOpacity(newOp);
+                            const effect = { blurRadius: newBlur, saturate: newSat, vibrancyOpacity: newOp };
+                            localStorage.setItem('glassEffect', JSON.stringify(effect));
+// 强制重绘所有玻璃卡片（刷新 backdrop-filter GPU 缓存）
+                            const repaintEls = document.querySelectorAll<HTMLElement>('.glass-card, .sidebar-glass, .input, .select, .btn');
+                            repaintEls.forEach(el => {
+                                el.style.transform = 'translateZ(0.001px)';
+                                el.style.backdropFilter = 'none';
+                              });
+                              setTimeout(() => {
+                                repaintEls.forEach(el => {
+                                  el.style.transform = '';
+                                  el.style.backdropFilter = '';
+                                });
+                              }, 50);
+                          }}
+                          className="rounded-[14px] transition-all"
+                          style={{
+                            padding: 12,
+                            background: activeTheme === t.id ? `${t.colors[0]}15` : 'var(--card-bg)',
+                            border: activeTheme === t.id ? `2px solid ${t.colors[0]}` : '1px solid var(--card-border)',
+                            borderRadius: 14,
+                            display: 'flex', flexDirection: 'column', gap: 10,
+                          }}
+                        >
+                          <div style={{ display: 'flex', gap: 5 }}>
+                            {t.colors.map((c, ci) => (
+                              <span key={ci} style={{ width: 26, height: 18, borderRadius: 5, background: c, border: '1px solid rgba(255,255,255,0.15)', flexShrink: 0 }} />
+                            ))}
+                          </div>
+                          <div>
+                            <div style={{ fontSize: 13, fontWeight: 600, color: activeTheme === t.id ? t.colors[0] : 'var(--text-primary)' }}>{t.label}</div>
+                            <div style={{ fontSize: 11, color: 'var(--text-tertiary)', marginTop: 2 }}>{t.desc}</div>
+                          </div>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+              </div>
             )}
             {activeTab === 'sync' && (
               <SyncSettings />

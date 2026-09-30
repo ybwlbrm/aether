@@ -6,8 +6,7 @@ import { randomUUID } from 'node:crypto';
 import { desc, like, eq } from 'drizzle-orm';
 import { getDb, saveDb } from '../../db/client.js';
 import { searchHistory, messages, conversations } from '../../db/schema/index.js';
-import { assertPublicResolve } from '../../lib/safe-fetch.js';
-import { logger } from '../../lib/logger.js';
+import { isPublicFetchUrl } from '../../lib/safe-fetch.js';
 
 /** 扫描目录查找文件名/内容匹配本地文件的简单全文搜索 */
 function searchLocalFiles(dir: string, query: string, maxResults = 10): { title: string; url: string; snippet: string }[] {
@@ -42,17 +41,10 @@ function searchLocalFiles(dir: string, query: string, maxResults = 10): { title:
                 results.push({ title: name, url: fullPath, snippet: content.slice(start, start + 120).replace(/\s+/g, ' ').trim() + '...' });
                 if (results.length >= maxResults) return;
               }
-            } catch {
-              // AEX-P2-004 分类：intentional fallback —— 二进制/编码异常的文件跳过内容匹配，
-              // 文件名匹配分支（上方）仍会命中，不影响本轮召回。
-            }
+            } catch { /* binary or read error */ }
           }
         }
-      } catch {
-        // AEX-P2-004 分类：ignored —— stat/遍历过程中的单文件失败（权限、并发删除、符号链接断链）
-        // 不应中断整棵目录扫描，继续处理后续条目。
-        logger.debug({ event: 'search.local_entry_skipped', dir: current, entry: name }, '本地文件条目不可读，已跳过');
-      }
+      } catch (_e: unknown) { /* ignore - intentional */ }
     }
   };
   walk(dir, 0);
@@ -66,12 +58,8 @@ function searchLocalFiles(dir: string, query: string, maxResults = 10): { title:
 // （云元数据）等内网地址；IPv6 字面量与 DNS rebinding 由 safe-fetch 层统一拦截。
 
 async function fetchWebPage(url: string, query: string): Promise<{ title: string; url: string; snippet: string }[]> {
-  // AEX-P0-28: 公网-only 校验升级为 DNS 解析级（防 rebinding）—— 不安全地址直接跳过，不发出请求
-  try {
-    await assertPublicResolve(url);
-  } catch {
-    return [];
-  }
+  // Wave0-SS: 公网-only 校验 — 不安全地址直接跳过，不发出请求
+  if (!isPublicFetchUrl(url)) return [];
 
   let currentUrl = url;
   let redirectCount = 0;
@@ -99,10 +87,8 @@ async function fetchWebPage(url: string, query: string): Promise<{ title: string
         } catch {
           return [];
         }
-        // AEX-P0-28: 重定向目标同样走 DNS 解析级公网校验（防 rebinding）
-        try {
-          await assertPublicResolve(nextUrl);
-        } catch {
+        // Wave0-SS: 重定向目标同样走公网-only 校验
+        if (!isPublicFetchUrl(nextUrl)) {
           return [];
         }
         currentUrl = nextUrl;
@@ -276,9 +262,7 @@ export function registerSearchRoutes(app: FastifyInstance, config: BackendConfig
           }
         }
       } catch (e: unknown) {
-        // AEX-P2-004 分类：recoverable —— 单个来源失败降级为「该来源无结果」，
-        // 其余来源与整体响应照常返回。
-        logger.warn({ event: 'search.source_failed', source: 'duckduckgo', err: e, query: body.query }, 'DuckDuckGo 搜索失败，降级为空结果');
+        console.error('[Search] DuckDuckGo error:', (e instanceof Error ? e.message : String(e)));
       }
     }
 
@@ -292,8 +276,7 @@ export function registerSearchRoutes(app: FastifyInstance, config: BackendConfig
           }
         }
       } catch (e: unknown) {
-        // AEX-P2-004 分类：recoverable —— 本地目录不可读时跳过该来源，网络来源不受影响。
-        logger.warn({ event: 'search.source_failed', source: 'local', err: e, query: body.query }, '本地文件搜索失败，降级为空结果');
+        console.error('[Search] Local error:', (e instanceof Error ? e.message : String(e)));
       }
     }
 
@@ -311,8 +294,7 @@ export function registerSearchRoutes(app: FastifyInstance, config: BackendConfig
           }
         }
       } catch (e: unknown) {
-        // AEX-P2-004 分类：recoverable —— 正文抓取失败时保留 DuckDuckGo 摘要结果。
-        logger.warn({ event: 'search.source_failed', source: 'web', err: e, query: body.query }, '网页正文抓取失败，保留摘要结果');
+        console.error('[Search] Web error:', (e instanceof Error ? e.message : String(e)));
       }
     }
 
@@ -367,8 +349,7 @@ export function registerSearchRoutes(app: FastifyInstance, config: BackendConfig
       }).run();
       saveDb(config);
     } catch (e: unknown) {
-      // AEX-P2-004 分类：recoverable —— 搜索历史是旁路审计数据，写失败不影响本次检索结果返回。
-      logger.error({ event: 'search.history_persist_failed', err: e, query: body.query }, '搜索历史写入失败');
+      console.error('[Search] 保存历史失败:', (e instanceof Error ? e.message : String(e)));
     }
 
     // 响应形状：保留所有现有字段；新增可选字段（total/page/pageSize/hasMore/score）
@@ -409,12 +390,7 @@ export function registerSearchRoutes(app: FastifyInstance, config: BackendConfig
   }, async () => {
     const db = getDb();
     db.delete(searchHistory).run();
-    try {
-      saveDb(config);
-    } catch (e: unknown) {
-      // AEX-P2-004 分类：recoverable —— SQLite 内的删除已生效，快照落盘失败交由下次 saveDb 补齐。
-      logger.error({ event: 'search.history_persist_failed', err: e }, '清空搜索历史后持久化失败');
-    }
+    try { saveDb(config); } catch (e: unknown) { console.error('[Search] 清空历史持久化失败:', (e instanceof Error ? e.message : String(e))); }
     return { success: true };
   });
 
@@ -506,8 +482,7 @@ export function registerSearchRoutes(app: FastifyInstance, config: BackendConfig
       saveDb(config);
       return { success: true };
     } catch (e: unknown) {
-      // AEX-P2-004 分类：recoverable —— 接口已显式返回失败给调用方，不向上抛。
-      logger.error({ event: 'search.history_persist_failed', err: e, query: body.query }, '搜索历史写入失败');
+      console.error('[Search] 记录历史失败:', (e instanceof Error ? e.message : String(e)));
       return { success: false, error: '记录失败' };
     }
   });

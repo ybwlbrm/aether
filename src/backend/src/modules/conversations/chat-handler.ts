@@ -27,7 +27,7 @@ import { RunLifecycleManager } from '../../core/runtime/index.js';
 import { budgetFromAgentLimits } from '../../core/runtime/execution-loop.js';
 import { getWorkspaceContext } from '../../core/workspace/workspace-context.js';
 import { initSseHeaders, createSseSender, startSseHeartbeat, clearSseHeartbeat, sendSseError, sendSseDone, endSseResponse } from './sse-stream.js';
-import { processCompaction, executeForceSummary, resolveTextFallback, type BudgetExceededKind } from './compaction.js';
+import { processCompaction, executeForceSummary } from './compaction.js';
 import { executeToolLoop, type ToolLoopResult } from './tool-loop.js';
 import { rebuildProviderMessages } from '../../lib/message-history.js';
 
@@ -46,17 +46,6 @@ function budgetLabel(kind: 'turns' | 'duration' | 'tokens' | 'tool_calls' | 'cos
     case 'tool_calls': return '工具调用';
     case 'cost': return '费用';
   }
-}
-
-/**
- * 整改计划第 5 章（P1）：预算耗尽文案（SSE error 事件与落库回复共用同一份措辞）。
- * AEX-P0-003：预算耗尽时这是唯一允许的补文本 —— 必须说清「为什么停」，
- * 不得写「处理完成」（伪造成功）。
- */
-function budgetExhaustedMessage(kind: BudgetExceededKind | null): string {
-  return kind === null
-    ? '执行预算已耗尽，任务停止执行。'
-    : `已达到${budgetLabel(kind)}预算，任务停止执行（可停止或发送新消息继续）。`;
 }
 
 /**
@@ -239,13 +228,7 @@ export async function handleSendMessage(
   // 整改计划第 5 章（P1）：预算耗尽标记 —— 提升到 try 外部（终态写入/SSE 事件需要）
   let budgetExceeded: 'turns' | 'duration' | 'tokens' | 'tool_calls' | 'cost' | null = null;
   // 整改计划第 5 章（P1）：循环 UI 指标 —— 已用轮数/时长/工具调用（随终态事件推给前端）
-  let loopMetrics: {
-    turnsUsed: number; elapsedMs: number; toolCalls: number; budgetExceeded: string | null;
-    retryCheckpoint?: {
-      retryCount: number; turn: number; lastError: string | null; currentObjective: string;
-      completedSteps: readonly string[]; pendingSteps: readonly string[];
-    }
-  } | null = null;
+  let loopMetrics: { turnsUsed: number; elapsedMs: number; toolCalls: number; budgetExceeded: string | null } | null = null;
   let endedNormally = false;
   let executionEndReason: ToolLoopResult['endReason'] = 'error'
   let normalCompletion = false
@@ -427,7 +410,6 @@ ${fileAttachmentsHint}
         apiKey: provider.apiKey,
         activeModel,
         activeTools,
-        providerId: provider.id,
         maxTurns,
         clientAbortSignal: clientAbort.signal,
         sseSend,
@@ -468,31 +450,12 @@ ${fileAttachmentsHint}
         toolCalls: toolLoopResult.toolCallCount,
         budgetExceeded: toolLoopResult.budgetExceeded,
       };
-      // P0-008: 持久化 retry 摘要（崩溃恢复后可判断"已重试 N 次"）
-      // —— checkpoint 序列化 + 任务级重试计数进入 runs.metadata
-      if (toolLoopResult.checkpoint || toolLoopResult.retryCount > 0) {
-        loopMetrics.retryCheckpoint = {
-          retryCount: toolLoopResult.retryCount,
-          turn: toolLoopResult.checkpoint?.turn ?? toolLoopResult.turnsUsed,
-          lastError: toolLoopResult.checkpoint?.lastError ?? null,
-          currentObjective: toolLoopResult.checkpoint?.currentObjective ?? '',
-          completedSteps: toolLoopResult.checkpoint?.completedSteps ?? [],
-          pendingSteps: toolLoopResult.checkpoint?.pendingSteps ?? [],
-        };
-      }
 
-      // maxTurns 耗尽后的兜底处理 — 这些变量在 while 循环内声明，循环外不可见。
-      // AEX-P0-003：补文本的决策统一走 resolveTextFallback（唯一事实源）——
-      // 预算耗尽不得发起隐藏的 executeForceSummary 模型调用，也不得伪造「处理完成」。
-      const textFallback = resolveTextFallback({
-        endedNormally,
-        executionEndReason,
-        budgetExceeded,
-        aiContent,
-        aiError,
-      });
-      if (textFallback === 'force-summary') {
-        // 核心修复：工具循环结束后 AI 没给文本总结（aiContent 为空），追加一轮强制总结，
+      // maxTurns 耗尽后的兜底处理 — 这些变量在 while 循环内声明，循环外不可见
+      // 用 aiContent 是否为空判断，不引用循环内变量
+       if (!endedNormally && executionEndReason !== 'cancelled' && !aiContent && !aiError) {
+         // 核心修复：工具循环结束后 AI 没给文本总结（aiContent 为空），追加一轮强制总结，
+
         // 让 AI 基于所有工具结果给出完整答复，而不是填占位符
         const forceSummary = await executeForceSummary(
           apiMessages,
@@ -513,10 +476,9 @@ ${fileAttachmentsHint}
           streamedContent = aiContent;
         }
       }
-      if (textFallback === 'force-summary' && !aiContent) {
-        aiContent = '✅ 处理完成（工具调用已执行）';
-      }
-
+       if (!endedNormally && executionEndReason !== 'cancelled' && !aiContent && !aiError) {
+         aiContent = '✅ 处理完成（工具调用已执行）';
+       }
 
        // 去重复显示（仅正常完成态）：避免把失败/取消的真实错误替换成工具结果。
 
@@ -534,14 +496,9 @@ ${fileAttachmentsHint}
       // 流式中每个 delta 已实时发送（完整内容已推到前端），这里若再次发送 aiContent
       // 前端纯追加会显示两遍。仅在发生「去重复制替换」（aiContent 已被换成简短提示）
       // 时发送 message-replace 事件让前端替换累积内容；未替换时不再重发。
-      // AEX-P0-003：文案由 textFallback 决定 —— 预算耗尽时说清为什么停，
-      // 绝不写「处理完成」（那是伪造成功，且会覆盖执行循环的结构化停止说明）。
-      if (!aiContent && !aiError && executionEndReason !== 'cancelled') {
-        aiContent = textFallback === 'budget-notice'
-          ? budgetExhaustedMessage(budgetExceeded)
-          : '处理完成（无文本输出）';
-      }
-
+       if (!aiContent && !aiError && executionEndReason !== 'cancelled') {
+         aiContent = '处理完成（无文本输出）';
+       }
 
       if (aiContent !== streamedContent) {
         sseSend('message-replace', JSON.stringify({ content: aiContent }));
@@ -684,7 +641,7 @@ ${fileAttachmentsHint}
     });
   } else if (budgetExceeded) {
     // 整改计划第 5 章（P1）：预算耗尽 → 写 budget_exceeded 错误码（前端显示恢复动作）
-    const budgetMsg = budgetExhaustedMessage(budgetExceeded);
+    const budgetMsg = `已达到${budgetLabel(budgetExceeded)}预算，任务停止执行（可停止或发送新消息继续）。`;
     sseSend('error', JSON.stringify({ message: budgetMsg, code: 'BUDGET_EXCEEDED', budgetExceeded }));
     eventBus.emit(runContext.sessionId, 'task.failed', {
       taskId: runContext.taskId,

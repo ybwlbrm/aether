@@ -1,5 +1,4 @@
 import type { SupabaseClient } from '@supabase/supabase-js'
-import { logger } from '../../lib/logger.js'
 
 export type RemoteCommandTerminalStatus = 'completed' | 'failed' | 'cancelled'
 
@@ -55,16 +54,6 @@ function terminalContext(input: RemoteCommandTerminalUpdate): JsonRecord {
   }
 }
 
-/** 结构化日志上下文：camelCase 字段顺序固定（run → task → command → status），便于按 runId 检索。 */
-function terminalLogContext(input: RemoteCommandTerminalUpdate): JsonRecord {
-  return {
-    runId: input.runId,
-    taskId: input.taskId,
-    commandId: input.commandId,
-    status: input.status,
-  }
-}
-
 function terminalMetadata(
   input: RemoteCommandTerminalUpdate,
   failure: string,
@@ -116,29 +105,24 @@ export async function updateRemoteCommandTerminal(
   const initial = await executeUpdate(input, basePatch)
   if (initial.error === null) return { kind: 'synced', error: null }
 
-  logger.error(
-    { event: 'sync.remote_command_terminal_update_failed', ...terminalLogContext(input), error: initial.error },
-    '[Sync] remote command terminal update failed',
+  console.error(
+    `[Sync] remote command terminal update failed (runId=${input.runId ?? 'none'}, taskId=${input.taskId ?? 'none'}, commandId=${input.commandId}, status=${input.status}):`,
+    initial.error,
   )
   const compensation = await executeUpdate(input, {
     ...basePatch,
     metadata: terminalMetadata(input, initial.error, processedAt),
   })
   if (compensation.error === null) {
-    logger.error(
-      { event: 'sync.remote_command_terminal_compensated', ...terminalLogContext(input) },
-      '[Sync] remote command terminal compensation written as unsynced',
+    console.error(
+      `[Sync] remote command terminal compensation written as unsynced (runId=${input.runId ?? 'none'}, taskId=${input.taskId ?? 'none'}, commandId=${input.commandId}, status=${input.status})`,
     )
     return { kind: 'compensated', error: initial.error }
   }
 
-  logger.error(
-    {
-      event: 'sync.remote_command_terminal_unsynced_marker_failed',
-      ...terminalLogContext(input),
-      error: compensation.error,
-    },
-    '[Sync] remote command terminal unsynced marker failed',
+  console.error(
+    `[Sync] remote command terminal unsynced marker failed (runId=${input.runId ?? 'none'}, taskId=${input.taskId ?? 'none'}, commandId=${input.commandId}, status=${input.status}):`,
+    compensation.error,
   )
   return { kind: 'unsynced', error: compensation.error }
 }
@@ -158,9 +142,9 @@ export async function finalizeRemoteCommand(
     status = 'failed'
     error = `Run terminal transition failed: ${transitionErrorMessage}`
     resultSummary = error
-    logger.error(
-      { event: 'sync.run_terminal_transition_failed', ...terminalLogContext(input), error: transitionErrorMessage },
-      '[Sync] run terminal transition failed',
+    console.error(
+      `[Sync] run terminal transition failed (runId=${input.runId ?? 'none'}, taskId=${input.taskId ?? 'none'}, commandId=${input.commandId}, status=${status}):`,
+      transitionErrorMessage,
     )
   }
 

@@ -297,13 +297,8 @@ async function main() {
     console.log(`\n✅ NSIS 安装包生成完成!`);
     console.log(`   输出目录: ${path.join(ROOT, 'dist_electron')}`);
   } catch (e) {
-    // AEX-P0-099/100: NSIS 失败必须 fail-fast（不再 warn-and-continue）。
-    // 此前 warn-and-continue 会让 release-all.js 带着「不完整安装包」继续上传 ——
-    // 发布资产缺失 Setup 时 release-all.js:179 会抛错，但此时便携版已在 dist_exe，
-    // 用户可能误以为「发布成功」；且 SHA256 清单会包含残缺文件。
-    // 安装包是发布资产的一等公民，失败即终止构建。
-    console.error(`\n❌ NSIS 安装包生成失败: ${e.message}`);
-    throw new Error(`NSIS 安装包生成失败（发布资产完整性要求，构建终止）: ${e.message}`);
+    console.error(`\n⚠ NSIS 安装包生成失败: ${e.message}`);
+    console.log(`   便携版仍可正常使用: ${DIST_DIR}`);
   }
 }
 

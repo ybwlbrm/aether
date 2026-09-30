@@ -46,10 +46,6 @@ export {
 
 // Run state machine (Aether 2.0)
 export {
-  RUN_STATUSES,
-  TERMINAL_RUN_STATUSES,
-  isTerminalRunStatus,
-  isValidRunTransition,
   type RunStatus,
   type RunMode,
   type RunEntity,
@@ -99,9 +95,6 @@ export {
   ToolRecoveryController,
   RetryCheckpoint,
   isToolRetryable,
-  isToolAutoRetryAllowed,
-  TOOL_SIDE_EFFECT_CLASSES,
-  DEFAULT_TOOL_SIDE_EFFECT_CLASS,
   type RetryEvent,
   type RetryEventPayload,
   type RetryEventType,
@@ -110,19 +103,7 @@ export {
   type RetrySleep,
   type RetryPredicate,
   type RetryType,
-  type ToolSideEffectClass,
   type ExecutionRetryOptions,
   type ToolRecoveryOptions,
   type ToolRecoveryRunOptions,
 } from './execution-retry.js'
-
-// Task completion evaluator（AEX-P0-001：Loop 完成判定的唯一权威实现）
-export {
-  evaluateTaskCompletion,
-  type CompletionStatus,
-  type CompletionToolCall,
-  type CompletionToolResult,
-  type CompletionResponse,
-  type CompletionVerdict,
-  type TaskCompletionEvaluator,
-} from './execution-completion.js'
