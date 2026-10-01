@@ -1,5 +1,11 @@
 import type { RealtimeChannel } from '@supabase/supabase-js';
-import { getClient, loadConfig, getCurrentUser, disposeClient } from './supabase-auth';
+import {
+  getClient,
+  loadConfig,
+  getCurrentUser,
+  disposeClient,
+  registerDevice,
+} from './supabase-auth';
 import { classifyError } from './supabase-errors';
 import {
   getSyncStatus,
@@ -20,6 +26,11 @@ import {
   type RemoteCommandSnapshot,
 } from '../lib/remote-command'
 import { type ChatMessage } from '../lib/message-store';
+import {
+  PendingConversationQueue,
+  buildConversationInsert,
+  newConversationId,
+} from '../lib/conversation-store';
 
 // 对外 re-export 同步状态 API（组件从 './api/supabase' 统一导入）
 export {
@@ -57,6 +68,8 @@ export const offlineQueue = new OfflineQueueManager(OFFLINE_QUEUE_KEY);
 /** 网络恢复信号：任意一次成功的数据读写后自动补传离线队列（含重入保护） */
 function autoFlushQueue(): void {
   void flushPendingQueue();
+  // 待建对话队列同样借网络恢复信号补传（fire-and-forget，重入由 flush 自身保护）
+  void flushPendingConversations();
 }
 
 /**
@@ -343,6 +356,185 @@ export async function uploadFile(file: File, bucket: string = 'chat-files'): Pro
     console.error(`[supabase] 上传文件失败 (${err.kind}):`, err.message);
     return null;
   }
+}
+
+// ============================================================
+// 新建对话落库（T5 / T9：移动端建对话 → conversations_sync）
+//
+// 失败降级语义照抄 sendCommand（§7/§10）：
+// - 网络不可用 → 入 pendingConversationQueue，返回 pending_sync（不是失败）
+// - 23505 已存在 → 重新读回该行，幂等视为 created（不重复入队）
+// - 其余（权限/结构/服务端）→ failed + message
+//
+// 用 insert 而非 upsert：upsert 会静默覆盖桌面端已建好的同 id 对话。
+// ============================================================
+
+const PENDING_CONVERSATION_QUEUE_KEY = 'aether_pending_conversations'
+
+/** 离线期间新建的对话队列（恢复联网后补传） */
+export const pendingConversationQueue = new PendingConversationQueue(
+  PENDING_CONVERSATION_QUEUE_KEY,
+  {
+    getItem: (k) => localStorage.getItem(k),
+    setItem: (k, v) => localStorage.setItem(k, v),
+    removeItem: (k) => localStorage.removeItem(k),
+  },
+)
+
+export type CreateConversationResult =
+  | { status: 'created'; conversation: ConversationRow }
+  | { status: 'pending_sync'; conversation: ConversationRow }
+  | { status: 'failed'; conversation: ConversationRow; message: string }
+
+/** insert payload → 本地 ConversationRow（user_id 由 DB 触发器填充，本地先留空） */
+function toLocalConversationRow(
+  payload: ReturnType<typeof buildConversationInsert>,
+): ConversationRow {
+  return {
+    id: payload.id,
+    title: payload.title,
+    model: payload.model,
+    message_count: payload.message_count,
+    user_id: null,
+    device_id: payload.device_id,
+    created_at: payload.created_at,
+    updated_at: payload.updated_at,
+  }
+}
+
+/** classifyError 的返回类型（避免重复声明错误形状） */
+type ClassifiedSupabaseError = ReturnType<typeof classifyError>;
+
+/** 23505（主键冲突）判定：该对话已存在（可能是桌面端或本端之前建的） */
+function isDuplicateConversation(error: ClassifiedSupabaseError): boolean {
+  return error.kind === 'conflict' && error.code === '23505'
+}
+
+/** 入队并返回 pending_sync（队列满时降级为 failed） */
+function enqueuePendingConversation(
+  payload: ReturnType<typeof buildConversationInsert>,
+): CreateConversationResult {
+  const conversation = toLocalConversationRow(payload)
+  const queued = pendingConversationQueue.enqueue({
+    id: payload.id,
+    title: payload.title,
+    created_at: payload.created_at,
+    attempts: 0,
+  })
+  if (queued) {
+    console.warn('[supabase] 网络不可用，新对话已入待建队列待补传')
+    return { status: 'pending_sync', conversation }
+  }
+  return { status: 'failed', conversation, message: '离线队列已满，新建对话未能保存' }
+}
+
+/**
+ * 新建对话并落库到 conversations_sync（§7 风格的降级语义）。
+ * @param opts.id 缺省自动生成；传入时用于 UI 乐观 id 与幂等重试
+ * @param opts.title 缺省 '新对话'
+ */
+export async function createConversation(
+  opts?: { id?: string; title?: string },
+): Promise<CreateConversationResult> {
+  const sb = getClient();
+  const cfg = loadConfig();
+  const user = getCurrentUser();
+  const id = opts?.id ?? newConversationId();
+  const payload = buildConversationInsert({ id, deviceId: cfg?.deviceId ?? '', title: opts?.title });
+  if (!sb || !cfg) {
+    console.warn('[supabase] 新建对话失败：Supabase 未配置');
+    return { status: 'failed', conversation: toLocalConversationRow(payload), message: 'Supabase 未配置' };
+  }
+  if (!user) {
+    console.warn('[supabase] 新建对话失败：未登录');
+    return { status: 'failed', conversation: toLocalConversationRow(payload), message: '未登录' };
+  }
+
+  // device_id 是 conversations_sync → devices 的外键（supabase-schema.sql:21）：
+  // 未注册设备时插入必遭 23503，先确保 devices 行存在再落库。
+  const deviceReady = await registerDevice();
+  if (!deviceReady) {
+    // 无法确保 devices 行，插入注定 FK 失败 → 直接入队等补传
+    console.warn('[supabase] 设备未注册，新对话入待建队列')
+    return enqueuePendingConversation(payload)
+  }
+
+  try {
+    const { data, error } = await sb
+      .from('conversations_sync')
+      .insert(payload)
+      .select('*')
+      .single();
+    if (error) throw error;
+
+    const conversation = data as ConversationRow;
+    markSynced();
+    // 网络恢复信号：对话已落库，顺带补传其他离线队列
+    autoFlushQueue();
+    return { status: 'created', conversation };
+  } catch (e) {
+    const err = classifyError(e);
+    if (err.kind === 'network') return enqueuePendingConversation(payload);
+    if (isDuplicateConversation(err)) {
+      // 幂等成功：读回已存在的行，不重复入队
+      const { data: existing, error: readError } = await sb
+        .from('conversations_sync')
+        .select('*')
+        .eq('id', id)
+        .limit(1);
+      const row = (existing && existing[0]) as ConversationRow | undefined;
+      if (!readError && row) {
+        console.log(`[supabase] 对话已存在，幂等返回 (${id})`);
+        return { status: 'created', conversation: row };
+      }
+    }
+    console.error(`[supabase] 新建对话失败 (${err.kind}):`, err.message);
+    return { status: 'failed', conversation: toLocalConversationRow(payload), message: err.message };
+  }
+}
+
+/**
+ * 补传离线期间新建的对话（§10 同款 sender 语义）。
+ * - 插入成功或已存在（23505）→ 移除队列条目
+ * - 网络不可用 → retry（attempts+1，超限由队列丢弃）
+ * - 其余错误 → failed（保留待下次）
+ * @returns 本次成功补传的对话数
+ */
+export async function flushPendingConversations(): Promise<number> {
+  const sb = getClient();
+  const cfg = loadConfig();
+  if (!sb || !cfg) return 0;
+  if (pendingConversationQueue.getPending().length === 0) return 0;
+
+  const deviceReady = await registerDevice();
+  if (!deviceReady) {
+    console.warn('[supabase] 设备未注册，暂缓补传待建对话')
+    return 0
+  }
+
+  return pendingConversationQueue.flush(async (entry) => {
+    try {
+      const { error } = await sb
+        .from('conversations_sync')
+        .insert(buildConversationInsert({
+          id: entry.id,
+          deviceId: cfg.deviceId,
+          title: entry.title,
+          now: entry.created_at,
+        }));
+      if (error) throw error;
+      return 'sent';
+    } catch (e) {
+      const err = classifyError(e);
+      if (isDuplicateConversation(err)) return 'sent';
+      if (err.kind === 'network') {
+        console.warn('[supabase] 补传待建对话失败：网络不可用，稍后重试');
+        return 'retry';
+      }
+      console.error(`[supabase] 补传待建对话失败 (${err.kind}):`, err.message);
+      return 'failed';
+    }
+  });
 }
 
 /** 删除对话（从 Supabase 级联删除） */

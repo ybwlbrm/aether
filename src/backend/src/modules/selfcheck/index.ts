@@ -1,16 +1,16 @@
 import type { FastifyInstance } from 'fastify';
 import type { BackendConfig } from '../../config/index.js';
-import { existsSync, readdirSync, statSync, readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
 import { getDb } from '../../db/client.js';
-import { providers, conversations, messages } from '../../db/schema/index.js';
-import { getSettings } from '../../lib/dal.js';
 // P0-31: VerificationEngine（AI Task Verification 层）—— 与 System Health 分离的双层自检
 import { createVerificationEngine } from '../../core/verification/verification-engine.js';
 import { createProductionVerificationExecutors } from '../../lib/verification-engine.js';
 // P0-32: SelfCorrectionEngine（自我纠错闭环）
 import { createSelfCorrectionEngine, type SelfCorrectionInput } from '../../core/verification/self-correction-engine.js';
 import { buildRuntimeForProvider } from '../../lib/model-runtime-bridge.js';
+// 诉求3「一键修复」：步骤批次执行器 + 合法步骤 id 清单
+import { findStepId, runRepairSteps } from './repair-steps.js';
+// System Health 报告构建（GET /api/selfcheck 与 POST /api/selfcheck/repair 共用同一份）
+import { buildSelfCheckReport } from './selfcheck-report.js';
 
 export function registerSelfCheckRoutes(app: FastifyInstance, config: BackendConfig): void {
 
@@ -166,168 +166,52 @@ export function registerSelfCheckRoutes(app: FastifyInstance, config: BackendCon
     return { ok: true, ...result };
   });
 
-  // 运行 AI 自检（System Health 层）
+// 运行 AI 自检（System Health 层）—— 报告构建见 selfcheck-report.ts（POST /repair 复用同一份）
   app.get('/api/selfcheck', {
     schema: { description: '运行 AI 自检，检查项目完整性', tags: ['自检'] },
-  }, async () => {
-    const checks: { name: string; status: 'ok' | 'warn' | 'error'; detail: string }[] = [];
-    let errors = 0;
-    let warnings = 0;
+  }, async () => buildSelfCheckReport(config));
 
-    // 1. 检查 data 目录完整性
-    const dataDir = config.dataDir;
-    if (!existsSync(dataDir)) {
-      checks.push({ name: '数据目录', status: 'error', detail: '数据目录不存在' });
-      errors++;
-    } else {
-      const dbPath = resolve(dataDir, 'pacc.db');
-      if (!existsSync(dbPath)) {
-        checks.push({ name: '数据库文件', status: 'warn', detail: 'pacc.db 不存在，将在首次启动时创建' });
-        warnings++;
-      } else {
-        try {
-          const stats = statSync(dbPath);
-          checks.push({ name: '数据库文件', status: 'ok', detail: `${(stats.size / 1024).toFixed(1)} KB` });
-        } catch (e: unknown) {
-          checks.push({ name: '数据库文件', status: 'error', detail: `无法读取: ${(e instanceof Error ? e.message : String(e))}` });
-          errors++;
-        }
-      }
-      // 检查 settings.json
-      const settingsPath = resolve(dataDir, 'settings.json');
-      if (existsSync(settingsPath)) {
-        try {
-          const raw = readFileSync(settingsPath, 'utf-8');
-          JSON.parse(raw);
-          checks.push({ name: '设置文件', status: 'ok', detail: 'settings.json 格式正确' });
-        } catch {
-          checks.push({ name: '设置文件', status: 'error', detail: 'settings.json 格式损坏' });
-          errors++;
-        }
-      } else {
-        checks.push({ name: '设置文件', status: 'warn', detail: 'settings.json 不存在，将使用默认值' });
-        warnings++;
+  // 诉求3「一键修复」：执行修复步骤批次，回传逐条结果 + 修复后的自检报告。
+  // steps 省略 → 跑全部步骤；给出则只跑指定 id，未知 id 直接 400（不静默忽略，避免前端以为修过了）。
+  app.post('/api/selfcheck/repair', {
+    schema: {
+      description: '一键修复（P0-35：落盘/孤立数据/陈旧Run/缓存/同步监听恢复）',
+      tags: ['自检'],
+      body: {
+        type: 'object',
+        properties: {
+          steps: { type: 'array', items: { type: 'string' } },
+        },
+      },
+    },
+  }, async (request, reply) => {
+    const body = request.body as { steps?: string[] } | undefined;
+    const stepIds = Array.isArray(body?.steps) ? body.steps : undefined;
+    if (stepIds !== undefined) {
+      // 用 findStepId 解析（连字符/下划线等价 + db_flush 等别名），与 runRepairSteps 内部一致；
+      // 未知 id 直接 400，绝不静默忽略（避免前端以为修过了）。
+      const unknown = stepIds.filter(id => findStepId(id) === null);
+      if (unknown.length > 0) {
+        return reply.code(400).send({ error: { message: `未知的修复步骤: ${unknown.join(', ')}` } });
       }
     }
 
-    // 2. 检查 Provider 配置
-    try {
-      const db = getDb();
-      const allProviders = db.select().from(providers).all();
-      if (allProviders.length === 0) {
-        checks.push({ name: 'AI Provider', status: 'warn', detail: '未配置任何 AI Provider' });
-        warnings++;
-      } else {
-        // P1-6 修复：DB 中存储的是 AES 加密后的密文（enc:... 前缀），永远不会等于
-        // '***encrypted***' 掩码。原逻辑把「密文非空」都算作已配置，空 apiKey 也被统计。
-        // 正确判断：apiKey 非空且（是加密格式 或 明显为有效密钥形状）
-        const configured = allProviders.filter(p =>
-          p.apiKey
-          && p.apiKey.trim() !== ''
-          && p.apiKey !== '***encrypted***'
-          && !p.apiKey.startsWith('enc::') // 空 IV 的异常格式视作无效
-        ).length;
-        if (configured === 0) {
-          checks.push({ name: 'AI Provider', status: 'warn', detail: `${allProviders.length} 个 Provider 但无有效 API Key` });
-          warnings++;
-        } else {
-          checks.push({ name: 'AI Provider', status: 'ok', detail: `${configured}/${allProviders.length} 个已配置 API Key` });
-        }
-      }
-    } catch (e: unknown) {
-      checks.push({ name: 'AI Provider', status: 'error', detail: `读取失败: ${(e instanceof Error ? e.message : String(e))}` });
-      errors++;
-    }
-
-    // 3. 检查对话数据完整性
-    try {
-      const db = getDb();
-      const convs = db.select().from(conversations).all();
-      const msgs = db.select().from(messages).all();
-      // 检查是否有孤立消息（conversation 不存在的消息）
-      const convIds = new Set(convs.map(c => c.id));
-      const orphanMsgs = msgs.filter(m => !convIds.has(m.conversationId));
-      if (orphanMsgs.length > 0) {
-        checks.push({ name: '数据完整性', status: 'warn', detail: `${orphanMsgs.length} 条孤立消息（无对应对话）` });
-        warnings++;
-      } else {
-        checks.push({ name: '数据完整性', status: 'ok', detail: `${convs.length} 个对话, ${msgs.length} 条消息` });
-      }
-    } catch (e: unknown) {
-      checks.push({ name: '数据完整性', status: 'error', detail: `检查失败: ${(e instanceof Error ? e.message : String(e))}` });
-      errors++;
-    }
-
-    // 4. 检查 workspace 目录
-    const workspacePath = resolve(process.cwd(), 'workspace');
-    if (existsSync(workspacePath)) {
-      try {
-        const entries = readdirSync(workspacePath);
-        checks.push({ name: '工作区目录', status: 'ok', detail: `${entries.length} 个条目` });
-      } catch (e: unknown) {
-        checks.push({ name: '工作区目录', status: 'error', detail: `无法读取: ${(e instanceof Error ? e.message : String(e))}` });
-        errors++;
-      }
-    } else {
-      checks.push({ name: '工作区目录', status: 'warn', detail: 'workspace 目录不存在' });
-      warnings++;
-    }
-
-    // 5. 检查依赖完整性
-    // P1-15 修复：从根目录看 package.json，而不是假定 process.cwd() 是项目根
-    // 当从 src/backend 启动时 cwd 为 D:\...\src\backend，向上找两层到项目根
-    let pkgJsonPath = resolve(process.cwd(), '..', '..', 'package.json');
-    if (!existsSync(pkgJsonPath)) pkgJsonPath = resolve(process.cwd(), 'package.json');
-    if (existsSync(pkgJsonPath)) {
-      try {
-        const pkg = JSON.parse(readFileSync(pkgJsonPath, 'utf-8'));
-        const deps = { ...pkg.dependencies, ...pkg.devDependencies };
-        const projectRoot = resolve(pkgJsonPath, '..'); // 从 package.json 所在目录找 node_modules
-        const missingDeps: string[] = [];
-        for (const [name] of Object.entries(deps)) {
-          const modPath = resolve(projectRoot, 'node_modules', name as string);
-          if (!existsSync(modPath)) {
-            missingDeps.push(name as string);
-          }
-        }
-        if (missingDeps.length > 0) {
-          checks.push({ name: '依赖完整性', status: 'error', detail: `缺少 ${missingDeps.length} 个依赖: ${missingDeps.slice(0, 5).join(', ')}` });
-          errors++;
-        } else {
-          checks.push({ name: '依赖完整性', status: 'ok', detail: `所有 ${Object.keys(deps).length} 个依赖已安装` });
-        }
-      } catch (e: unknown) {
-        checks.push({ name: '依赖完整性', status: 'error', detail: `无法读取 package.json: ${(e instanceof Error ? e.message : String(e))}` });
-        errors++;
-      }
-    }
-
-    // 6. 检查敏感文件权限（防止意外暴露）
-    const sensitivePaths = ['settings.json', 'pacc.db', '.env'];
-    for (const sp of sensitivePaths) {
-      const fullPath = resolve(dataDir, sp);
-      if (existsSync(fullPath)) {
-        try {
-          const stats = statSync(fullPath);
-          // Windows 上检查权限较复杂，简单检查文件是否可被其他用户读取
-          checks.push({ name: `文件安全: ${sp}`, status: 'ok', detail: `${(stats.size / 1024).toFixed(1)} KB` });
-        } catch {
-          checks.push({ name: `文件安全: ${sp}`, status: 'warn', detail: '无法检查权限' });
-          warnings++;
-        }
-      }
-    }
-
+    const steps = await runRepairSteps({ config }, stepIds);
     return {
       timestamp: new Date().toISOString(),
       summary: {
-        total: checks.length,
-        ok: checks.filter(c => c.status === 'ok').length,
-        warn: warnings,
-        error: errors,
-        passed: errors === 0,
+        total: steps.length,
+        fixed: steps.filter(s => s.outcome === 'fixed').length,
+        alreadyHealthy: steps.filter(s => s.outcome === 'already-healthy').length,
+        skipped: steps.filter(s => s.outcome === 'skipped').length,
+        failed: steps.filter(s => s.outcome === 'failed').length,
       },
-      checks,
+      steps,
+      // 修复后立刻回传同一份自检报告，前端可在同一次响应里刷新健康度而无需二次请求
+      selfcheck: await buildSelfCheckReport(config),
     };
   });
 }
+
+export { buildSelfCheckReport } from './selfcheck-report.js';
+export type { SelfCheckItem, SelfCheckReport } from './selfcheck-report.js';

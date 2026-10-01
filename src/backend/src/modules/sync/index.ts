@@ -1,8 +1,8 @@
 import type { FastifyInstance } from 'fastify';
 import type { BackendConfig } from '../../config/index.js';
 import { registerSyncConfigRoutes } from './sync-config.js';
-import { setupRealtimeListener } from './realtime.js';
-import { getSyncConfig, getSupabaseClient, setSupabaseClient, getRealtimeChannel, setRealtimeChannel } from './sync-config.js';
+import { ensureSyncRuntime } from './sync-runtime.js';
+import { getSyncConfig, getSupabaseClient } from './sync-config.js';
 
 // ============================================================
 // 统一路由注册入口（保持原有导出签名，供 app.ts 导入）
@@ -12,14 +12,10 @@ export function registerSyncRoutes(app: FastifyInstance, config: BackendConfig):
   // 先注册配置相关路由（会初始化 syncConfig）
   registerSyncConfigRoutes(app, config);
 
-  // 如果已有配置，启动 Realtime 监听
-  const syncConfig = getSyncConfig();
-  if (syncConfig) {
-    const sb = getSupabaseClient();
-    if (sb) {
-      setupRealtimeListener(sb, syncConfig, config).catch(() => {});
-    }
-  }
+  // 如果已有配置，启动 Realtime 监听（幂等；fire-and-forget 不阻塞启动）
+  void ensureSyncRuntime(config).catch((e: unknown) => {
+    console.warn('[Sync] Realtime 监听启动失败:', e instanceof Error ? e.message : String(e));
+  });
 
   // ============================================================
   // 前端轮询接口：按 commandId 查询命令状态（供 CodingHome 自动打开对话）
@@ -135,6 +131,12 @@ export {
 } from './sync-config.js';
 
 export { setupRealtimeListener } from './realtime.js';
+
+export {
+  ensureSyncRuntime,
+  getSyncRuntimeHealth,
+  type SyncRuntimeHealth,
+} from './sync-runtime.js';
 
 export { startPollingFallback, type PollingFallbackOptions, type PollingFallbackHandle } from './polling-fallback.js';
 

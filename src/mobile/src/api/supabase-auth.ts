@@ -23,7 +23,7 @@ const DEVICE_ID_KEY = 'aether_device_id';
 
 interface SyncConfig {
   supabaseUrl: string;
-  /** anon key（可公开），不再存储 service_role key */
+  /** anon key（可公开），不再存储高权限服务端密钥 */
   anonKey: string;
   deviceId: string;
   deviceName?: string;

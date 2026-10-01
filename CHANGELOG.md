@@ -1,5 +1,27 @@
 # Changelog
 
+## [2.3.1] - 2026-10-01 · 移动端新建对话 + 一键修复（同步可靠性）
+
+### Added（新增）
+- **移动端「新建对话」落库**：`src/mobile/src/api/supabase.ts` 新增 `createConversation()` / `flushPendingConversations()` —— 新建对话立即写入 Supabase `conversations_sync`（RLS 允许 authenticated INSERT），列表刷新即见；离线时入 `aether_pending_conversations` 队列，网络恢复自动补传
+- **移动端离线对话队列**：`src/mobile/src/lib/conversation-store.ts`（PendingConversationQueue，幂等/24h 过期/重试上限/重入守卫，纯函数可测）
+- **桌面端「一键修复」**：`POST /api/selfcheck/repair`（8 步：落盘重试 / 孤立消息清理 / 崩溃遗留 Run 恢复 / 孤立工作流修复 / 幽灵序号清理 / 内存缓存重置 / 临时文件清理 / 恢复同步监听），返回逐步骤报告 + 修复后自检快照
+- **同步运行时助手**：`src/backend/src/modules/sync/sync-runtime.ts`（`ensureSyncRuntime` / `getSyncRuntimeHealth`，幂等 + 并发守卫）
+- **前端一键修复 UI**：`SelfCheck.tsx` 新增「一键修复」按钮 + 修复结果面板（每步骤状态图标/中文标签/详情），移除页面所有 `any`
+
+### Changed（变更）
+- **`POST /api/sync/config` 保存后立即启动 Realtime 监听**（原实现仅启动时执行一次，导致「配置成功但手机命令永不被消费」——修复响应如实反映 `realtimeStarted`）
+- **`GET /api/selfcheck` 新增「远程同步」检查**：未配置=error（提示去设置→同步连接）、已配置未监听=warn（提示一键修复）
+- `src/mobile/src/App.tsx`：`handleNewCommand` 乐观进入聊天页 + 后台落库 + 启动时补传离线对话；`generateConvId` 收敛到 `newConversationId()`
+
+### Fixed（修复）
+- 移动端新建对话不持久化（列表看不到新对话）
+- 运行时保存同步配置后 Realtime 监听不启动（手机端命令永远 pending 直至超时）
+- 自检端点 `steps: ["db_flush"]` 等别名无法解析（HTTP 层改用 `findStepId`，连字符/下划线等价）
+
+### 测试基线
+- backend 1284（+7：sync-runtime 8、repair-steps 11、selfcheck 7）/ frontend 83（+4：SelfCheck UI）/ mobile 50（+11：conversation-store）全绿
+
 ## [2.3.0] - 2026-09-23 · 全项目最终整改与架构收口版
 
 ### 架构收口（四个统一）

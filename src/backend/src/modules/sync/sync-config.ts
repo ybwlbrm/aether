@@ -403,7 +403,24 @@ export function registerSyncConfigRoutes(app: FastifyInstance, config: BackendCo
       // P1-14: 配置保存后立即走身份闭环（Supabase Auth → UID → 设备绑定 → 本地持久化），
       // 确保 sync-config.json 中 userId 不为空，后续上传/下载都使用该 UID。
       const boundUserId = await ensureIdentityThenRegister(sb, syncConfig);
-      // Realtime listener will be set up by registerSyncRoutes after importing
+      // P1-18 修复：配置在运行时保存后必须立即启动 Realtime 监听。
+      // 原实现在此仅 setRealtimeChannel(null) 并依赖 registerSyncRoutes（仅启动时执行一次），
+      // 导致「保存配置成功但命令永不被消费」——手机端命令永远 pending 直到超时。
+      // 位置约束：必须在 ensureIdentityThenRegister 之后（设备注册完成）、
+      // 在 syncConversationsToSupabase 之前（保持 BE-SQ-01 的 FK 依赖顺序）。
+      //
+      // 用延迟 import 而非顶层 import：sync-runtime.ts 反向 import 本文件，
+      // 顶层 import 会形成 sync-config ↔ sync-runtime 循环，并让 realtime.js 在
+      // sync-runtime.test.ts 注册 mock 之前就被求值（打桩失效）。延迟 import 彻底断环。
+      // 失败降级而非 500：配置已落盘、身份已绑定，监听失败只应体现在响应里。
+      let runtimeStarted = false;
+      try {
+        const { ensureSyncRuntime } = await import('./sync-runtime.js');
+        runtimeStarted = await ensureSyncRuntime(config);
+      } catch (e: unknown) {
+        console.warn('[Sync] 配置保存后 Realtime 监听启动失败:',
+          e instanceof Error ? e.message : String(e));
+      }
       // 连接成功后全量同步本地对话（手机端立即可见所有历史对话）
       // BE-UA-02: 连接后全量同步 fire-and-forget → await 确保错误可感知，同时不阻塞响应
       const syncResult = await syncConversationsToSupabase(sb, syncConfig);
@@ -424,7 +441,15 @@ export function registerSyncConfigRoutes(app: FastifyInstance, config: BackendCo
       const response = buildSyncResponse({
         conversations: `同步 ${syncResult.ok} 条消息，${syncResult.fail} 条失败`,
       });
-      return { ...response, message: '同步配置已保存，Realtime 监听已启动', deviceId: syncConfig.deviceId, userId: syncConfig.userId ?? null };
+      // 响应如实反映 Realtime 监听真实结果 —— 旧实现在此处硬编码「已启动」，
+      // 而实际 realtimeChannel 始终为 null（谎言会掩盖手机端命令不被消费的真因）。
+      return {
+        ...response,
+        message: `同步配置已保存，Realtime 监听${runtimeStarted ? '已启动' : '启动失败'}`,
+        realtimeStarted: runtimeStarted,
+        deviceId: syncConfig.deviceId,
+        userId: syncConfig.userId ?? null,
+      };
     } catch (e: unknown) {
       return reply.code(500).send({ error: `连接失败: ${e instanceof Error ? e.message : String(e)}` });
     }

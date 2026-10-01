@@ -160,6 +160,54 @@ function cleanupMergedSignals(a?: AbortSignal, b?: AbortSignal): void {
   }
 }
 
+// —— SelfCheck（AI 自检）响应契约 ——
+// 与后端 src/backend/src/modules/selfcheck/selfcheck-report.ts 的 SelfCheckReport 同构。
+export interface SelfCheckItem {
+  name: string;
+  status: 'ok' | 'warn' | 'error';
+  detail: string;
+}
+
+/** GET /api/selfcheck 的响应体，也是 repair 响应中的 selfcheck 字段。 */
+export interface SelfCheckResult {
+  timestamp: string;
+  summary: {
+    total: number;
+    ok: number;
+    warn: number;
+    error: number;
+    passed: boolean;
+  };
+  checks: SelfCheckItem[];
+}
+
+/**
+ * 单步修复结果 —— 与后端 repair-steps.ts 的 RepairOutcome / RepairStepResult 同构。
+ * 前端按 outcome 决定图标、颜色与中文标签，detail 直接展示后端给出的原因。
+ */
+export interface RepairStep {
+  id: string;
+  label: string;
+  outcome: 'fixed' | 'already-healthy' | 'skipped' | 'failed';
+  changed: number;
+  detail: string;
+}
+
+/** POST /api/selfcheck/repair 的响应体。 */
+export interface RepairReport {
+  timestamp: string;
+  summary: {
+    total: number;
+    fixed: number;
+    alreadyHealthy: number;
+    skipped: number;
+    failed: number;
+  };
+  steps: RepairStep[];
+  /** 修复后立刻回传的自检报告，前端同一次响应即可刷新健康度。 */
+  selfcheck: SelfCheckResult;
+}
+
 // API 方法
 export const api = {
   // 健康检查
@@ -316,7 +364,14 @@ export const api = {
   getTokenStats: () => request<any>('/monitoring/tokens'),
 
   // SelfCheck（AI 自检）
-  runSelfCheck: () => request<any>('/selfcheck'),
+  runSelfCheck: () => request<SelfCheckResult>('/selfcheck'),
+  // 一键修复：steps 省略 → 后端跑全部修复步骤；60s 超时（落盘 + 同步监听恢复可能较慢）
+  runRepair: (steps?: string[]) =>
+    request<RepairReport>('/selfcheck/repair', {
+      method: 'POST',
+      body: JSON.stringify(steps ? { steps } : {}),
+      timeout: 60000,
+    }),
 
   // Skills（技能管理）
   getSkills: () => request<any>('/skills'),

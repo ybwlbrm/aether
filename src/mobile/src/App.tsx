@@ -8,7 +8,13 @@ import {
   onAuthStateChange,
   registerDevice,
   cleanup,
+  createConversation,
+  flushPendingConversations,
 } from './api/supabase';
+import {
+  newConversationId,
+  DEFAULT_CONVERSATION_TITLE,
+} from './lib/conversation-store';
 import ConversationList from './components/ConversationList';
 import MessageView from './components/MessageView';
 import AppearanceSettings from './components/AppearanceSettings';
@@ -30,12 +36,6 @@ interface Conversation {
 
 // §29 Auth 启动状态
 type AuthState = 'checking' | 'authenticated' | 'unauthenticated' | 'error';
-
-function generateConvId(): string {
-  return typeof crypto !== 'undefined' && crypto.randomUUID
-    ? crypto.randomUUID()
-    : 'remote-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8);
-}
 
 export default function App() {
   const [page, setPage] = useState<Page>('auth');
@@ -94,6 +94,8 @@ export default function App() {
           if (!registered) {
             setStatusMsg('设备注册失败，远程命令可能无法下发');
           }
+          // 补传离线期间新建的对话（flush 内部自会校验设备就绪，失败安全）
+          void flushPendingConversations();
           setPage('home');
         } else {
           setAuthState('unauthenticated');
@@ -137,17 +139,25 @@ export default function App() {
     setPage('chat');
   };
 
-  // §4：统一新指令入口 → 创建新 conversation 进入统一 Chat（不再进旧 NewCommand）
+  // §4：统一新指令入口 → 乐观创建新 conversation 落库 + 进入统一 Chat（不再进旧 NewCommand）
   const handleNewCommand = () => {
     const now = new Date().toISOString();
-    const newConv: Conversation = {
-      id: generateConvId(),
-      title: '新对话',
+    const localConv: Conversation = {
+      id: newConversationId(),
+      title: DEFAULT_CONVERSATION_TITLE,
       created_at: now,
       updated_at: now,
     };
-    setSelectedConv(newConv);
+    // 乐观导航：立即进入 Chat，不 await 落库
+    setSelectedConv(localConv);
     setPage('chat');
+    // 后台落库：离线时进入待建队列，恢复连接后由 flushPendingConversations 补传
+    void createConversation({ id: localConv.id, title: localConv.title }).then((result) => {
+      if (result.status === 'pending_sync') {
+        setStatusMsg('当前离线，对话将在恢复连接后同步');
+        setTimeout(() => setStatusMsg(''), 2500);
+      }
+    });
   };
 
   const handleBack = () => {
